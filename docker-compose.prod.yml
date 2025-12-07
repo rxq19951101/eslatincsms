@@ -1,9 +1,10 @@
 #
 # 生产环境 Docker Compose 配置
 # 用于部署运营平台和后端服务到生产服务器
+# 兼容 docker-compose version 2 格式
 #
 
-version: "3.9"
+version: "2"
 
 services:
   db:
@@ -40,6 +41,25 @@ services:
       timeout: 3s
       retries: 5
 
+  mqtt-broker:
+    image: eclipse-mosquitto:latest
+    container_name: ocpp-mqtt-prod
+    ports:
+      - "${MQTT_BROKER_PORT:-1883}:1883"
+    volumes:
+      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - mqtt_data:/mosquitto/data
+      - mqtt_logs:/mosquitto/log
+    networks:
+      - ocppnet
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "mosquitto_pub -h localhost -t test -m test || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
   csms:
     build:
       context: ./csms
@@ -51,13 +71,24 @@ services:
       - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
       - PORT=9000
       - DATABASE_URL=${DATABASE_URL}
+      - MQTT_BROKER_HOST=${MQTT_BROKER_HOST:-mqtt-broker}
+      - MQTT_BROKER_PORT=${MQTT_BROKER_PORT:-1883}
+      - MQTT_USERNAME=${MQTT_USERNAME:-}
+      - MQTT_PASSWORD=${MQTT_PASSWORD:-}
+      - MQTT_TOPIC_PREFIX=${MQTT_TOPIC_PREFIX:-ocpp}
+      - ENABLE_MQTT_TRANSPORT=${ENABLE_MQTT_TRANSPORT:-true}
+      - ENABLE_WEBSOCKET_TRANSPORT=${ENABLE_WEBSOCKET_TRANSPORT:-false}
+      - ENABLE_HTTP_TRANSPORT=${ENABLE_HTTP_TRANSPORT:-false}
+      - SECRET_KEY=${SECRET_KEY}
+      - ENVIRONMENT=${ENVIRONMENT:-production}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - LOG_FORMAT=${LOG_FORMAT:-json}
     volumes:
       - ./logs:/var/log/csms
     depends_on:
-      db:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
+      - db
+      - redis
+      - mqtt-broker
     networks:
       - ocppnet
     restart: always
@@ -91,8 +122,9 @@ services:
 volumes:
   postgres_data:
   redis_data:
+  mqtt_data:
+  mqtt_logs:
 
 networks:
   ocppnet:
     driver: bridge
-
