@@ -1,0 +1,36 @@
+{
+  "expo": {
+    "name": "OCPP Expo App",
+    "slug": "ocpp-expo-app",
+    "scheme": "ocpp",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "platforms": ["ios", "android", "web"],
+    "splash": {
+      "backgroundColor": "#ffffff",
+      "resizeMode": "contain"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSCameraUsageDescription": "需要相机权限以扫描充电桩二维码",
+        "NSLocationWhenInUseUsageDescription": "需要定位权限以显示附近充电桩"
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#ffffff"
+      },
+      "permissions": [
+        "CAMERA",
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_COARSE_LOCATION"
+      ]
+    },
+    "web": {
+      "bundler": "metro"
+    }
+  }
+}
+
+

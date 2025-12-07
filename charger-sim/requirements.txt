@@ -1,0 +1,10 @@
+#
+# 本文件列出 charger-sim 模拟器所需 Python 依赖。
+# 使用 websockets 实现简易 OCPP 消息发送。
+
+websockets==12.0
+qrcode[pil]==7.4.2
+requests==2.31.0
+paho-mqtt==2.1.0
+
+

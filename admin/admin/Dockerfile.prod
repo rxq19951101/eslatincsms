@@ -1,0 +1,52 @@
+#
+# 生产环境 Dockerfile：用于构建 admin (Next.js 14) 生产镜像
+# 使用多阶段构建，先构建应用，再运行生产服务器
+#
+
+# 构建阶段
+FROM node:20-alpine AS builder
+
+WORKDIR /app
+
+# 复制依赖文件
+COPY package*.json ./
+COPY tsconfig.json next.config.js next-env.d.ts ./
+
+# 安装依赖
+RUN npm ci --no-audit --no-fund
+
+# 复制源代码
+COPY app ./app
+
+# 构建应用
+RUN npm run build
+
+# 生产运行阶段
+FROM node:20-alpine AS runner
+
+WORKDIR /app
+
+ENV NODE_ENV=production
+ENV PORT=3000
+
+# 创建非root用户
+RUN addgroup --system --gid 1001 nodejs && \
+    adduser --system --uid 1001 nextjs
+
+# 从构建阶段复制必要文件
+COPY --from=builder /app/package*.json ./
+COPY --from=builder /app/next.config.js ./
+COPY --from=builder /app/tsconfig.json ./
+COPY --from=builder /app/next-env.d.ts ./
+COPY --from=builder --chown=nextjs:nodejs /app/.next ./.next
+COPY --from=builder --chown=nextjs:nodejs /app/app ./app
+
+# 只安装生产依赖
+RUN npm ci --only=production --no-audit --no-fund
+
+USER nextjs
+
+EXPOSE 3000
+
+CMD ["npm", "run", "start"]
+
