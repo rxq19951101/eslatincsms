@@ -2,7 +2,7 @@
 # 本文件用于构建 csms 服务镜像：基于 Python 3.11-slim 运行 FastAPI 应用。
 # 暴露端口 9000，并通过 uvicorn 启动。
 
-FROM python:3.11-slim
+FROM crpi-91mj2uog7kuti6ie.cn-hangzhou.personal.cr.aliyuncs.com/eslatin/python:3.11-slim
 
 WORKDIR /app
 

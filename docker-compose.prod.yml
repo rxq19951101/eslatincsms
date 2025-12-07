@@ -42,7 +42,7 @@ services:
       retries: 5
 
   mqtt-broker:
-    image: eclipse-mosquitto:latest
+    image: crpi-91mj2uog7kuti6ie.cn-hangzhou.personal.cr.aliyuncs.com/eslatin/eclipse-mosquitto:latest
     container_name: ocpp-mqtt-prod
     ports:
       - "${MQTT_BROKER_PORT:-1883}:1883"

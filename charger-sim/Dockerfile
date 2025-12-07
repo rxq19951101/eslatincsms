@@ -2,7 +2,7 @@
 # 本文件用于构建 charger-sim 模拟器镜像：运行 Python 脚本。
 # 默认命令发送一轮标准消息序列。
 
-FROM python:3.11-slim
+FROM crpi-91mj2uog7kuti6ie.cn-hangzhou.personal.cr.aliyuncs.com/eslatin/python:3.11-slim
 
 WORKDIR /app
 

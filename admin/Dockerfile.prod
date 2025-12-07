@@ -4,7 +4,7 @@
 #
 
 # 构建阶段
-FROM node:20-alpine AS builder
+FROM crpi-91mj2uog7kuti6ie.cn-hangzhou.personal.cr.aliyuncs.com/eslatin/node:20-alpine AS builder
 
 WORKDIR /app
 
@@ -22,7 +22,7 @@ COPY app ./app
 RUN npm run build
 
 # 生产运行阶段
-FROM node:20-alpine AS runner
+FROM crpi-91mj2uog7kuti6ie.cn-hangzhou.personal.cr.aliyuncs.com/eslatin/node:20-alpine AS runner
 
 WORKDIR /app
 
