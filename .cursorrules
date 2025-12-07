@@ -1,0 +1,35 @@
+# Cursor Rules for ESLatin CSMS Project
+
+## Documentation Policy
+
+**IMPORTANT: Do NOT create or generate Markdown (.md) documentation files unless explicitly requested by the user.**
+
+### Rules:
+1. **No automatic documentation generation**: Do not create README.md, CHANGELOG.md, or any other .md files unless the user explicitly asks for them.
+2. **Code comments are preferred**: Use code comments and docstrings instead of separate documentation files.
+3. **Wait for user request**: Only generate documentation when the user explicitly requests it, typically after the service/feature is complete.
+4. **Documentation location**: If documentation is needed, it should be placed in the `docs/` directory, not in service directories (app/, admin/, charger-sim/, csms/).
+5. **All existing .md files have been moved to docs/**: Do not create new .md files in service directories. All documentation should be in `docs/` directory.
+
+### Service Directories:
+- `app/` - Mobile application (React Native/Expo)
+- `admin/` - Admin management platform (Next.js)
+- `charger-sim/` - Charger simulator
+- `csms/` - CSMS backend service
+
+### Documentation Structure:
+All documentation is organized in `docs/` directory:
+- `docs/modules/` - Module-specific documentation
+- `docs/deployment/` - Deployment guides
+- `docs/development/` - Development guides
+- `docs/architecture/` - Architecture documentation
+- `docs/validation/` - Testing and validation
+- `docs/troubleshooting/` - Troubleshooting guides
+
+### Code Style:
+- Focus on writing clean, well-commented code
+- Use meaningful variable and function names
+- Add inline comments where necessary
+- Use docstrings for functions and classes
+- Avoid creating separate documentation files during development
+

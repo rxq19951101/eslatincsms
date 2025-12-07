@@ -1,0 +1,81 @@
+#
+# 本文件定义本地多服务编排：csms、admin、redis、db 以及可选 charger-sim。
+# 端口绑定：csms:9000，admin:3000，db:5432，redis:6379。
+
+version: "3.9"
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: db
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=local
+      - POSTGRES_PASSWORD=local
+      - POSTGRES_DB=ocpp
+    networks:
+      - ocppnet
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U local -d ocpp"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    ports:
+      - "6379:6379"
+    # 开发环境：禁用RDB持久化，避免磁盘空间/权限问题
+    command: redis-server --appendonly no --save "" --stop-writes-on-bgsave-error no
+    networks:
+      - ocppnet
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+
+  csms:
+    build: ./csms
+    container_name: csms
+    ports:
+      - "9000:9000"
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=postgresql://local:local@db:5432/ocpp
+      - PORT=9000
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - ocppnet
+
+  admin:
+    build: ./admin
+    container_name: admin
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_CSMS_HTTP=http://localhost:9000
+    depends_on:
+      - csms
+    networks:
+      - ocppnet
+
+  charger-sim:
+    build: ./charger-sim
+    container_name: charger-sim
+    depends_on:
+      - csms
+    networks:
+      - ocppnet
+    command: ["python", "simulator.py", "--id", "CP-DOCKER-1", "--url", "ws://csms:9000/ocpp"]
+
+networks:
+  ocppnet:
+    driver: bridge
+
+
