@@ -81,18 +81,6 @@ echo -e "${YELLOW}停止现有服务...${NC}"
 cd "$PROJECT_DIR"
 docker-compose -f docker-compose.prod.yml down 2>/dev/null || true
 
-# 检查 Dockerfile 是否存在
-echo -e "${YELLOW}检查 Dockerfile...${NC}"
-if [ ! -f "$PROJECT_DIR/csms/Dockerfile" ]; then
-    echo -e "${RED}错误: 未找到 csms/Dockerfile${NC}"
-    exit 1
-fi
-if [ ! -f "$PROJECT_DIR/admin/Dockerfile.prod" ]; then
-    echo -e "${RED}错误: 未找到 admin/Dockerfile.prod${NC}"
-    exit 1
-fi
-echo -e "${GREEN}✓ Dockerfile 检查通过${NC}"
-
 # 构建镜像
 echo -e "${YELLOW}构建 Docker 镜像...${NC}"
 docker-compose -f docker-compose.prod.yml build --no-cache
