@@ -93,7 +93,7 @@ type StatusData = {
   current_status: string;
 };
 
-const fetcher = async (url: string): Promise<Charger[]> => {
+const fetcher = async <T = any>(url: string): Promise<T> => {
   const res = await fetch(url, { cache: "no-store" });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
