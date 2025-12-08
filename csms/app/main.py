@@ -63,11 +63,12 @@ async def lifespan(app: FastAPI):
     # 初始化数据库
     if DATABASE_AVAILABLE:
         try:
-            if check_db_health():
+            # 等待数据库就绪（最多重试5次，每次等待3秒）
+            if check_db_health(max_retries=5, retry_delay=3.0):
                 init_db()
                 logger.info("数据库表已初始化")
             else:
-                logger.warning("数据库连接失败，跳过表初始化")
+                logger.error("数据库连接失败，跳过表初始化。请检查数据库配置和连接。")
         except Exception as e:
             logger.error(f"数据库初始化失败: {e}", exc_info=True)
     

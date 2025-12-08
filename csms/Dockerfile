@@ -9,8 +9,8 @@ WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-# 安装 wget 用于 Docker 健康检查
-RUN apt-get update && apt-get install -y --no-install-recommends wget && \
+# 安装 curl 用于 Docker 健康检查
+RUN apt-get update && apt-get install -y --no-install-recommends curl && \
     rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt ./

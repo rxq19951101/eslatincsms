@@ -4,7 +4,8 @@
 #
 
 import os
-from sqlalchemy import create_engine
+import time
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.pool import QueuePool
 from sqlalchemy.ext.declarative import declarative_base
@@ -47,12 +48,27 @@ def init_db():
 
 
 # 数据库健康检查
-def check_db_health() -> bool:
-    """检查数据库连接健康状态"""
-    try:
-        with engine.connect() as conn:
-            conn.execute("SELECT 1")
-        return True
-    except Exception:
-        return False
+def check_db_health(max_retries: int = 3, retry_delay: float = 2.0) -> bool:
+    """
+    检查数据库连接健康状态
+    
+    Args:
+        max_retries: 最大重试次数（用于启动时等待数据库就绪）
+        retry_delay: 重试延迟（秒）
+    """
+    for attempt in range(max_retries):
+        try:
+            with engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
+            return True
+        except Exception as e:
+            if attempt < max_retries - 1:
+                time.sleep(retry_delay)
+                continue
+            # 最后一次尝试失败，记录错误但不抛出异常
+            import logging
+            logger = logging.getLogger("ocpp_csms")
+            logger.debug(f"数据库连接检查失败 (尝试 {attempt + 1}/{max_retries}): {e}")
+            return False
+    return False
 

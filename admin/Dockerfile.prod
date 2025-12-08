@@ -29,6 +29,9 @@ WORKDIR /app
 ENV NODE_ENV=production
 ENV PORT=3000
 
+# 安装 curl 用于 Docker 健康检查（需要在切换用户之前安装）
+RUN apk add --no-cache curl
+
 # 创建非root用户
 RUN addgroup --system --gid 1001 nodejs && \
     adduser --system --uid 1001 nextjs
