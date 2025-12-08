@@ -99,7 +99,13 @@ async def interactive_simulator(charger_id: str, url: str) -> None:
                         break
 
                     elif cmd == "boot":
-                        await send("BootNotification", {"vendor": "SIM", "model": "SIM-1"})
+                        # 发送完整的 BootNotification 信息
+                        await send("BootNotification", {
+                            "chargePointVendor": "Generic EVSE",
+                            "chargePointModel": "Interactive Simulator",
+                            "firmwareVersion": "1.0.0",
+                            "chargePointSerialNumber": f"SIM-{charger_id.replace('CP-', '').zfill(6)}"
+                        })
 
                     elif cmd == "hb":
                         await send("Heartbeat")

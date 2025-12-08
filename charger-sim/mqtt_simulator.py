@@ -232,13 +232,15 @@ class MQTTOCPPSimulator:
         # 等待连接建立
         await asyncio.sleep(1)
         
-        # 发送 BootNotification
+        # 发送 BootNotification（使用 OCPP 1.6 标准字段名）
         self._send_message("BootNotification", {
             "chargePointVendor": self.vendor,
             "chargePointModel": self.model,
             "firmwareVersion": self.firmware_version,
             "chargePointSerialNumber": self.serial_number
         })
+        print(f"{self.prefix}   发送 BootNotification: vendor={self.vendor}, model={self.model}, "
+              f"firmware={self.firmware_version}, serial={self.serial_number}")
         await asyncio.sleep(1)
         
         # 发送 StatusNotification

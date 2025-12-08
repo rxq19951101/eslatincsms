@@ -80,7 +80,29 @@ async def run_simulator(charger_id: str, url: str, max_retries: int = 3) -> None
                         print(f"{prefix} ← {action} TIMEOUT (no response in 5s)")
 
                 # Boot
-                await send("BootNotification", {"vendor": "SIM", "model": "SIM-1"})
+                # 根据充电桩 ID 生成不同的厂商和型号
+                vendor_model_map = {
+                    "CP-0001": {"vendor": "ABB", "model": "Terra AC Wallbox", "firmwareVersion": "1.5.2", "serialNumber": "ABB-001234"},
+                    "CP-0002": {"vendor": "Tesla", "model": "Supercharger V3", "firmwareVersion": "2.1.0", "serialNumber": "TSC-005678"},
+                    "CP-0003": {"vendor": "Schneider Electric", "model": "EVlink Charging Station", "firmwareVersion": "3.2.1", "serialNumber": "EVL-009012"},
+                    "CP-0004": {"vendor": "Siemens", "model": "VersiCharge", "firmwareVersion": "1.8.5", "serialNumber": "SIE-003456"},
+                    "CP-0005": {"vendor": "ChargePoint", "model": "CPF50", "firmwareVersion": "4.0.3", "serialNumber": "CHP-007890"},
+                }
+                
+                # 默认值或根据 ID 选择
+                charger_info = vendor_model_map.get(charger_id, {
+                    "vendor": "Generic EVSE",
+                    "model": "Standard Charger",
+                    "firmwareVersion": "1.0.0",
+                    "serialNumber": f"GEN-{charger_id.replace('CP-', '').zfill(6)}"
+                })
+                
+                await send("BootNotification", {
+                    "chargePointVendor": charger_info["vendor"],
+                    "chargePointModel": charger_info["model"],
+                    "firmwareVersion": charger_info["firmwareVersion"],
+                    "chargePointSerialNumber": charger_info["serialNumber"]
+                })
                 await asyncio.sleep(0.3)
 
                 # StatusNotification - 设置为可用状态
