@@ -237,8 +237,7 @@ export default function MapPage() {
               {...({ center: [center.lat, center.lng], zoom: 13, style: { height: "100%", width: "100%" }, scrollWheelZoom: true } as any)}
             >
               <TileLayer
-                attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-                url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+                {...({ attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors', url: "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" } as any)}
               />
               
               {/* 地图点击处理器 */}
@@ -252,12 +251,12 @@ export default function MapPage() {
                 return (
                   <Marker
                     key={charger.id}
-                    position={[
+                    {...({ position: [
                       charger.location?.latitude || 0,
                       charger.location?.longitude || 0,
-                    ]}
+                    ]} as any)}
                   >
-                    <Popup>
+                    <Popup {...({} as any)}>
                       <div style={{ color: "#333", minWidth: 150 }}>
                         <div style={{ fontWeight: "700", fontSize: 16, marginBottom: 8 }}>
                           {charger.id}
@@ -292,8 +291,8 @@ export default function MapPage() {
 
               {/* 点击位置的标记（添加模式） */}
               {clickedPos && isAdding && (
-                <Marker position={[clickedPos.lat, clickedPos.lng]} icon={undefined as any}>
-                  <Popup>
+                <Marker {...({ position: [clickedPos.lat, clickedPos.lng], icon: undefined } as any)}>
+                  <Popup {...({} as any)}>
                     <div style={{ color: "#007AFF", fontWeight: "700" }}>
                       新充电桩位置
                     </div>
