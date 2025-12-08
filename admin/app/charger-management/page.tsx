@@ -783,7 +783,7 @@ function FormField({
       {type === "select" && options ? (
         <select
           value={value}
-          onChange={(e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => onChange(e.target.value)}
+          onChange={(e: React.ChangeEvent<HTMLSelectElement>) => onChange(e.target.value)}
           style={inputStyle}
           disabled={disabled}
         >
@@ -796,7 +796,7 @@ function FormField({
       ) : type === "textarea" ? (
         <textarea
           value={value}
-          onChange={(e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => onChange(e.target.value)}
+          onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => onChange(e.target.value)}
           style={{ ...inputStyle, minHeight: 80, resize: "vertical" }}
           disabled={disabled}
         />
@@ -804,7 +804,7 @@ function FormField({
         <input
           type={type}
           value={value}
-          onChange={(e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => onChange(e.target.value)}
+          onChange={(e: React.ChangeEvent<HTMLInputElement>) => onChange(e.target.value)}
           style={inputStyle}
           required={required}
           disabled={disabled}
