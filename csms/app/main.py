@@ -177,11 +177,38 @@ async def handle_ocpp_message(charger_id: str, action: str, payload: Dict[str, A
     if action == "BootNotification":
         try:
             charger["status"] = "Available"
-            vendor = str(payload.get("vendor", ""))
-            model = str(payload.get("model", ""))
-            firmware_version = str(payload.get("firmwareVersion", ""))
-            serial_number = str(payload.get("serialNumber", ""))
+            vendor = str(payload.get("vendor", "")).strip()
+            model = str(payload.get("model", "")).strip()
+            firmware_version = str(payload.get("firmwareVersion", "")).strip()
+            serial_number = str(payload.get("serialNumber", "")).strip()
+            charge_point_vendor = str(payload.get("chargePointVendor", "")).strip()
+            charge_point_model = str(payload.get("chargePointModel", "")).strip()
             
+            # 使用 chargePointVendor 和 chargePointModel 作为后备（OCPP 1.6 标准字段名）
+            if not vendor and charge_point_vendor:
+                vendor = charge_point_vendor
+            if not model and charge_point_model:
+                model = charge_point_model
+            
+            # 验证必要参数并记录警告
+            missing_params = []
+            if not vendor:
+                missing_params.append("vendor/chargePointVendor")
+            if not model:
+                missing_params.append("model/chargePointModel")
+            if not serial_number:
+                missing_params.append("serialNumber")
+            if not firmware_version:
+                missing_params.append("firmwareVersion")
+            
+            if missing_params:
+                logger.warning(
+                    f"[{charger_id}] BootNotification 参数不足: 缺少 {', '.join(missing_params)}。"
+                    f"当前参数 - vendor: {vendor or '未提供'}, model: {model or '未提供'}, "
+                    f"serialNumber: {serial_number or '未提供'}, firmwareVersion: {firmware_version or '未提供'}"
+                )
+            
+            # 更新充电桩信息
             charger["vendor"] = vendor if vendor else charger.get("vendor")
             charger["model"] = model if model else charger.get("model")
             charger["firmware_version"] = firmware_version if firmware_version else charger.get("firmware_version")
@@ -190,7 +217,10 @@ async def handle_ocpp_message(charger_id: str, action: str, payload: Dict[str, A
             update_active(charger_id, vendor=vendor or None, model=model or None, status="Available")
             save_charger(charger)
             
-            logger.info(f"[{charger_id}] BootNotification: vendor={vendor}, model={model}")
+            logger.info(
+                f"[{charger_id}] BootNotification: vendor={vendor or 'N/A'}, model={model or 'N/A'}, "
+                f"firmware={firmware_version or 'N/A'}, serial={serial_number or 'N/A'}"
+            )
             
             return {
                 "status": "Accepted",
@@ -1699,10 +1729,36 @@ async def ocpp_ws(ws: WebSocket, id: str = Query(..., description="Charger ID"))
             if action == "BootNotification":
                 try:
                     charger["status"] = "Available"
-                    vendor = str(payload.get("vendor", ""))
-                    model = str(payload.get("model", ""))
-                    firmware_version = str(payload.get("firmwareVersion", ""))
-                    serial_number = str(payload.get("serialNumber", ""))
+                    vendor = str(payload.get("vendor", "")).strip()
+                    model = str(payload.get("model", "")).strip()
+                    firmware_version = str(payload.get("firmwareVersion", "")).strip()
+                    serial_number = str(payload.get("serialNumber", "")).strip()
+                    charge_point_vendor = str(payload.get("chargePointVendor", "")).strip()
+                    charge_point_model = str(payload.get("chargePointModel", "")).strip()
+                    
+                    # 使用 chargePointVendor 和 chargePointModel 作为后备（OCPP 1.6 标准字段名）
+                    if not vendor and charge_point_vendor:
+                        vendor = charge_point_vendor
+                    if not model and charge_point_model:
+                        model = charge_point_model
+                    
+                    # 验证必要参数并记录警告
+                    missing_params = []
+                    if not vendor:
+                        missing_params.append("vendor/chargePointVendor")
+                    if not model:
+                        missing_params.append("model/chargePointModel")
+                    if not serial_number:
+                        missing_params.append("serialNumber")
+                    if not firmware_version:
+                        missing_params.append("firmwareVersion")
+                    
+                    if missing_params:
+                        logger.warning(
+                            f"[{id}] BootNotification 参数不足: 缺少 {', '.join(missing_params)}。"
+                            f"当前参数 - vendor: {vendor or '未提供'}, model: {model or '未提供'}, "
+                            f"serialNumber: {serial_number or '未提供'}, firmwareVersion: {firmware_version or '未提供'}"
+                        )
                     
                     # 更新充电桩信息
                     charger["vendor"] = vendor if vendor else charger.get("vendor")
@@ -1713,7 +1769,10 @@ async def ocpp_ws(ws: WebSocket, id: str = Query(..., description="Charger ID"))
                     update_active(id, vendor=vendor or None, model=model or None, status="Available")
                     save_charger(charger)  # 这里可能失败，但不影响响应
                     
-                    logger.info(f"[{id}] BootNotification: vendor={vendor}, model={model}, firmware={firmware_version}, serial={serial_number}")
+                    logger.info(
+                        f"[{id}] BootNotification: vendor={vendor or 'N/A'}, model={model or 'N/A'}, "
+                        f"firmware={firmware_version or 'N/A'}, serial={serial_number or 'N/A'}"
+                    )
                 except Exception as e:
                     logger.error(f"[{id}] BootNotification处理错误（但继续响应）: {e}", exc_info=True)
                 
