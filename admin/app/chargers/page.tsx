@@ -131,16 +131,6 @@ export default function ChargersPage() {
     );
   }, [chargers, searchQuery]);
   
-  // 统计信息
-  const stats = useMemo(() => ({
-    configured: filteredChargers.filter((c: Charger) => c.is_configured).length,
-    unconfigured: filteredChargers.filter((c: Charger) => !c.is_configured).length,
-    online: filteredChargers.filter((c: Charger) => !isOffline(c.last_seen)).length,
-    available: filteredChargers.filter((c: Charger) => !isOffline(c.last_seen) && c.status === "Available").length,
-    charging: filteredChargers.filter((c: Charger) => !isOffline(c.last_seen) && c.status === "Charging").length,
-    offline: filteredChargers.filter((c: Charger) => isOffline(c.last_seen)).length,
-  }), [filteredChargers]);
-  
   // 获取选中充电桩的心跳和状态数据
   const { data: heartbeatData } = useSWR<HeartbeatData>(
     selectedChargerForCharts ? `${apiBase}/api/v1/statistics/charger/${selectedChargerForCharts}/heartbeat-history?hours=24` : null,
