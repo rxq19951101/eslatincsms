@@ -234,7 +234,7 @@ export default function MapPage() {
         <div style={{ position: "relative", width: "100%", height: "100%" }}>
           {(MapContainer as any) && (TileLayer as any) && (Marker as any) && (Popup as any) ? (
             <MapContainer
-              center={[center.lat, center.lng]}
+              center={[center.lat, center.lng] as [number, number]}
               zoom={13}
               style={{ height: "100%", width: "100%" }}
               scrollWheelZoom={true}
