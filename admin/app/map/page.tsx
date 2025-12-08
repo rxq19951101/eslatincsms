@@ -360,7 +360,7 @@ export default function MapPage() {
                 <input
                   type="text"
                   value={newChargerId}
-                  onChange={(e) => setNewChargerId(e.target.value)}
+                  onChange={(e: React.ChangeEvent<HTMLInputElement>) => setNewChargerId(e.target.value)}
                   placeholder="例如: CP-NEW-001"
                   style={{
                     width: "100%",
@@ -380,7 +380,7 @@ export default function MapPage() {
                 <input
                   type="text"
                   value={newAddress}
-                  onChange={(e) => setNewAddress(e.target.value)}
+                  onChange={(e: React.ChangeEvent<HTMLInputElement>) => setNewAddress(e.target.value)}
                   placeholder="例如: 波哥大市中心"
                   style={{
                     width: "100%",

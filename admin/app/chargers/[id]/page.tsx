@@ -167,7 +167,7 @@ export default function ChargerDetailPage() {
               {chargerId} - 监控数据
             </h1>
             <div style={{ fontSize: 14, color: "#aaa" }}>
-              {charger_info.vendor} {charger_info.model}
+              {charger_info.vendor || "未知厂商"} {charger_info.model || "未知型号"}
             </div>
           </div>
           <button
@@ -234,7 +234,7 @@ export default function ChargerDetailPage() {
                 dataKey="date"
                 stroke="#aaa"
                 tick={{ fill: "#aaa", fontSize: 12 }}
-                tickFormatter={(value) => new Date(value).toLocaleDateString("zh-CN", { month: "short", day: "numeric" })}
+                tickFormatter={(value: string) => new Date(value).toLocaleDateString("zh-CN", { month: "short", day: "numeric" })}
               />
               <YAxis stroke="#aaa" tick={{ fill: "#aaa", fontSize: 12 }} />
               <Tooltip
@@ -259,7 +259,7 @@ export default function ChargerDetailPage() {
                 dataKey="date"
                 stroke="#aaa"
                 tick={{ fill: "#aaa", fontSize: 12 }}
-                tickFormatter={(value) => new Date(value).toLocaleDateString("zh-CN", { month: "short", day: "numeric" })}
+                tickFormatter={(value: string) => new Date(value).toLocaleDateString("zh-CN", { month: "short", day: "numeric" })}
               />
               <YAxis stroke="#aaa" tick={{ fill: "#aaa", fontSize: 12 }} />
               <Tooltip
@@ -290,7 +290,7 @@ export default function ChargerDetailPage() {
                 dataKey="date"
                 stroke="#aaa"
                 tick={{ fill: "#aaa", fontSize: 12 }}
-                tickFormatter={(value) => new Date(value).toLocaleDateString("zh-CN", { month: "short", day: "numeric" })}
+                tickFormatter={(value: string) => new Date(value).toLocaleDateString("zh-CN", { month: "short", day: "numeric" })}
               />
               <YAxis stroke="#aaa" tick={{ fill: "#aaa", fontSize: 12 }} />
               <Tooltip
@@ -322,7 +322,7 @@ export default function ChargerDetailPage() {
                 dataKey="date"
                 stroke="#aaa"
                 tick={{ fill: "#aaa", fontSize: 12 }}
-                tickFormatter={(value) => new Date(value).toLocaleDateString("zh-CN", { month: "short", day: "numeric" })}
+                tickFormatter={(value: string) => new Date(value).toLocaleDateString("zh-CN", { month: "short", day: "numeric" })}
               />
               <YAxis stroke="#aaa" tick={{ fill: "#aaa", fontSize: 12 }} />
               <Tooltip

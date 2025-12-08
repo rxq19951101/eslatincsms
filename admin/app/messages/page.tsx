@@ -257,7 +257,7 @@ function MessageCard({
             <div>
               <textarea
                 value={replyText}
-                onChange={(e) => onReplyTextChange(e.target.value)}
+                onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => onReplyTextChange(e.target.value)}
                 placeholder="请输入回复内容..."
                 style={{
                   width: "100%",

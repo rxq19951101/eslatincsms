@@ -122,7 +122,7 @@ export default function ChargersPage() {
       return chargers;
     }
     const query = searchQuery.toLowerCase();
-    return chargers.filter((c) => 
+    return chargers.filter((c: Charger) => 
       c.id.toLowerCase().includes(query) ||
       (c.vendor && c.vendor.toLowerCase().includes(query)) ||
       (c.model && c.model.toLowerCase().includes(query)) ||
@@ -130,6 +130,16 @@ export default function ChargersPage() {
       (c.location?.address && c.location.address.toLowerCase().includes(query))
     );
   }, [chargers, searchQuery]);
+  
+  // 统计信息
+  const stats = useMemo(() => ({
+    configured: filteredChargers.filter((c: Charger) => c.is_configured).length,
+    unconfigured: filteredChargers.filter((c: Charger) => !c.is_configured).length,
+    online: filteredChargers.filter((c: Charger) => !isOffline(c.last_seen)).length,
+    available: filteredChargers.filter((c: Charger) => !isOffline(c.last_seen) && c.status === "Available").length,
+    charging: filteredChargers.filter((c: Charger) => !isOffline(c.last_seen) && c.status === "Charging").length,
+    offline: filteredChargers.filter((c: Charger) => isOffline(c.last_seen)).length,
+  }), [filteredChargers]);
   
   // 获取选中充电桩的心跳和状态数据
   const { data: heartbeatData } = useSWR<HeartbeatData>(
@@ -152,12 +162,12 @@ export default function ChargersPage() {
 
   const stats = {
     total: filteredChargers.length,
-    configured: filteredChargers.filter((c) => c.is_configured).length,
-    unconfigured: filteredChargers.filter((c) => !c.is_configured).length,
-    online: filteredChargers.filter((c) => !isOffline(c.last_seen)).length,
-    available: filteredChargers.filter((c) => !isOffline(c.last_seen) && c.status === "Available").length,
-    charging: filteredChargers.filter((c) => !isOffline(c.last_seen) && c.status === "Charging").length,
-    offline: filteredChargers.filter((c) => isOffline(c.last_seen)).length,
+    configured: filteredChargers.filter((c: Charger) => c.is_configured).length,
+    unconfigured: filteredChargers.filter((c: Charger) => !c.is_configured).length,
+    online: filteredChargers.filter((c: Charger) => !isOffline(c.last_seen)).length,
+    available: filteredChargers.filter((c: Charger) => !isOffline(c.last_seen) && c.status === "Available").length,
+    charging: filteredChargers.filter((c: Charger) => !isOffline(c.last_seen) && c.status === "Charging").length,
+    offline: filteredChargers.filter((c: Charger) => isOffline(c.last_seen)).length,
   };
 
   return (
@@ -187,7 +197,7 @@ export default function ChargersPage() {
               type="text"
               placeholder="搜索充电桩 (ID、厂商、型号、地址)..."
               value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
+              onChange={(e: React.ChangeEvent<HTMLInputElement>) => setSearchQuery(e.target.value)}
               style={{
                 width: "100%",
                 padding: "10px 16px",
@@ -282,7 +292,7 @@ export default function ChargersPage() {
                     <XAxis 
                       dataKey="timestamp" 
                       stroke="#aaa"
-                      tickFormatter={(value) => {
+                      tickFormatter={(value: string) => {
                         const date = new Date(value);
                         return `${date.getHours()}:${String(date.getMinutes()).padStart(2, '0')}`;
                       }}
@@ -295,7 +305,7 @@ export default function ChargersPage() {
                         borderRadius: 5,
                         color: "#fff",
                       }}
-                      labelFormatter={(value) => {
+                      labelFormatter={(value: string) => {
                         const date = new Date(value);
                         return date.toLocaleString();
                       }}
@@ -339,7 +349,7 @@ export default function ChargersPage() {
                       cx="50%"
                       cy="50%"
                       labelLine={false}
-                      label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`}
+                      label={({ name, percent }: { name: string; percent?: number }) => `${name} ${((percent ?? 0) * 100).toFixed(0)}%`}
                       outerRadius={80}
                       fill="#8884d8"
                       dataKey="value"
@@ -364,7 +374,7 @@ export default function ChargersPage() {
                   </PieChart>
                 </ResponsiveContainer>
                 <div style={{ marginTop: 16, fontSize: 12, color: "#aaa" }}>
-                  当前状态: <span style={{ color: "#fff", fontWeight: "600" }}>{statusData.current_status}</span>
+                  当前状态: <span style={{ color: "#fff", fontWeight: "600" }}>{statusData?.current_status || "未知"}</span>
                 </div>
               </ChartCard>
             )}
@@ -405,7 +415,7 @@ export default function ChargersPage() {
           gridTemplateColumns: "repeat(auto-fit, minmax(400px, 1fr))",
           gap: 24,
         }}>
-          {filteredChargers.map((c) => {
+          {filteredChargers.map((c: Charger) => {
             const offline = isOffline(c.last_seen);
             const timeAgo = Math.floor((Date.now() - new Date(c.last_seen).getTime()) / 1000);
             return (
@@ -757,7 +767,7 @@ function ChargerCard({ charger, offline, timeAgo, onUpdate, apiBase, onShowChart
               <input
                 type="number"
                 value={priceValue}
-                onChange={(e) => setPriceValue(e.target.value)}
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) => setPriceValue(e.target.value)}
                 placeholder="价格"
                 style={{
                   flex: 1,

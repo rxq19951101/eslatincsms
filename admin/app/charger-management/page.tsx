@@ -423,7 +423,7 @@ function PendingChargerCard({
                   type="number"
                   placeholder="纬度"
                   value={locationData.lat}
-                  onChange={(e) => setLocationData(prev => ({ ...prev, lat: e.target.value }))}
+                  onChange={(e: React.ChangeEvent<HTMLInputElement>) => setLocationData(prev => ({ ...prev, lat: e.target.value }))}
                   style={{
                     padding: "6px 10px",
                     background: "rgba(0,0,0,0.3)",
@@ -437,7 +437,7 @@ function PendingChargerCard({
                   type="number"
                   placeholder="经度"
                   value={locationData.lng}
-                  onChange={(e) => setLocationData(prev => ({ ...prev, lng: e.target.value }))}
+                  onChange={(e: React.ChangeEvent<HTMLInputElement>) => setLocationData(prev => ({ ...prev, lng: e.target.value }))}
                   style={{
                     padding: "6px 10px",
                     background: "rgba(0,0,0,0.3)",
@@ -451,7 +451,7 @@ function PendingChargerCard({
                   type="text"
                   placeholder="地址"
                   value={locationData.address}
-                  onChange={(e) => setLocationData(prev => ({ ...prev, address: e.target.value }))}
+                  onChange={(e: React.ChangeEvent<HTMLInputElement>) => setLocationData(prev => ({ ...prev, address: e.target.value }))}
                   style={{
                     padding: "6px 10px",
                     background: "rgba(0,0,0,0.3)",
@@ -486,7 +486,7 @@ function PendingChargerCard({
                   type="number"
                   placeholder="价格 (COP/kWh)"
                   value={pricingData.price}
-                  onChange={(e) => setPricingData(prev => ({ ...prev, price: e.target.value }))}
+                  onChange={(e: React.ChangeEvent<HTMLInputElement>) => setPricingData(prev => ({ ...prev, price: e.target.value }))}
                   style={{
                     padding: "6px 10px",
                     background: "rgba(0,0,0,0.3)",
@@ -500,7 +500,7 @@ function PendingChargerCard({
                   type="number"
                   placeholder="充电速率 (kW)"
                   value={pricingData.rate}
-                  onChange={(e) => setPricingData(prev => ({ ...prev, rate: e.target.value }))}
+                  onChange={(e: React.ChangeEvent<HTMLInputElement>) => setPricingData(prev => ({ ...prev, rate: e.target.value }))}
                   style={{
                     padding: "6px 10px",
                     background: "rgba(0,0,0,0.3)",
@@ -783,7 +783,7 @@ function FormField({
       {type === "select" && options ? (
         <select
           value={value}
-          onChange={(e) => onChange(e.target.value)}
+          onChange={(e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => onChange(e.target.value)}
           style={inputStyle}
           disabled={disabled}
         >
@@ -796,7 +796,7 @@ function FormField({
       ) : type === "textarea" ? (
         <textarea
           value={value}
-          onChange={(e) => onChange(e.target.value)}
+          onChange={(e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => onChange(e.target.value)}
           style={{ ...inputStyle, minHeight: 80, resize: "vertical" }}
           disabled={disabled}
         />
@@ -804,7 +804,7 @@ function FormField({
         <input
           type={type}
           value={value}
-          onChange={(e) => onChange(e.target.value)}
+          onChange={(e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => onChange(e.target.value)}
           style={inputStyle}
           required={required}
           disabled={disabled}
