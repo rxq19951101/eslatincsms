@@ -1,10 +1,10 @@
 #
 # 生产环境 Docker Compose 配置
 # 用于部署运营平台和后端服务到生产服务器
-# 兼容 docker-compose version 2 格式
+# 使用 docker-compose version 3.9 格式
 #
 
-version: "2"
+version: "3.9"
 
 services:
   db:
@@ -42,7 +42,7 @@ services:
       retries: 5
 
   mqtt-broker:
-    image: crpi-91mj2uog7kuti6ie.cn-hangzhou.personal.cr.aliyuncs.com/eslatin/eclipse-mosquitto:latest
+    image: eclipse-mosquitto:latest
     container_name: ocpp-mqtt-prod
     ports:
       - "${MQTT_BROKER_PORT:-1883}:1883"
@@ -86,9 +86,12 @@ services:
     volumes:
       - ./logs:/var/log/csms
     depends_on:
-      - db
-      - redis
-      - mqtt-broker
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mqtt-broker:
+        condition: service_healthy
     networks:
       - ocppnet
     restart: always
@@ -109,7 +112,8 @@ services:
       - NEXT_PUBLIC_CSMS_HTTP=${NEXT_PUBLIC_CSMS_HTTP:-http://localhost:9000}
       - NODE_ENV=production
     depends_on:
-      - csms
+      csms:
+        condition: service_healthy
     networks:
       - ocppnet
     restart: always
