@@ -8,7 +8,7 @@ version: "3.9"
 
 services:
   db:
-    image: crpi-91mj2uog7kuti6ie.cn-hangzhou.personal.cr.aliyuncs.com/eslatin/postgres:15-alpine
+    image: postgres:15-alpine
     container_name: ocpp-db-prod
     environment:
       - POSTGRES_USER=${DB_USER:-ocpp_user}
@@ -27,7 +27,7 @@ services:
       retries: 5
 
   redis:
-    image: crpi-91mj2uog7kuti6ie.cn-hangzhou.personal.cr.aliyuncs.com/eslatin/redis:7-alpine
+    image: redis:7-alpine
     container_name: ocpp-redis-prod
     command: redis-server --appendonly yes ${REDIS_PASSWORD:+--requirepass ${REDIS_PASSWORD}}
     volumes:
