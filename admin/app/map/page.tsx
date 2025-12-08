@@ -234,10 +234,7 @@ export default function MapPage() {
         <div style={{ position: "relative", width: "100%", height: "100%" }}>
           {(MapContainer as any) && (TileLayer as any) && (Marker as any) && (Popup as any) ? (
             <MapContainer
-              center={[center.lat, center.lng] as [number, number]}
-              zoom={13}
-              style={{ height: "100%", width: "100%" }}
-              scrollWheelZoom={true}
+              {...({ center: [center.lat, center.lng], zoom: 13, style: { height: "100%", width: "100%" }, scrollWheelZoom: true } as any)}
             >
               <TileLayer
                 attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
