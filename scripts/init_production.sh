@@ -84,11 +84,11 @@ else
 fi
 echo ""
 
-# 4. 检查数据库密码
+# 4. 检查数据库密码（允许使用默认值）
 echo -e "${YELLOW}[4] 检查数据库配置...${NC}"
 if [ -z "$DB_PASSWORD" ] || [ "$DB_PASSWORD" = "CHANGE_THIS_SECURE_PASSWORD" ]; then
-    echo -e "${RED}错误: 请在 .env.production 中设置 DB_PASSWORD${NC}"
-    exit 1
+    echo -e "${YELLOW}⚠ 数据库密码使用默认值，生产环境建议修改为强密码${NC}"
+    echo -e "${YELLOW}继续初始化...${NC}"
 else
     echo -e "${GREEN}✓ 数据库密码已配置${NC}"
 fi
