@@ -11,9 +11,9 @@ services:
     image: postgres:15-alpine
     container_name: ocpp-db-prod
     environment:
-      - POSTGRES_USER=${DB_USER:-ocpp_user}
-      - POSTGRES_PASSWORD=${DB_PASSWORD}
-      - POSTGRES_DB=${DB_NAME:-ocpp_prod}
+      - POSTGRES_USER=ocpp_user
+      - POSTGRES_PASSWORD=ocpp_prod_password_2024
+      - POSTGRES_DB=ocpp_prod
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./backups:/backups
@@ -21,7 +21,7 @@ services:
       - ocppnet
     restart: always
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-ocpp_user} -d ${DB_NAME:-ocpp_prod}"]
+      test: ["CMD-SHELL", "pg_isready -U ocpp_user -d ocpp_prod"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -70,7 +70,7 @@ services:
     environment:
       - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
       - PORT=9000
-      - DATABASE_URL=${DATABASE_URL}
+      - DATABASE_URL=postgresql://ocpp_user:ocpp_prod_password_2024@db:5432/ocpp_prod
       - MQTT_BROKER_HOST=${MQTT_BROKER_HOST:-mqtt-broker}
       - MQTT_BROKER_PORT=${MQTT_BROKER_PORT:-1883}
       - MQTT_USERNAME=${MQTT_USERNAME:-}
