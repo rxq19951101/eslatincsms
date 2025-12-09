@@ -146,6 +146,15 @@ app = FastAPI(
     title="Local OCPP 1.6J CSMS",
     lifespan=lifespan
 )
+
+# 添加请求日志中间件
+try:
+    from app.core.middleware import LoggingMiddleware
+    app.add_middleware(LoggingMiddleware)
+    logger.info("请求日志中间件已启用")
+except ImportError:
+    logger.warning("无法导入日志中间件，跳过")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -828,6 +837,7 @@ def health() -> HealthResponse:
     Health check endpoint.
     Returns: {"ok": true, "ts": "ISO timestamp"}
     """
+    logger.debug("[API] GET /health | 健康检查")
     return HealthResponse(ok=True, ts=now_iso())
 
 
@@ -910,7 +920,10 @@ def chargers_list() -> List[Dict[str, Any]]:
     List all chargers from Redis.
     Returns: [{"id": str, "status": str, "last_seen": str, "session": {...}}, ...]
     """
-    return load_chargers()
+    logger.info("[API] GET /chargers | 获取所有充电桩列表")
+    chargers = load_chargers()
+    logger.info(f"[API] GET /chargers 成功 | 返回 {len(chargers)} 个充电桩")
+    return chargers
 
 
 @app.post("/api/updateLocation", response_model=RemoteResponse, tags=["REST"])
@@ -918,6 +931,13 @@ async def update_location(req: UpdateLocationRequest) -> RemoteResponse:
     """
     Update charger location (latitude, longitude, address).
     """
+    logger.info(
+        f"[API] POST /api/updateLocation | "
+        f"充电桩ID: {req.chargePointId} | "
+        f"位置: ({req.latitude}, {req.longitude}) | "
+        f"地址: {req.address or '无'}"
+    )
+    
     charger = next((c for c in load_chargers() if c["id"] == req.chargePointId), None)
     if not charger:
         charger = get_default_charger(req.chargePointId)
@@ -930,7 +950,11 @@ async def update_location(req: UpdateLocationRequest) -> RemoteResponse:
     }
     save_charger(charger)
     
-    logger.info(f"[{req.chargePointId}] Location updated: lat={req.latitude}, lng={req.longitude}")
+    logger.info(
+        f"[API] POST /api/updateLocation 成功 | "
+        f"充电桩ID: {req.chargePointId} | "
+        f"位置: ({req.latitude}, {req.longitude})"
+    )
     
     return RemoteResponse(
         success=True,
@@ -944,6 +968,12 @@ async def update_price(req: UpdatePriceRequest) -> RemoteResponse:
     """
     Update charger price per kWh.
     """
+    logger.info(
+        f"[API] POST /api/updatePrice | "
+        f"充电桩ID: {req.chargePointId} | "
+        f"价格: {req.pricePerKwh} COP/kWh"
+    )
+    
     charger = next((c for c in load_chargers() if c["id"] == req.chargePointId), None)
     if not charger:
         charger = get_default_charger(req.chargePointId)
@@ -952,7 +982,11 @@ async def update_price(req: UpdatePriceRequest) -> RemoteResponse:
     charger["price_per_kwh"] = req.pricePerKwh
     save_charger(charger)
     
-    logger.info(f"[{req.chargePointId}] Price updated: {req.pricePerKwh} COP/kWh")
+    logger.info(
+        f"[API] POST /api/updatePrice 成功 | "
+        f"充电桩ID: {req.chargePointId} | "
+        f"价格: {req.pricePerKwh} COP/kWh"
+    )
     
     return RemoteResponse(
         success=True,
@@ -970,6 +1004,12 @@ async def remote_start(req: RemoteStartRequest) -> RemoteResponse:
     NOTE: This is a simplified implementation that mimics user actions.
     In a full OCPP implementation, CSMS would send RemoteStartTransaction to the charger.
     """
+    logger.info(
+        f"[API] POST /api/remoteStart | "
+        f"充电桩ID: {req.chargePointId} | "
+        f"用户标签: {req.idTag}"
+    )
+    
     ws = charger_websockets.get(req.chargePointId)
     if not ws:
         # Fallback：如果充电桩未连接 WebSocket，则直接在 Redis 中模拟充电状态
@@ -1073,6 +1113,11 @@ async def remote_stop(req: RemoteStopRequest) -> RemoteResponse:
     NOTE: In a full OCPP implementation, this would use CallResult/CallError
     with unique message IDs. This simplified version directly sends JSON.
     """
+    logger.info(
+        f"[API] POST /api/remoteStop | "
+        f"充电桩ID: {req.chargePointId}"
+    )
+    
     ws = charger_websockets.get(req.chargePointId)
     charger = next((c for c in load_chargers() if c["id"] == req.chargePointId), None)
     if charger is None:
@@ -1165,6 +1210,12 @@ async def get_configuration(req: GetConfigurationRequest) -> RemoteResponse:
     """
     获取充电桩配置参数。
     """
+    logger.info(
+        f"[API] POST /api/getConfiguration | "
+        f"充电桩ID: {req.chargePointId} | "
+        f"配置键: {req.keys or '全部'}"
+    )
+    
     try:
         result = await send_ocpp_call(
             req.chargePointId,
@@ -1188,6 +1239,13 @@ async def change_configuration(req: ChangeConfigurationRequest) -> RemoteRespons
     """
     更改充电桩配置参数。
     """
+    logger.info(
+        f"[API] POST /api/changeConfiguration | "
+        f"充电桩ID: {req.chargePointId} | "
+        f"配置键: {req.key} | "
+        f"配置值: {req.value}"
+    )
+    
     try:
         result = await send_ocpp_call(
             req.chargePointId,
@@ -1211,6 +1269,12 @@ async def reset_charger(req: ResetRequest) -> RemoteResponse:
     """
     重置充电桩（软重启或硬重启）。
     """
+    logger.info(
+        f"[API] POST /api/reset | "
+        f"充电桩ID: {req.chargePointId} | "
+        f"重置类型: {req.type}"
+    )
+    
     try:
         result = await send_ocpp_call(
             req.chargePointId,
@@ -1234,6 +1298,12 @@ async def unlock_connector(req: UnlockConnectorRequest) -> RemoteResponse:
     """
     解锁连接器。
     """
+    logger.info(
+        f"[API] POST /api/unlockConnector | "
+        f"充电桩ID: {req.chargePointId} | "
+        f"连接器ID: {req.connectorId}"
+    )
+    
     try:
         result = await send_ocpp_call(
             req.chargePointId,
@@ -1257,6 +1327,13 @@ async def change_availability(req: ChangeAvailabilityRequest) -> RemoteResponse:
     """
     更改充电桩或连接器的可用性。
     """
+    logger.info(
+        f"[API] POST /api/changeAvailability | "
+        f"充电桩ID: {req.chargePointId} | "
+        f"连接器ID: {req.connectorId} | "
+        f"类型: {req.type}"
+    )
+    
     try:
         result = await send_ocpp_call(
             req.chargePointId,
@@ -1459,6 +1536,13 @@ async def create_message(req: CreateMessageRequest) -> RemoteResponse:
     """
     Create a new support message from user.
     """
+    logger.info(
+        f"[API] POST /api/messages | "
+        f"用户ID: {req.userId} | "
+        f"用户名: {req.username} | "
+        f"消息长度: {len(req.message)} 字符"
+    )
+    
     message_id = f"msg_{int(datetime.now().timestamp() * 1000)}"
     message_data = {
         "id": message_id,
@@ -1476,7 +1560,11 @@ async def create_message(req: CreateMessageRequest) -> RemoteResponse:
     # Keep only last 100 messages
     redis_client.ltrim(MESSAGES_LIST_KEY, 0, 99)
     
-    logger.info(f"New message from user {req.username} ({req.userId}): {req.message[:50]}")
+    logger.info(
+        f"[API] POST /api/messages 成功 | "
+        f"消息ID: {message_id} | "
+        f"用户: {req.username} ({req.userId})"
+    )
     
     return RemoteResponse(
         success=True,
@@ -1499,6 +1587,8 @@ def list_messages() -> List[Dict[str, Any]]:
             continue
     # Reverse to show newest first
     messages.reverse()
+    
+    logger.info(f"[API] GET /api/messages 成功 | 返回 {len(messages)} 条消息")
     return messages
 
 
@@ -1507,6 +1597,12 @@ async def reply_message(req: ReplyMessageRequest) -> RemoteResponse:
     """
     Reply to a support message.
     """
+    logger.info(
+        f"[API] POST /api/messages/reply | "
+        f"消息ID: {req.messageId} | "
+        f"回复长度: {len(req.reply)} 字符"
+    )
+    
     # Find message in Redis
     items = redis_client.lrange(MESSAGES_LIST_KEY, 0, -1)
     found = False
@@ -1521,12 +1617,16 @@ async def reply_message(req: ReplyMessageRequest) -> RemoteResponse:
                 # Update in Redis
                 redis_client.lset(MESSAGES_LIST_KEY, i, json.dumps(msg))
                 found = True
-                logger.info(f"Replied to message {req.messageId}: {req.reply[:50]}")
+                logger.info(
+                    f"[API] POST /api/messages/reply 成功 | "
+                    f"消息ID: {req.messageId}"
+                )
                 break
         except Exception:
             continue
     
     if not found:
+        logger.warning(f"[API] POST /api/messages/reply | 消息未找到: {req.messageId}")
         raise HTTPException(status_code=404, detail="Message not found")
     
     return RemoteResponse(
@@ -1543,10 +1643,19 @@ def get_orders(userId: str | None = None) -> List[Dict[str, Any]]:
     If userId is provided, returns only orders for that user.
     Otherwise, returns all orders.
     """
+    logger.info(
+        f"[API] GET /api/orders | "
+        f"用户ID: {userId or '全部'}"
+    )
+    
     if userId:
-        return get_orders_by_user(userId)
+        orders = get_orders_by_user(userId)
+        logger.info(f"[API] GET /api/orders 成功 | 用户 {userId} 的订单数: {len(orders)}")
+        return orders
     else:
-        return get_all_orders()
+        orders = get_all_orders()
+        logger.info(f"[API] GET /api/orders 成功 | 全部订单数: {len(orders)}")
+        return orders
 
 
 @app.get("/api/orders/current", tags=["REST"])
@@ -1556,6 +1665,12 @@ def get_current_order(chargePointId: str = Query(...), transactionId: int | None
     If transactionId is provided, find order by transaction ID.
     Otherwise, find the latest ongoing order for the charger.
     """
+    logger.info(
+        f"[API] GET /api/orders/current | "
+        f"充电桩ID: {chargePointId} | "
+        f"交易ID: {transactionId or '未指定'}"
+    )
+    
     if transactionId:
         # 尝试通过transaction_id找到订单（订单ID格式为 order_{transactionId}）
         order_id = f"order_{transactionId}"
@@ -1584,8 +1699,10 @@ def get_current_order(chargePointId: str = Query(...), transactionId: int | None
         ongoing_order = next((o for o in charger_orders if o.get("status") == "ongoing"), None)
         if ongoing_order:
             return ongoing_order
+        logger.info(f"[API] GET /api/orders/current 成功 | 找到订单: {charger_orders[0].get('id')}")
         return charger_orders[0]
     
+    logger.warning(f"[API] GET /api/orders/current | 未找到订单 | 充电桩: {chargePointId}")
     raise HTTPException(status_code=404, detail="No order found")
 
 
@@ -1598,6 +1715,12 @@ def get_current_order_meter(
     获取当前充电订单的实时电量数据
     返回最新的 MeterValues 数据，用于实时显示电量和费用
     """
+    logger.debug(
+        f"[API] GET /api/orders/current/meter | "
+        f"充电桩ID: {chargePointId} | "
+        f"交易ID: {transactionId or '未指定'}"
+    )
+    
     charger = next((c for c in load_chargers() if c["id"] == chargePointId), None)
     if not charger:
         raise HTTPException(status_code=404, detail="Charger not found")
@@ -1647,6 +1770,13 @@ def get_current_order_meter(
         "timestamp": now_iso(),
         "order_id": order_id if order else None,
     }
+    
+    logger.debug(
+        f"[API] GET /api/orders/current/meter 成功 | "
+        f"充电桩ID: {chargePointId} | "
+        f"电量: {meter_value_kwh:.3f} kWh | "
+        f"费用: {total_cost:.2f} COP"
+    )
 
 
 # ---- HTTP OCPP 端点（如果启用 HTTP 传输）----

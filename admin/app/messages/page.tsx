@@ -8,6 +8,7 @@
 
 import React, { useState } from "react";
 import useSWR from "swr";
+import { getApiBase } from "../utils/api";
 
 type Message = {
   id: string;
@@ -27,7 +28,7 @@ const fetcher = async (url: string): Promise<Message[]> => {
 };
 
 export default function MessagesPage() {
-  const apiBase = process.env.NEXT_PUBLIC_API || process.env.NEXT_PUBLIC_CSMS_HTTP || "http://localhost:9000";
+  const apiBase = getApiBase();
   const { data: messages = [], error, isLoading, mutate } = useSWR<Message[]>(
     `${apiBase}/api/messages`,
     fetcher,

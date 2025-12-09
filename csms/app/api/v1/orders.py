@@ -7,6 +7,9 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 from app.database import get_db, Order
+from app.core.logging_config import get_logger
+
+logger = get_logger("ocpp_csms")
 
 router = APIRouter()
 
@@ -21,6 +24,14 @@ def list_orders(
     db: Session = Depends(get_db)
 ) -> List[dict]:
     """获取订单列表"""
+    logger.info(
+        f"[API] GET /api/v1/orders | "
+        f"用户ID: {user_id or '全部'} | "
+        f"充电桩ID: {charger_id or '全部'} | "
+        f"状态: {status or '全部'} | "
+        f"限制: {limit} | 偏移: {offset}"
+    )
+    
     query = db.query(Order)
     
     if user_id:
@@ -31,6 +42,8 @@ def list_orders(
         query = query.filter(Order.status == status)
     
     orders = query.order_by(Order.start_time.desc()).offset(offset).limit(limit).all()
+    
+    logger.info(f"[API] GET /api/v1/orders 成功 | 返回 {len(orders)} 个订单")
     
     return [
         {

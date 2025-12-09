@@ -127,6 +127,8 @@ def get_pending_chargers(db: Session = Depends(get_db)) -> List[ChargerStatus]:
     1. 充电桩已连接（WebSocket在线）
     2. 但数据库中不存在或配置不完整（缺少位置、价格等）
     """
+    logger.info("[API] GET /api/v1/charger-management/pending | 获取待配置充电桩列表")
+    
     pending_chargers = []
     
     # 获取所有已连接的充电桩ID
@@ -186,6 +188,7 @@ def get_pending_chargers(db: Session = Depends(get_db)) -> List[ChargerStatus]:
             )
             pending_chargers.append(status_info)
     
+    logger.info(f"[API] GET /api/v1/charger-management/pending 成功 | 找到 {len(pending_chargers)} 个待配置充电桩")
     return pending_chargers
 
 
@@ -196,8 +199,17 @@ def create_charger(req: CreateChargerRequest, db: Session = Depends(get_db)) -> 
     
     如果充电桩已存在，则更新信息
     """
+    logger.info(
+        f"[API] POST /api/v1/charger-management/create | "
+        f"充电桩ID: {req.charger_id} | "
+        f"厂商: {req.vendor} | 型号: {req.model}"
+    )
+    
     # 检查充电桩是否已存在
     charger = db.query(Charger).filter(Charger.id == req.charger_id).first()
+    
+    if charger:
+        logger.info(f"[API] 充电桩 {req.charger_id} 已存在，执行更新操作")
     
     if charger:
         # 更新现有充电桩
@@ -226,6 +238,7 @@ def create_charger(req: CreateChargerRequest, db: Session = Depends(get_db)) -> 
         charger.is_active = True
     else:
         # 创建新充电桩
+        logger.info(f"[API] 创建新充电桩: {req.charger_id}")
         charger = Charger(
             id=req.charger_id,
             vendor=req.vendor,
@@ -275,7 +288,12 @@ def create_charger(req: CreateChargerRequest, db: Session = Depends(get_db)) -> 
         except Exception as e:
             logger.warning(f"同步Redis失败: {e}")
         
-        logger.info(f"充电桩 {req.charger_id} 已创建/更新")
+        logger.info(
+            f"[API] POST /api/v1/charger-management/create 成功 | "
+            f"充电桩ID: {req.charger_id} | "
+            f"位置: ({req.latitude}, {req.longitude}) | "
+            f"价格: {req.price_per_kwh} COP/kWh"
+        )
         
         return {
             "success": True,
@@ -303,9 +321,17 @@ def create_charger(req: CreateChargerRequest, db: Session = Depends(get_db)) -> 
 @router.post("/location", summary="设置充电桩位置")
 def update_charger_location(req: UpdateChargerLocationRequest, db: Session = Depends(get_db)) -> dict:
     """设置或更新充电桩的地理位置"""
+    logger.info(
+        f"[API] POST /api/v1/charger-management/location | "
+        f"充电桩ID: {req.charger_id} | "
+        f"位置: ({req.latitude}, {req.longitude}) | "
+        f"地址: {req.address or '无'}"
+    )
+    
     charger = db.query(Charger).filter(Charger.id == req.charger_id).first()
     
     if not charger:
+        logger.warning(f"[API] POST /api/v1/charger-management/location | 充电桩 {req.charger_id} 未找到")
         raise HTTPException(status_code=404, detail=f"充电桩 {req.charger_id} 未找到，请先创建充电桩")
     
     # 更新位置信息
@@ -337,7 +363,11 @@ def update_charger_location(req: UpdateChargerLocationRequest, db: Session = Dep
         except Exception as e:
             logger.warning(f"同步Redis失败: {e}")
         
-        logger.info(f"充电桩 {req.charger_id} 位置已更新: ({req.latitude}, {req.longitude})")
+        logger.info(
+            f"[API] POST /api/v1/charger-management/location 成功 | "
+            f"充电桩ID: {req.charger_id} | "
+            f"位置: ({req.latitude}, {req.longitude})"
+        )
         
         return {
             "success": True,
@@ -357,9 +387,17 @@ def update_charger_location(req: UpdateChargerLocationRequest, db: Session = Dep
 @router.post("/pricing", summary="设置充电桩定价")
 def update_charger_pricing(req: UpdateChargerPricingRequest, db: Session = Depends(get_db)) -> dict:
     """设置或更新充电桩的价格和充电速率"""
+    logger.info(
+        f"[API] POST /api/v1/charger-management/pricing | "
+        f"充电桩ID: {req.charger_id} | "
+        f"价格: {req.price_per_kwh} COP/kWh | "
+        f"充电速率: {req.charging_rate or '未设置'} kW"
+    )
+    
     charger = db.query(Charger).filter(Charger.id == req.charger_id).first()
     
     if not charger:
+        logger.warning(f"[API] POST /api/v1/charger-management/pricing | 充电桩 {req.charger_id} 未找到")
         raise HTTPException(status_code=404, detail=f"充电桩 {req.charger_id} 未找到，请先创建充电桩")
     
     # 更新价格
@@ -389,7 +427,12 @@ def update_charger_pricing(req: UpdateChargerPricingRequest, db: Session = Depen
         except Exception as e:
             logger.warning(f"同步Redis失败: {e}")
         
-        logger.info(f"充电桩 {req.charger_id} 价格已更新: {req.price_per_kwh} COP/kWh")
+        logger.info(
+            f"[API] POST /api/v1/charger-management/pricing 成功 | "
+            f"充电桩ID: {req.charger_id} | "
+            f"价格: {req.price_per_kwh} COP/kWh | "
+            f"充电速率: {charger.charging_rate} kW"
+        )
         
         return {
             "success": True,
@@ -408,6 +451,8 @@ def update_charger_pricing(req: UpdateChargerPricingRequest, db: Session = Depen
 @router.get("/{charger_id}/status", summary="获取充电桩状态和配置信息")
 def get_charger_status(charger_id: str, db: Session = Depends(get_db)) -> dict:
     """获取充电桩的连接状态和配置完整性"""
+    logger.info(f"[API] GET /api/v1/charger-management/{charger_id}/status | 查询充电桩状态")
+    
     # 检查连接状态
     is_connected = check_charger_connection(charger_id)
     
@@ -456,4 +501,10 @@ def get_charger_status(charger_id: str, db: Session = Depends(get_db)) -> dict:
             } if db_charger else None,
         }
     }
+    
+    logger.info(
+        f"[API] GET /api/v1/charger-management/{charger_id}/status 成功 | "
+        f"连接状态: {'已连接' if is_connected else '未连接'} | "
+        f"配置完整: {is_configured and has_location and has_pricing}"
+    )
 

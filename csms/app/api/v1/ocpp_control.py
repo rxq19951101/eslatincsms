@@ -7,8 +7,10 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from app.core.config import get_settings
 from app.core.exceptions import ChargerNotConnectedException
+from app.core.logging_config import get_logger
 
 settings = get_settings()
+logger = get_logger("ocpp_csms")
 
 # 根据配置选择使用分布式或单机模式
 if settings.enable_distributed:
@@ -41,7 +43,15 @@ class RemoteResponse(BaseModel):
 @router.post("/remoteStart", response_model=RemoteResponse, summary="远程启动充电")
 async def remote_start(req: RemoteStartRequest) -> RemoteResponse:
     """远程启动充电事务"""
+    logger.info(
+        f"[API] POST /api/v1/ocpp_control/remoteStart | "
+        f"充电桩ID: {req.chargePointId} | "
+        f"用户标签: {req.idTag} | "
+        f"连接器ID: {req.connectorId}"
+    )
+    
     if not connection_manager.is_connected(req.chargePointId):
+        logger.warning(f"[API] 远程启动失败: 充电桩 {req.chargePointId} 未连接")
         raise ChargerNotConnectedException(req.chargePointId)
     
     # 使用消息处理器（支持分布式）
@@ -64,9 +74,16 @@ async def remote_start(req: RemoteStartRequest) -> RemoteResponse:
             }
         )
     
+    success = result.get("success", False)
+    logger.info(
+        f"[API] POST /api/v1/ocpp_control/remoteStart {'成功' if success else '失败'} | "
+        f"充电桩ID: {req.chargePointId} | "
+        f"用户标签: {req.idTag}"
+    )
+    
     return RemoteResponse(
-        success=result.get("success", False),
-        message="远程启动请求已发送" if result.get("success") else "远程启动失败",
+        success=success,
+        message="远程启动请求已发送" if success else "远程启动失败",
         details=result
     )
 
@@ -74,7 +91,14 @@ async def remote_start(req: RemoteStartRequest) -> RemoteResponse:
 @router.post("/remoteStop", response_model=RemoteResponse, summary="远程停止充电")
 async def remote_stop(req: RemoteStopRequest) -> RemoteResponse:
     """远程停止充电事务"""
+    logger.info(
+        f"[API] POST /api/v1/ocpp_control/remoteStop | "
+        f"充电桩ID: {req.chargePointId} | "
+        f"交易ID: {req.transactionId}"
+    )
+    
     if not connection_manager.is_connected(req.chargePointId):
+        logger.warning(f"[API] 远程停止失败: 充电桩 {req.chargePointId} 未连接")
         raise ChargerNotConnectedException(req.chargePointId)
     
     # 使用消息处理器（支持分布式）
@@ -95,9 +119,16 @@ async def remote_stop(req: RemoteStopRequest) -> RemoteResponse:
             }
         )
     
+    success = result.get("success", False)
+    logger.info(
+        f"[API] POST /api/v1/ocpp_control/remoteStop {'成功' if success else '失败'} | "
+        f"充电桩ID: {req.chargePointId} | "
+        f"交易ID: {req.transactionId}"
+    )
+    
     return RemoteResponse(
-        success=result.get("success", False),
-        message="远程停止请求已发送" if result.get("success") else "远程停止失败",
+        success=success,
+        message="远程停止请求已发送" if success else "远程停止失败",
         details=result
     )
 

@@ -8,6 +8,7 @@
 import React, { useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import useSWR from "swr";
+import { getApiBase } from "../../utils/api";
 import {
   LineChart,
   Line,
@@ -26,7 +27,7 @@ import {
   ResponsiveContainer,
 } from "recharts";
 
-const apiBase = process.env.NEXT_PUBLIC_API || process.env.NEXT_PUBLIC_CSMS_HTTP || "http://localhost:9000";
+  const apiBase = getApiBase();
 
 type ChargerDetail = {
   id: string;

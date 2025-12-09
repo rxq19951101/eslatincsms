@@ -7,6 +7,9 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 from app.database import get_db, Transaction
+from app.core.logging_config import get_logger
+
+logger = get_logger("ocpp_csms")
 
 router = APIRouter()
 
@@ -20,6 +23,13 @@ def list_transactions(
     db: Session = Depends(get_db)
 ) -> List[dict]:
     """获取事务列表"""
+    logger.info(
+        f"[API] GET /api/v1/transactions | "
+        f"充电桩ID: {charger_id or '全部'} | "
+        f"状态: {status or '全部'} | "
+        f"限制: {limit} | 偏移: {offset}"
+    )
+    
     query = db.query(Transaction)
     
     if charger_id:
@@ -28,6 +38,8 @@ def list_transactions(
         query = query.filter(Transaction.status == status)
     
     transactions = query.order_by(Transaction.start_time.desc()).offset(offset).limit(limit).all()
+    
+    logger.info(f"[API] GET /api/v1/transactions 成功 | 返回 {len(transactions)} 个事务")
     
     return [
         {

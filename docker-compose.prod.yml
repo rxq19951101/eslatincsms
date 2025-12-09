@@ -109,7 +109,8 @@ services:
     ports:
       - "${ADMIN_PORT:-3000}:3000"
     environment:
-      - NEXT_PUBLIC_CSMS_HTTP=${NEXT_PUBLIC_CSMS_HTTP:-http://localhost:9000}
+      - NEXT_PUBLIC_CSMS_HTTP=${NEXT_PUBLIC_CSMS_HTTP:-}
+      - NEXT_PUBLIC_API=${NEXT_PUBLIC_API:-}
       - NODE_ENV=production
     depends_on:
       csms:

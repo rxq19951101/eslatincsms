@@ -32,9 +32,15 @@ def get_charger_history(
     - 每日收入（COP）
     - 状态分布
     """
+    logger.info(
+        f"[API] GET /api/v1/statistics/charger/{charger_id}/history | "
+        f"查询天数: {days} 天"
+    )
+    
     # 验证充电桩是否存在
     charger = db.query(Charger).filter(Charger.id == charger_id).first()
     if not charger:
+        logger.warning(f"[API] GET /api/v1/statistics/charger/{charger_id}/history | 充电桩未找到")
         raise HTTPException(status_code=404, detail=f"充电桩 {charger_id} 未找到")
     
     # 计算时间范围
@@ -212,6 +218,11 @@ def get_charger_heartbeat_history(
     - 每个心跳点的健康状态（normal/warning/abnormal）
     - 心跳间隔统计
     """
+    logger.info(
+        f"[API] GET /api/v1/statistics/charger/{charger_id}/heartbeat-history | "
+        f"查询小时数: {hours} 小时"
+    )
+    """
     charger = db.query(Charger).filter(Charger.id == charger_id).first()
     if not charger:
         raise HTTPException(status_code=404, detail=f"充电桩 {charger_id} 未找到")
@@ -271,6 +282,11 @@ def get_charger_status_timeline(
     
     返回数据包括：
     - 状态变化记录
+    """
+    logger.info(
+        f"[API] GET /api/v1/statistics/charger/{charger_id}/status-timeline | "
+        f"查询小时数: {hours} 小时"
+    )
     - 每个状态的持续时间
     - 状态分布统计（离线、空闲、充电中）
     """

@@ -8,8 +8,9 @@
 import React, { useState, useEffect } from "react";
 import useSWR from "swr";
 import Link from "next/link";
+import { getApiBase } from "../utils/api";
 
-const apiBase = process.env.NEXT_PUBLIC_API || process.env.NEXT_PUBLIC_CSMS_HTTP || "http://localhost:9000";
+const apiBase = getApiBase();
 
 type PendingCharger = {
   charger_id: string;

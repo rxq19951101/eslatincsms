@@ -11,6 +11,7 @@
 import React, { useState } from "react";
 import useSWR from "swr";
 import dynamic from "next/dynamic";
+import { getApiBase } from "../utils/api";
 
 // 动态导入 Leaflet 组件（仅客户端）
 const MapContainer = dynamic(
@@ -72,7 +73,7 @@ function MapClickHandler({ onClick }: { onClick: (latlng: { lat: number; lng: nu
 }
 
 export default function MapPage() {
-  const apiBase = process.env.NEXT_PUBLIC_API || process.env.NEXT_PUBLIC_CSMS_HTTP || "http://localhost:9000";
+  const apiBase = getApiBase();
   const { data: chargers = [], error, isLoading, mutate } = useSWR<Charger[]>(
     `${apiBase}/chargers`,
     fetcher,

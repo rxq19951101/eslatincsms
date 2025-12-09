@@ -27,6 +27,8 @@ def list_chargers(
     - configured: 只返回已配置的充电桩（有位置和价格）
     - unconfigured: 只返回未配置的充电桩（缺少位置或价格）
     """
+    logger.info(f"[API] GET /api/v1/chargers | 筛选类型: {filter_type or '全部'}")
+    
     query = db.query(Charger).filter(Charger.is_active == True)
     
     # 根据筛选类型过滤
@@ -50,6 +52,7 @@ def list_chargers(
         )
     
     chargers = query.all()
+    logger.info(f"[API] 查询到 {len(chargers)} 个充电桩 | 筛选类型: {filter_type or '全部'}")
     
     result = []
     for c in chargers:
@@ -77,14 +80,18 @@ def list_chargers(
             "has_pricing": has_pricing,
         })
     
+    logger.info(f"[API] GET /api/v1/chargers 成功返回 {len(result)} 个充电桩")
     return result
 
 
 @router.get("/{charger_id}", summary="获取充电桩详情")
 def get_charger(charger_id: str, db: Session = Depends(get_db)) -> dict:
     """获取单个充电桩的详细信息"""
+    logger.info(f"[API] GET /api/v1/chargers/{charger_id} | 请求充电桩详情")
+    
     charger = db.query(Charger).filter(Charger.id == charger_id).first()
     if not charger:
+        logger.warning(f"[API] GET /api/v1/chargers/{charger_id} | 充电桩未找到")
         raise HTTPException(status_code=404, detail=f"充电桩 {charger_id} 未找到")
     
     return {
@@ -106,4 +113,6 @@ def get_charger(charger_id: str, db: Session = Depends(get_db)) -> dict:
         "created_at": charger.created_at.isoformat() if charger.created_at else None,
         "updated_at": charger.updated_at.isoformat() if charger.updated_at else None,
     }
+    
+    logger.info(f"[API] GET /api/v1/chargers/{charger_id} 成功 | 状态: {charger.status}")
 

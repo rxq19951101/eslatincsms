@@ -9,6 +9,7 @@
 import React, { useState, useEffect, useMemo } from "react";
 import useSWR from "swr";
 import { QRCodeSVG } from "qrcode.react";
+import { getApiBase } from "../utils/api";
 import {
   LineChart, Line, BarChart, Bar, PieChart, Pie, Cell,
   XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer
@@ -100,7 +101,7 @@ const fetcher = async <T = any>(url: string): Promise<T> => {
 };
 
 export default function ChargersPage() {
-  const apiBase = process.env.NEXT_PUBLIC_API || process.env.NEXT_PUBLIC_CSMS_HTTP || "http://localhost:9000";
+  const apiBase = getApiBase();
   const [filterType, setFilterType] = useState<"all" | "configured" | "unconfigured">("all");
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedChargerForCharts, setSelectedChargerForCharts] = useState<string | null>(null);

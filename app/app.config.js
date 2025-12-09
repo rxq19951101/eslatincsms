@@ -37,6 +37,13 @@ const environment = process.env.NODE_ENV || 'development';
 // 自动检测本机 IP（仅在开发环境）
 const detectedIp = environment === 'development' ? getLocalIp() : null;
 
+// ========== 服务器配置 ==========
+// 在这里设置你的服务器 IP 地址（修改下面这行）
+const SERVER_IP = process.env.SERVER_IP || '47.236.134.99';  // 生产服务器 IP
+const SERVER_PORT = process.env.SERVER_PORT || '9000';
+const SERVER_API_BASE = `http://${SERVER_IP}:${SERVER_PORT}`;
+// =================================
+
 module.exports = {
   expo: {
     name,
@@ -52,8 +59,8 @@ module.exports = {
     // 额外配置，可以通过 Constants.expoConfig.extra 访问
     extra: {
       // 生产环境 API 地址（优先级最高）
-      // 通过环境变量设置: EXPO_PUBLIC_CSMS_API_BASE=https://api.yourdomain.com
-      csmsApiBase: process.env.EXPO_PUBLIC_CSMS_API_BASE || null,
+      // 优先级: 环境变量 EXPO_PUBLIC_CSMS_API_BASE > 配置文件中的 SERVER_API_BASE > 自动检测
+      csmsApiBase: process.env.EXPO_PUBLIC_CSMS_API_BASE || SERVER_API_BASE || null,
       
       // 开发环境 IP 地址
       // 优先级: 环境变量 > 自动检测 > 默认值
