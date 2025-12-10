@@ -101,10 +101,11 @@ class MQTTAdapter(TransportAdapter):
                 action = payload.get("action", "")
                 payload_data = payload.get("payload", {})
                 
-                logger.info(f"[{charger_id}] <- MQTT OCPP {action}")
+                logger.info(f"[{charger_id}] <- MQTT OCPP {action} | payload: {payload_data}")
                 
                 # 标记充电桩已连接
                 self._connected_chargers.add(charger_id)
+                logger.debug(f"[{charger_id}] 已标记为已连接（MQTT）")
                 
                 # 异步处理消息（在事件循环中）
                 # 注意：_on_message 在 paho-mqtt 的后台线程中执行，需要使用 run_coroutine_threadsafe
@@ -123,7 +124,13 @@ class MQTTAdapter(TransportAdapter):
     
     async def _handle_message(self, charger_id: str, action: str, payload: Dict[str, Any]):
         """处理接收到的消息"""
-        response = await self.handle_incoming_message(charger_id, action, payload)
+        logger.info(f"[{charger_id}] MQTT 开始处理消息: {action}")
+        try:
+            response = await self.handle_incoming_message(charger_id, action, payload)
+            logger.info(f"[{charger_id}] MQTT 消息处理完成: {action}, 响应: {response}")
+        except Exception as e:
+            logger.error(f"[{charger_id}] MQTT 消息处理失败: {action}, 错误: {e}", exc_info=True)
+            response = {"error": str(e)}
         
         # 发送响应到响应主题
         response_topic = f"ocpp/{charger_id}/responses"
@@ -138,7 +145,7 @@ class MQTTAdapter(TransportAdapter):
                 json.dumps(response_message),
                 qos=1
             )
-            logger.info(f"[{charger_id}] -> MQTT OCPP {action} Response")
+            logger.info(f"[{charger_id}] -> MQTT OCPP {action} Response 已发送")
     
     def _on_disconnect(self, client: mqtt.Client, userdata, rc):
         """MQTT 断开连接回调"""

@@ -185,7 +185,8 @@ async def handle_ocpp_message(charger_id: str, action: str, payload: Dict[str, A
     # 处理不同的 OCPP 消息
     if action == "BootNotification":
         try:
-            charger["status"] = "Available"
+            # 只更新物理状态（由 OCPP 控制）
+            charger["physical_status"] = "Available"
             vendor = str(payload.get("vendor", "")).strip()
             model = str(payload.get("model", "")).strip()
             firmware_version = str(payload.get("firmwareVersion", "")).strip()
@@ -241,8 +242,11 @@ async def handle_ocpp_message(charger_id: str, action: str, payload: Dict[str, A
             return {"status": "Rejected", "error": str(e)}
     
     elif action == "Heartbeat":
+        logger.info(f"[{charger_id}] 处理 Heartbeat 消息，更新 last_seen: {charger['last_seen']}")
+        # Heartbeat 只更新 last_seen，不更新物理状态（物理状态由 StatusNotification 更新）
         update_active(charger_id)
         save_charger(charger)
+        logger.info(f"[{charger_id}] Heartbeat 处理完成，已保存到 Redis")
         
         # 记录心跳历史
         if HISTORY_RECORDING_AVAILABLE:
@@ -255,10 +259,12 @@ async def handle_ocpp_message(charger_id: str, action: str, payload: Dict[str, A
         return {"currentTime": now_iso()}
     
     elif action == "StatusNotification":
-        new_status = str(payload.get("status", "Unknown"))
-        previous_status = charger.get("status")
-        charger["status"] = new_status
-        if new_status == "Available":
+        # StatusNotification 只更新物理状态（由充电桩自身通过 OCPP 更新）
+        new_physical_status = str(payload.get("status", "Unknown"))
+        previous_physical_status = charger.get("physical_status", "Unknown")
+        charger["physical_status"] = new_physical_status
+        
+        if new_physical_status == "Available":
             session = charger.setdefault("session", {
                 "authorized": False,
                 "transaction_id": None,
@@ -267,13 +273,14 @@ async def handle_ocpp_message(charger_id: str, action: str, payload: Dict[str, A
             if session.get("transaction_id") is not None:
                 session["transaction_id"] = None
                 session["order_id"] = None
-        update_active(charger_id, status=new_status)
+        
+        update_active(charger_id, status=new_physical_status)
         save_charger(charger)
         
         # 记录状态变化历史
-        if HISTORY_RECORDING_AVAILABLE and previous_status != new_status:
+        if HISTORY_RECORDING_AVAILABLE and previous_physical_status != new_physical_status:
             try:
-                record_status_change(charger_id, new_status, previous_status)
+                record_status_change(charger_id, new_physical_status, previous_physical_status)
             except Exception as e:
                 logger.error(f"[{charger_id}] 记录状态历史失败: {e}", exc_info=True)
         
@@ -290,7 +297,8 @@ async def handle_ocpp_message(charger_id: str, action: str, payload: Dict[str, A
         tx_id = payload.get("transactionId") or int(datetime.now().timestamp())
         id_tag = str(payload.get("idTag", ""))
         charger["session"]["transaction_id"] = tx_id
-        charger["status"] = "Charging"
+        # 只更新物理状态（由 OCPP 控制）
+        charger["physical_status"] = "Charging"
         
         charging_rate = charger.get("charging_rate", 7.0)
         order_id = f"order_{tx_id}"
@@ -365,7 +373,8 @@ async def handle_ocpp_message(charger_id: str, action: str, payload: Dict[str, A
         
         charger["session"]["transaction_id"] = None
         charger["session"]["order_id"] = None
-        charger["status"] = "Available"
+        # 只更新物理状态（由 OCPP 控制）
+        charger["physical_status"] = "Available"
         update_active(charger_id, status="Available", txn_id=None)
         save_charger(charger)
         
@@ -428,13 +437,15 @@ def now_iso() -> str:
 
 
 def get_default_charger(charger_id: str) -> Dict[str, Any]:
-    return {
+    """创建默认充电桩数据结构"""
+    charger = {
         "id": charger_id,
         "vendor": None,
         "model": None,
         "firmware_version": None,
         "serial_number": None,
-        "status": "Unknown",
+        "physical_status": "Unknown",  # 物理状态：只允许 OCPP 更新
+        "operational_status": "ENABLED",  # 运营状态：ENABLED / MAINTENANCE / DISABLED
         "last_seen": now_iso(),
         "location": {
             "latitude": None,
@@ -450,11 +461,27 @@ def get_default_charger(charger_id: str) -> Dict[str, Any]:
         "charging_rate": 7.0,  # 充电速率 (kW)
         "price_per_kwh": 2700.0,  # 每度电价格 (COP/kWh)
     }
+    # 计算字段：是否真正可用
+    charger["is_available"] = (charger["physical_status"] == "Available" and charger["operational_status"] == "ENABLED")
+    return charger
+
+
+def calculate_is_available(charger: Dict[str, Any]) -> bool:
+    """计算充电桩是否真正可用"""
+    physical_status = charger.get("physical_status", "Unknown")
+    operational_status = charger.get("operational_status", "ENABLED")
+    return (physical_status == "Available" and operational_status == "ENABLED")
 
 
 def migrate_charger_data(charger: Dict[str, Any]) -> Dict[str, Any]:
-    """迁移旧数据，补充缺失的新字段，并修复数据不一致问题"""
-    # 如果缺少新字段，使用默认值
+    """补充缺失的新字段，并修复数据不一致问题"""
+    # 确保新字段存在
+    if "physical_status" not in charger:
+        charger["physical_status"] = "Unknown"
+    if "operational_status" not in charger:
+        charger["operational_status"] = "ENABLED"
+    
+    # 如果缺少其他新字段，使用默认值
     if "connector_type" not in charger:
         charger["connector_type"] = "Type2"
     if "charging_rate" not in charger:
@@ -467,19 +494,23 @@ def migrate_charger_data(charger: Dict[str, Any]) -> Dict[str, Any]:
         if "order_id" not in charger["session"]:
             charger["session"]["order_id"] = None
         
-        # 修复：如果状态是 Available 但 transaction_id 不为 null，清理 transaction_id
-        if charger.get("status") == "Available" and charger["session"].get("transaction_id") is not None:
+        # 修复：如果物理状态是 Available 但 transaction_id 不为 null，清理 transaction_id
+        # 注意：这里使用 physical_status 而不是 status
+        if charger.get("physical_status") == "Available" and charger["session"].get("transaction_id") is not None:
             logger.info(f"[{charger.get('id')}] Auto-fixing: clearing stale transaction_id for Available charger")
             charger["session"]["transaction_id"] = None
             charger["session"]["order_id"] = None
+    
+    # 计算 is_available
+    charger["is_available"] = calculate_is_available(charger)
     
     return charger
 
 
 def load_chargers() -> List[Dict[str, Any]]:
+    """加载所有充电桩数据，不自动判断离线状态（由充电桩自身通过 OCPP 更新）"""
     items = redis_client.hgetall(CHARGERS_HASH_KEY)
     chargers: List[Dict[str, Any]] = []
-    now = datetime.now(timezone.utc)
     
     for _, val in items.items():
         try:
@@ -487,45 +518,8 @@ def load_chargers() -> List[Dict[str, Any]]:
             # 迁移旧数据，补充缺失字段
             charger = migrate_charger_data(charger)
             
-            # 根据 last_seen 自动判断是否离线
-            # 如果 last_seen 超过 30 秒（与后台运营软件保持一致），自动将状态设为 Unavailable
-            if charger.get("last_seen"):
-                try:
-                    last_seen_str = charger["last_seen"]
-                    # 处理不同的时间格式
-                    if last_seen_str.endswith('Z'):
-                        last_seen_str = last_seen_str.replace('Z', '+00:00')
-                    last_seen_time = datetime.fromisoformat(last_seen_str)
-                    
-                    # 计算时间差（秒）
-                    time_diff_seconds = (now - last_seen_time).total_seconds()
-                    
-                    # 如果超过 30 秒未更新，且当前状态不是 Charging 或 Faulted，则标记为离线
-                    # 注意：如果正在充电或故障，保持原状态
-                    if time_diff_seconds > 30:
-                        current_status = charger.get("status", "Unknown")
-                        # 只有在非充电、非故障状态下才自动标记为离线
-                        if current_status not in ["Charging", "Faulted"]:
-                            charger["status"] = "Unavailable"
-                            logger.debug(
-                                f"[{charger.get('id')}] 自动标记为离线: "
-                                f"last_seen={last_seen_str}, 距离现在={time_diff_seconds:.1f}秒"
-                            )
-                except (ValueError, TypeError) as e:
-                    # 如果时间解析失败，且状态不是 Charging 或 Faulted，标记为离线
-                    current_status = charger.get("status", "Unknown")
-                    if current_status not in ["Charging", "Faulted"]:
-                        charger["status"] = "Unavailable"
-                        logger.warning(f"[{charger.get('id')}] last_seen 解析失败，标记为离线: {e}")
-            else:
-                # 如果没有 last_seen，且状态不是 Charging 或 Faulted，标记为离线
-                current_status = charger.get("status", "Unknown")
-                if current_status not in ["Charging", "Faulted"]:
-                    charger["status"] = "Unavailable"
-                    logger.debug(f"[{charger.get('id')}] 没有 last_seen，标记为离线")
-            
-            # 如果数据有更新，保存回去
-            save_charger(charger)
+            # 计算 is_available（每次加载时重新计算，确保准确性）
+            charger["is_available"] = calculate_is_available(charger)
             chargers.append(charger)
         except Exception as e:
             logger.error(f"加载充电桩数据失败: {e}", exc_info=True)
@@ -535,6 +529,9 @@ def load_chargers() -> List[Dict[str, Any]]:
 
 def save_charger(charger: Dict[str, Any]) -> None:
     """保存充电桩数据到Redis，带错误处理"""
+    # 确保 is_available 字段是最新的
+    charger["is_available"] = calculate_is_available(charger)
+    
     try:
         redis_client.hset(CHARGERS_HASH_KEY, charger["id"], json.dumps(charger))
     except redis.exceptions.ResponseError as e:
@@ -580,8 +577,9 @@ def sync_charger_to_db(charger: Dict[str, Any]) -> None:
                 db_charger.firmware_version = charger.get("firmware_version")
             if "serial_number" in charger:
                 db_charger.serial_number = charger.get("serial_number")
-            if "status" in charger:
-                db_charger.status = charger.get("status", "Unknown")
+            # 同步物理状态到数据库
+            if "physical_status" in charger:
+                db_charger.status = charger.get("physical_status", "Unknown")
             if "last_seen" in charger:
                 try:
                     db_charger.last_seen = datetime.fromisoformat(charger["last_seen"].replace("Z", "+00:00"))
@@ -1077,7 +1075,7 @@ async def remote_start(req: RemoteStartRequest) -> RemoteResponse:
             "meter": 0,
         })
         tx_id = int(datetime.now().timestamp())
-        charger["status"] = "Charging"
+        charger["physical_status"] = "Charging"
         session["authorized"] = True
         session["transaction_id"] = tx_id
         charger["last_seen"] = now_iso()
@@ -1213,7 +1211,7 @@ async def remote_stop(req: RemoteStopRequest) -> RemoteResponse:
         session["transaction_id"] = None
         session["authorized"] = False
         session["order_id"] = None
-        charger["status"] = "Available"
+        charger["physical_status"] = "Available"
         charger["last_seen"] = now_iso()
         session["meter"] = session.get("meter", 0)
         save_charger(charger)
@@ -1397,21 +1395,20 @@ async def change_availability(req: ChangeAvailabilityRequest) -> RemoteResponse:
             {"connectorId": req.connectorId, "type": req.type}
         )
         
-        # 如果设置为 Inoperative（不可用），自动将充电桩状态设为 Maintenance（维修中）
+        # 如果设置为 Inoperative（不可用），更新运营状态为 MAINTENANCE
         if req.type == "Inoperative" and result.get("success"):
             charger = next((c for c in load_chargers() if c["id"] == req.chargePointId), None)
             if charger:
-                charger["status"] = "Maintenance"
+                charger["operational_status"] = "MAINTENANCE"
                 save_charger(charger)
-                update_active(req.chargePointId, status="Maintenance")
-                logger.info(f"[{req.chargePointId}] 已设置为维修状态（Inoperative）")
-        # 如果设置为 Operative（可用），且当前状态是 Maintenance，恢复为 Available
+                logger.info(f"[{req.chargePointId}] 已设置为维修状态（operational_status=MAINTENANCE）")
+        # 如果设置为 Operative（可用），恢复运营状态为 ENABLED
         elif req.type == "Operative" and result.get("success"):
             charger = next((c for c in load_chargers() if c["id"] == req.chargePointId), None)
-            if charger and charger.get("status") == "Maintenance":
-                charger["status"] = "Available"
+            if charger:
+                charger["operational_status"] = "ENABLED"
                 save_charger(charger)
-                update_active(req.chargePointId, status="Available")
+                logger.info(f"[{req.chargePointId}] 已恢复为可用状态（operational_status=ENABLED）")
                 logger.info(f"[{req.chargePointId}] 已从维修状态恢复为可用")
         
         return RemoteResponse(
@@ -1444,10 +1441,10 @@ async def set_maintenance(req: SetMaintenanceRequest) -> RemoteResponse:
             raise HTTPException(status_code=404, detail=f"Charger {req.chargePointId} not found")
         
         if req.maintenance:
-            # 设置为维修状态
-            charger["status"] = "Maintenance"
+            # 设置为维修状态（更新运营状态）
+            charger["operational_status"] = "MAINTENANCE"
             save_charger(charger)
-            update_active(req.chargePointId, status="Maintenance")
+            # 注意：不更新 physical_status，它由 OCPP 控制
             
             # 同时发送 ChangeAvailability 消息到充电桩（如果连接）
             try:
@@ -1459,17 +1456,21 @@ async def set_maintenance(req: SetMaintenanceRequest) -> RemoteResponse:
             except Exception as e:
                 logger.warning(f"[{req.chargePointId}] 发送 ChangeAvailability 失败（可能离线）: {e}")
             
-            logger.info(f"[{req.chargePointId}] 已设置为维修状态")
+            logger.info(f"[{req.chargePointId}] 已设置为维修状态（operational_status=MAINTENANCE）")
             return RemoteResponse(
                 success=True,
                 message="Charger set to maintenance mode",
-                details={"chargePointId": req.chargePointId, "status": "Maintenance"}
+                details={
+                    "chargePointId": req.chargePointId,
+                    "operational_status": "MAINTENANCE",
+                    "is_available": calculate_is_available(charger)
+                }
             )
         else:
-            # 取消维修状态，恢复为可用
-            charger["status"] = "Available"
+            # 取消维修状态，恢复为可用（更新运营状态）
+            charger["operational_status"] = "ENABLED"
             save_charger(charger)
-            update_active(req.chargePointId, status="Available")
+            # 注意：不更新 physical_status，它由 OCPP 控制
             
             # 同时发送 ChangeAvailability 消息到充电桩（如果连接）
             try:
@@ -1481,11 +1482,15 @@ async def set_maintenance(req: SetMaintenanceRequest) -> RemoteResponse:
             except Exception as e:
                 logger.warning(f"[{req.chargePointId}] 发送 ChangeAvailability 失败（可能离线）: {e}")
             
-            logger.info(f"[{req.chargePointId}] 已取消维修状态，恢复为可用")
+            logger.info(f"[{req.chargePointId}] 已取消维修状态，恢复为可用（operational_status=ENABLED）")
             return RemoteResponse(
                 success=True,
                 message="Charger maintenance mode cancelled",
-                details={"chargePointId": req.chargePointId, "status": "Available"}
+                details={
+                    "chargePointId": req.chargePointId,
+                    "operational_status": "ENABLED",
+                    "is_available": calculate_is_available(charger)
+                }
             )
     except HTTPException:
         raise
@@ -1657,7 +1662,9 @@ async def export_logs(req: ExportLogsRequest, request: Request = None):
                     "model": charger.get("model"),
                     "firmware_version": charger.get("firmware_version"),
                     "serial_number": charger.get("serial_number"),
-                    "status": charger.get("status"),
+                    "physical_status": charger.get("physical_status", "Unknown"),
+                    "operational_status": charger.get("operational_status", "ENABLED"),
+                    "is_available": calculate_is_available(charger),
                     "last_seen": charger.get("last_seen"),
                 }
             }
@@ -1702,7 +1709,9 @@ async def export_logs(req: ExportLogsRequest, request: Request = None):
                     "model": charger.get("model"),
                     "firmware_version": charger.get("firmware_version"),
                     "serial_number": charger.get("serial_number"),
-                    "status": charger.get("status"),
+                    "physical_status": charger.get("physical_status", "Unknown"),
+                    "operational_status": charger.get("operational_status", "ENABLED"),
+                    "is_available": calculate_is_available(charger),
                     "last_seen": charger.get("last_seen"),
                 }
             }
@@ -2140,7 +2149,7 @@ async def ocpp_ws(ws: WebSocket, id: str = Query(..., description="Charger ID"))
             # Simplified handlers for demo
             if action == "BootNotification":
                 try:
-                    charger["status"] = "Available"
+                    charger["physical_status"] = "Available"
                     vendor = str(payload.get("vendor", "")).strip()
                     model = str(payload.get("model", "")).strip()
                     firmware_version = str(payload.get("firmwareVersion", "")).strip()
@@ -2207,7 +2216,7 @@ async def ocpp_ws(ws: WebSocket, id: str = Query(..., description="Charger ID"))
 
             elif action == "StatusNotification":
                 new_status = str(payload.get("status", "Unknown"))
-                charger["status"] = new_status
+                charger["physical_status"] = new_status
                 # 修复：如果状态变为 Available，自动清理 transaction_id
                 if new_status == "Available":
                     session = charger.setdefault("session", {
@@ -2243,7 +2252,7 @@ async def ocpp_ws(ws: WebSocket, id: str = Query(..., description="Charger ID"))
                 tx_id = payload.get("transactionId") or int(datetime.now().timestamp())
                 id_tag = str(payload.get("idTag", ""))
                 charger["session"]["transaction_id"] = tx_id
-                charger["status"] = "Charging"
+                charger["physical_status"] = "Charging"
                 
                 # 创建充电订单
                 charging_rate = charger.get("charging_rate", 7.0)
@@ -2330,7 +2339,7 @@ async def ocpp_ws(ws: WebSocket, id: str = Query(..., description="Charger ID"))
                 
                 charger["session"]["transaction_id"] = None
                 charger["session"]["order_id"] = None
-                charger["status"] = "Available"
+                charger["physical_status"] = "Available"
                 update_active(id, status="Available", txn_id=None)
                 save_charger(charger)
                 logger.info(f"[{id}] -> OCPP StopTransactionResponse | txId={tx_id}, orderId={order_id}")

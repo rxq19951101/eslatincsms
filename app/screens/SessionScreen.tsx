@@ -20,7 +20,9 @@ import { API_ENDPOINTS } from '../config';
 
 type Charger = {
   id: string;
-  status: string;
+  physical_status: string;  // 物理状态：只允许 OCPP 更新（Available / Charging / Faulted ...）
+  operational_status: string;  // 运营状态：平台人工 & 运维系统控制（ENABLED / MAINTENANCE / DISABLED）
+  is_available: boolean;  // 是否真正可用（计算字段）：physical_status = 'Available' AND operational_status = 'ENABLED'
   last_seen: string;
   session: {
     authorized: boolean;
@@ -82,7 +84,7 @@ export default function SessionScreen({ route, navigation, user }: SessionScreen
   // 每60秒获取一次实时电量数据
   useEffect(() => {
     // 如果不在充电状态，清除实时数据
-    if (!charger || charger.status !== 'Charging' || !charger.session.transaction_id) {
+    if (!charger || charger.physical_status !== 'Charging' || !charger.session.transaction_id) {
       setRealTimeMeter(null);
       return;
     }
@@ -102,12 +104,12 @@ export default function SessionScreen({ route, navigation, user }: SessionScreen
       console.log('[SessionScreen] 清除60秒定时器');
       clearInterval(interval);
     };
-  }, [charger?.status, charger?.session?.transaction_id, chargerId]);
+  }, [charger?.physical_status, charger?.session?.transaction_id, chargerId]);
 
   // 实时更新已充电时间和电量
   useEffect(() => {
     // 如果不在充电状态，清除显示
-    if (!charger || charger.status !== 'Charging' || !charger.session.transaction_id) {
+    if (!charger || charger.physical_status !== 'Charging' || !charger.session.transaction_id) {
       setElapsedTime('00:00:00');
       setChargedEnergy(0);
       setSpentAmount(0);
@@ -221,57 +223,14 @@ export default function SessionScreen({ route, navigation, user }: SessionScreen
       const found = chargers.find((c) => c.id === chargerId);
 
       if (found) {
-        // 检查充电桩是否真的在线：检查 last_seen 时间
-        // 与后台运营软件保持一致：如果 last_seen 超过30秒，认为充电桩离线
-        // 充电桩通常每30秒发送一次心跳，如果超过30秒没更新，肯定离线了
-        let chargerStatus = found.status;
+        // 使用服务器返回的 is_available 字段判断是否可用
+        // is_available = (physical_status = 'Available' AND operational_status = 'ENABLED')
+        // 不再自己判断离线状态，完全由服务器和充电桩自身控制
         
-        if (found.last_seen) {
-          try {
-            const lastSeenTime = new Date(found.last_seen);
-            const now = new Date();
-            const secondsSinceLastSeen = (now.getTime() - lastSeenTime.getTime()) / 1000;
-            
-            console.log(`[SessionScreen] 充电桩 ${chargerId} 最后更新时间: ${found.last_seen}, 距离现在: ${secondsSinceLastSeen.toFixed(0)} 秒`);
-            
-            // 如果超过30秒没有更新，认为是离线状态（与后台运营软件保持一致）
-            // 注意：如果正在充电或故障，保持原状态（后端已处理，这里做双重检查）
-            if (secondsSinceLastSeen > 30) {
-              const currentStatus = found.status;
-              // 只有在非充电、非故障状态下才标记为离线
-              if (currentStatus !== 'Charging' && currentStatus !== 'Faulted') {
-                console.warn(`[SessionScreen] 充电桩 ${chargerId} 已离线（超过30秒未更新，${secondsSinceLastSeen.toFixed(0)}秒前）`);
-                chargerStatus = 'Unavailable';
-              } else {
-                console.log(`[SessionScreen] 充电桩 ${chargerId} 状态为 ${currentStatus}，即使离线也保持原状态`);
-              }
-            } else if (secondsSinceLastSeen < 0) {
-              // 如果时间是未来的，可能是时区问题，但先认为是有效的
-              console.warn(`[SessionScreen] 充电桩 ${chargerId} 的 last_seen 是未来时间，可能是时区问题`);
-            }
-          } catch (e) {
-            console.warn('[SessionScreen] 解析 last_seen 时间失败:', e);
-            // 如果无法解析时间，且状态不是充电或故障，认为是离线
-            const currentStatus = found.status;
-            if (currentStatus !== 'Charging' && currentStatus !== 'Faulted') {
-              chargerStatus = 'Unavailable';
-            }
-          }
-        } else {
-          // 如果没有 last_seen，且状态不是充电或故障，认为是离线
-          const currentStatus = found.status;
-          if (currentStatus !== 'Charging' && currentStatus !== 'Faulted') {
-            console.warn(`[SessionScreen] 充电桩 ${chargerId} 没有 last_seen 时间，认为是离线`);
-            chargerStatus = 'Unavailable';
-          }
-        }
+        console.log(`[SessionScreen] 充电桩 ${chargerId} 状态: physical_status=${found.physical_status}, operational_status=${found.operational_status}, is_available=${found.is_available}`);
         
         // 更新充电桩状态
-        const updatedCharger = {
-          ...found,
-          status: chargerStatus,
-        };
-        setCharger(updatedCharger);
+        setCharger(found);
         
         // 如果找到了充电桩，重置提示标志
         if (hasShownNotFoundAlert) {
@@ -280,13 +239,13 @@ export default function SessionScreen({ route, navigation, user }: SessionScreen
         
         // 如果正在充电，只在 transaction_id 变化时获取当前订单信息
         // 订单信息在充电过程中不会变化，不需要频繁请求
-        const currentTransactionId = updatedCharger.session.transaction_id;
-        // 注意：使用更新后的状态 chargerStatus，而不是 found.status
-        if (chargerStatus === 'Charging' && currentTransactionId) {
+        const currentTransactionId = found.session.transaction_id;
+        // 使用物理状态判断是否在充电
+        if (found.physical_status === 'Charging' && currentTransactionId) {
           // 只在 transaction_id 变化时获取订单（新开始充电时）
           if (currentTransactionId !== lastTransactionId) {
             console.log('[SessionScreen] 检测到新的交易ID，获取订单信息:', currentTransactionId);
-            fetchCurrentOrder(updatedCharger.id, currentTransactionId);
+            fetchCurrentOrder(found.id, currentTransactionId);
             setLastTransactionId(currentTransactionId);
           }
         } else {
@@ -317,7 +276,9 @@ export default function SessionScreen({ route, navigation, user }: SessionScreen
         
         setCharger({
           id: chargerId,
-          status: 'Unavailable',
+          physical_status: 'Unavailable',
+          operational_status: 'ENABLED',
+          is_available: false,
           last_seen: '', // 离线充电桩没有最后更新时间
           session: {
             authorized: false,
@@ -338,7 +299,9 @@ export default function SessionScreen({ route, navigation, user }: SessionScreen
         console.warn('[SessionScreen] 获取充电桩状态失败，设置为离线状态');
         setCharger({
           id: chargerId,
-          status: 'Unavailable',
+          physical_status: 'Unavailable',
+          operational_status: 'ENABLED',
+          is_available: false,
           last_seen: '',
           session: {
             authorized: false,
@@ -441,10 +404,10 @@ export default function SessionScreen({ route, navigation, user }: SessionScreen
     // 如果没有充电桩数据，使用默认值继续
     if (!charger) {
       console.log('[SessionScreen] 充电桩数据未找到，使用默认值继续');
-    } else if (charger.status === 'Charging') {
+    } else if (charger.physical_status === 'Charging') {
       Alert.alert('提示', '充电桩正在充电中');
       return;
-    } else if (charger.status === 'Faulted') {
+    } else if (charger.physical_status === 'Faulted') {
       Alert.alert('提示', '充电桩当前故障，无法充电');
       return;
     }
@@ -764,8 +727,8 @@ export default function SessionScreen({ route, navigation, user }: SessionScreen
         <View style={styles.statusContainer}>
           <View style={styles.statusRow}>
             <Text style={styles.statusLabel}>状态</Text>
-            <Text style={[styles.statusValue, { color: getStatusColor(charger.status) }]}>
-              {getStatusText(charger.status)}
+            <Text style={[styles.statusValue, { color: getStatusColor(charger.physical_status) }]}>
+              {getStatusText(charger.physical_status)}
             </Text>
           </View>
           <View style={styles.statusRow}>
@@ -792,7 +755,7 @@ export default function SessionScreen({ route, navigation, user }: SessionScreen
               <Text style={styles.statusValue}>{charger.charging_rate} kW</Text>
             </View>
           )}
-          {charger.status === 'Charging' && charger.session.transaction_id && (
+          {charger.physical_status === 'Charging' && charger.session.transaction_id && (
             <>
               <View style={styles.statusRow}>
                 <Text style={styles.statusLabel}>已充电时间</Text>
@@ -830,7 +793,7 @@ export default function SessionScreen({ route, navigation, user }: SessionScreen
                   </Text>
                 </View>
               )}
-              {charger.status === 'Charging' && (
+              {charger.physical_status === 'Charging' && (
                 <View style={styles.infoBox}>
                   <Text style={styles.infoText}>
                     💡 实时数据每60秒自动更新一次
@@ -852,7 +815,7 @@ export default function SessionScreen({ route, navigation, user }: SessionScreen
 
       {/* 根据充电状态显示不同的按钮 */}
       {/* 如果正在充电，显示停止按钮 */}
-      {charger && charger.status === 'Charging' && charger.session.transaction_id && (
+      {charger && charger.physical_status === 'Charging' && charger.session.transaction_id && (
         <TouchableOpacity
           style={[styles.buttonStop, charging && styles.buttonDisabled]}
           onPress={handleStopCharging}
@@ -868,7 +831,7 @@ export default function SessionScreen({ route, navigation, user }: SessionScreen
 
       {/* 如果不在充电状态且状态为可用，显示开始充电按钮 */}
       {/* 只有状态为 Available 时才允许开始充电（维修中、离线、故障等状态禁止使用） */}
-      {charger && charger.status === 'Available' && (
+      {charger && charger.physical_status === 'Available' && charger.is_available && (
         <TouchableOpacity
           style={[styles.button, charging && styles.buttonDisabled]}
           onPress={handleStartCharging}
@@ -883,7 +846,7 @@ export default function SessionScreen({ route, navigation, user }: SessionScreen
       )}
 
       {/* 如果充电桩维修中，显示提示信息 */}
-      {charger && charger.status === 'Maintenance' && (
+      {charger && charger.operational_status === 'MAINTENANCE' && (
         <View style={styles.maintenanceContainer}>
           <Text style={styles.maintenanceIcon}>🔧</Text>
           <Text style={styles.maintenanceTitle}>充电桩维修中</Text>
@@ -895,7 +858,7 @@ export default function SessionScreen({ route, navigation, user }: SessionScreen
       )}
 
       {/* 如果充电桩离线或不可用，显示提示信息 */}
-      {charger && (charger.status === 'Unavailable' || charger.status === 'Offline') && (
+      {charger && !charger.is_available && charger.physical_status !== 'Charging' && charger.physical_status !== 'Faulted' && (
         <View style={styles.offlineContainer}>
           <Text style={styles.offlineIcon}>📴</Text>
           <Text style={styles.offlineTitle}>充电桩离线</Text>
