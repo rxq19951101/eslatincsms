@@ -94,12 +94,10 @@ class MQTTOCPPSimulator:
         """MQTT 连接回调"""
         if rc == 0:
             print(f"{self.prefix} ✓ MQTT 连接成功")
-            # 订阅响应主题（接收 CSMS 响应）
+            # 只订阅响应主题（接收 CSMS 的响应和请求）
+            # 注意：充电桩不应该订阅 request 主题，因为那是充电桩自己发送请求的地方
             client.subscribe(self.response_topic, qos=1)
-            print(f"{self.prefix}   订阅响应主题: {self.response_topic}")
-            # 订阅请求主题（接收 CSMS 请求）
-            client.subscribe(self.request_topic, qos=1)
-            print(f"{self.prefix}   订阅请求主题: {self.request_topic}")
+            print(f"{self.prefix}   订阅响应主题: {self.response_topic} (接收服务器响应和请求)")
         else:
             print(f"{self.prefix} ✗ MQTT 连接失败，返回码: {rc}")
             sys.exit(1)
@@ -110,39 +108,41 @@ class MQTTOCPPSimulator:
             topic = msg.topic
             payload = json.loads(msg.payload.decode())
             
-            # 判断是请求还是响应
-            if topic == self.request_topic:
-                # 这是来自服务器的请求
-                action = payload.get("action", "")
-                request_payload = payload.get("payload", {})
-                from_sender = payload.get("from", "unknown")
-                
-                timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-                print(f"{self.prefix} ← [{timestamp}] 收到服务器请求: {action}")
-                print(f"{self.prefix}    来源: {from_sender}")
-                print(f"{self.prefix}    主题: {topic}")
-                print(f"{self.prefix}    载荷: {json.dumps(request_payload, ensure_ascii=False)}")
-                
-                # 处理请求
-                asyncio.run_coroutine_threadsafe(
-                    self._handle_request(action, request_payload),
-                    self.loop
-                )
-            elif topic == self.response_topic:
-                # 这是来自服务器的响应
-                action = payload.get("action", "")
-                response = payload.get("response", {})
-                
-                timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-                print(f"{self.prefix} ← [{timestamp}] 收到服务器响应: {action}")
-                print(f"{self.prefix}    主题: {topic}")
-                print(f"{self.prefix}    响应: {json.dumps(response, ensure_ascii=False)}")
-                
-                # 处理响应
-                asyncio.run_coroutine_threadsafe(
-                    self._handle_response(action, response),
-                    self.loop
-                )
+            # 充电桩只订阅 response 主题，接收服务器的响应和请求
+            if topic == self.response_topic:
+                # 检查是响应还是请求（通过消息格式判断）
+                if "response" in payload:
+                    # 这是来自服务器的响应
+                    action = payload.get("action", "")
+                    response = payload.get("response", {})
+                    
+                    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+                    print(f"{self.prefix} ← [{timestamp}] 收到服务器响应: {action}")
+                    print(f"{self.prefix}    主题: {topic}")
+                    print(f"{self.prefix}    响应: {json.dumps(response, ensure_ascii=False)}")
+                    
+                    # 处理响应
+                    asyncio.run_coroutine_threadsafe(
+                        self._handle_response(action, response),
+                        self.loop
+                    )
+                elif "payload" in payload or "action" in payload:
+                    # 这是来自服务器的请求（通过 response 主题发送）
+                    action = payload.get("action", "")
+                    request_payload = payload.get("payload", {})
+                    from_sender = payload.get("from", "csms")
+                    
+                    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+                    print(f"{self.prefix} ← [{timestamp}] 收到服务器请求: {action}")
+                    print(f"{self.prefix}    来源: {from_sender}")
+                    print(f"{self.prefix}    主题: {topic}")
+                    print(f"{self.prefix}    载荷: {json.dumps(request_payload, ensure_ascii=False)}")
+                    
+                    # 处理请求
+                    asyncio.run_coroutine_threadsafe(
+                        self._handle_request(action, request_payload),
+                        self.loop
+                    )
             else:
                 print(f"{self.prefix} ⚠ 收到未知主题的消息: {topic}")
         except Exception as e:
@@ -293,7 +293,8 @@ class MQTTOCPPSimulator:
     def _send_message(self, action: str, payload: Optional[Dict[str, Any]] = None):
         """发送 OCPP 消息到 CSMS"""
         message = {
-            "action": action
+            "action": action,
+            "from": "charger"  # 标识消息来源，避免被误认为是服务器消息
         }
         if payload:
             message["payload"] = payload

@@ -404,32 +404,53 @@ async def handle_ocpp_message(charger_id: str, action: str, payload: Dict[str, A
 async def send_ocpp_call(charger_id: str, action: str, payload: Dict[str, Any], timeout: float = 5.0) -> Dict[str, Any]:
     """
     发送OCPP调用从CSMS到充电桩，并等待响应。
+    优先使用 MQTT 传输，如果没有 MQTT 连接则使用 WebSocket。
     返回响应数据或错误信息。
     """
-    ws = charger_websockets.get(charger_id)
-    if not ws:
-        raise HTTPException(status_code=404, detail=f"Charger {charger_id} is not connected")
+    # 优先使用 MQTT 传输
+    if MQTT_AVAILABLE and hasattr(transport_manager, 'adapters'):
+        if transport_manager.is_connected(charger_id):
+            try:
+                logger.info(f"[{charger_id}] 通过 MQTT 发送 OCPP 调用: {action}")
+                result = await transport_manager.send_message(
+                    charger_id,
+                    action,
+                    payload,
+                    preferred_transport=TransportType.MQTT,
+                    timeout=timeout
+                )
+                logger.info(f"[{charger_id}] MQTT OCPP 调用完成: {action}, 结果: {result}")
+                return {"success": True, "data": result, "transport": "MQTT"}
+            except Exception as e:
+                logger.error(f"[{charger_id}] 通过 MQTT 发送 OCPP 调用失败: {e}", exc_info=True)
+                # 如果 MQTT 失败，尝试 WebSocket（如果有）
     
-    try:
-        message = {
-            "action": action,
-            "payload": payload
-        }
-        await ws.send_text(json.dumps(message))
-        logger.info(f"[{charger_id}] -> CSMS发送OCPP调用: {action}")
-        
-        # 等待响应（简化版本，实际应该使用消息ID匹配）
+    # Fallback: 使用 WebSocket（如果可用）
+    ws = charger_websockets.get(charger_id)
+    if ws:
         try:
-            response = await asyncio.wait_for(ws.receive_text(), timeout=timeout)
-            response_data = json.loads(response)
-            logger.info(f"[{charger_id}] <- 收到响应: {action}")
-            return {"success": True, "data": response_data}
-        except asyncio.TimeoutError:
-            logger.warning(f"[{charger_id}] OCPP调用超时: {action}")
-            return {"success": False, "error": "Timeout waiting for response"}
-    except Exception as e:
-        logger.error(f"[{charger_id}] 发送OCPP调用失败: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to send OCPP call: {str(e)}")
+            message = {
+                "action": action,
+                "payload": payload
+            }
+            await ws.send_text(json.dumps(message))
+            logger.info(f"[{charger_id}] -> CSMS发送OCPP调用 (WebSocket): {action}")
+            
+            # 等待响应（简化版本，实际应该使用消息ID匹配）
+            try:
+                response = await asyncio.wait_for(ws.receive_text(), timeout=timeout)
+                response_data = json.loads(response)
+                logger.info(f"[{charger_id}] <- 收到响应 (WebSocket): {action}")
+                return {"success": True, "data": response_data, "transport": "WebSocket"}
+            except asyncio.TimeoutError:
+                logger.warning(f"[{charger_id}] OCPP调用超时 (WebSocket): {action}")
+                return {"success": False, "error": "Timeout waiting for response"}
+        except Exception as e:
+            logger.error(f"[{charger_id}] 发送OCPP调用失败 (WebSocket): {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"Failed to send OCPP call: {str(e)}")
+    
+    # 如果都没有连接，抛出错误
+    raise HTTPException(status_code=404, detail=f"Charger {charger_id} is not connected (MQTT or WebSocket)")
 
 
 def now_iso() -> str:
@@ -1063,9 +1084,40 @@ async def remote_start(req: RemoteStartRequest) -> RemoteResponse:
         f"用户标签: {req.idTag}"
     )
     
+    # 优先使用 MQTT 发送 RemoteStartTransaction
+    if MQTT_AVAILABLE and hasattr(transport_manager, 'adapters'):
+        if transport_manager.is_connected(req.chargePointId):
+            try:
+                connection_type = transport_manager.get_connection_type(req.chargePointId)
+                logger.info(f"[{req.chargePointId}] 通过 {connection_type.value if connection_type else 'MQTT'} 发送 RemoteStartTransaction")
+                logger.info(f"[{req.chargePointId}] 消息内容: action=RemoteStartTransaction, payload={{connectorId: 1, idTag: {req.idTag}}}")
+                
+                # 发送 RemoteStartTransaction 到充电桩
+                result = await transport_manager.send_message(
+                    req.chargePointId,
+                    "RemoteStartTransaction",
+                    {
+                        "connectorId": 1,  # 默认使用 connector 1
+                        "idTag": req.idTag
+                    },
+                    preferred_transport=TransportType.MQTT,
+                    timeout=10.0
+                )
+                logger.info(f"[{req.chargePointId}] RemoteStartTransaction 已发送，响应: {result}")
+                return RemoteResponse(
+                    success=result.get("success", True),
+                    message="RemoteStartTransaction sent via MQTT",
+                    details={"idTag": req.idTag, "transport": connection_type.value if connection_type else "MQTT", "response": result}
+                )
+            except Exception as e:
+                logger.error(f"[{req.chargePointId}] 通过 MQTT 发送 RemoteStartTransaction 失败: {e}", exc_info=True)
+                # 如果 MQTT 发送失败，继续使用 fallback
+        else:
+            logger.warning(f"[{req.chargePointId}] 充电桩未通过 MQTT 连接")
+    
+    # Fallback 1: 尝试使用 WebSocket（如果可用）
     ws = charger_websockets.get(req.chargePointId)
-    if not ws:
-        # Fallback：如果充电桩未连接 WebSocket，则直接在 Redis 中模拟充电状态
+    if ws:
         charger = next((c for c in load_chargers() if c["id"] == req.chargePointId), None)
         if charger is None:
             charger = get_default_charger(req.chargePointId)
@@ -1098,11 +1150,11 @@ async def remote_start(req: RemoteStartRequest) -> RemoteResponse:
         save_charger(charger)
         update_active(req.chargePointId, status="Charging", txn_id=tx_id)
         logger.info(
-            f"[{req.chargePointId}] RemoteStart fallback: WebSocket missing, simulated transaction {tx_id}, order {order_id}"
+            f"[{req.chargePointId}] RemoteStart fallback: 无连接，模拟交易 {tx_id}, 订单 {order_id}"
         )
         return RemoteResponse(
             success=True,
-            message="Charging started (simulated)",
+            message="Charging started (simulated - no connection)",
             details={"transactionId": tx_id, "idTag": req.idTag, "orderId": order_id, "simulated": True},
         )
     try:
@@ -1171,91 +1223,144 @@ async def remote_stop(req: RemoteStopRequest) -> RemoteResponse:
         f"充电桩ID: {req.chargePointId}"
     )
     
-    ws = charger_websockets.get(req.chargePointId)
     charger = next((c for c in load_chargers() if c["id"] == req.chargePointId), None)
     if charger is None:
         charger = get_default_charger(req.chargePointId)
-    if not ws:
-        session = charger.setdefault("session", {
-            "authorized": False,
-            "transaction_id": None,
-            "meter": 0,
-        })
-        txn_id = session.get("transaction_id")
-        order_id = session.get("order_id")
-        
-        # 更新订单：计算电量和时长
-        if order_id:
-            order = get_order(order_id)
-            if order and order.get("status") == "ongoing":
-                start_time_str = order.get("start_time")
-                end_time_str = now_iso()
+    
+    # 优先使用 MQTT 发送 RemoteStopTransaction
+    if MQTT_AVAILABLE and hasattr(transport_manager, 'adapters'):
+        if transport_manager.is_connected(req.chargePointId):
+            try:
+                session = charger.setdefault("session", {
+                    "authorized": False,
+                    "transaction_id": None,
+                    "meter": 0,
+                })
+                txn_id = session.get("transaction_id")
                 
-                # 计算时长（分钟）
-                start_time = datetime.fromisoformat(start_time_str.replace('Z', '+00:00'))
-                end_time = datetime.fromisoformat(end_time_str.replace('Z', '+00:00'))
-                duration_seconds = (end_time - start_time).total_seconds()
-                duration_minutes = duration_seconds / 60.0
+                if not txn_id:
+                    raise HTTPException(status_code=400, detail="No active transaction to stop")
                 
-                # 计算电量（kWh）= 充电速率（kW）× 时长（小时）
-                charging_rate = order.get("charging_rate", 7.0)
-                energy_kwh = charging_rate * (duration_minutes / 60.0)
+                connection_type = transport_manager.get_connection_type(req.chargePointId)
+                logger.info(f"[{req.chargePointId}] 通过 {connection_type.value if connection_type else 'MQTT'} 发送 RemoteStopTransaction")
                 
-                update_order(
-                    order_id=order_id,
-                    end_time=end_time_str,
-                    duration_minutes=round(duration_minutes, 2),
-                    energy_kwh=round(energy_kwh, 2),
+                # 发送 RemoteStopTransaction 到充电桩
+                result = await transport_manager.send_message(
+                    req.chargePointId,
+                    "RemoteStopTransaction",
+                    {
+                        "transactionId": txn_id
+                    },
+                    preferred_transport=TransportType.MQTT,
+                    timeout=10.0
                 )
-        
-        session["transaction_id"] = None
-        session["authorized"] = False
-        session["order_id"] = None
-        charger["physical_status"] = "Available"
-        charger["last_seen"] = now_iso()
-        session["meter"] = session.get("meter", 0)
-        save_charger(charger)
-        update_active(req.chargePointId, status="Available", txn_id=None)
-        logger.info(
-            f"[{req.chargePointId}] RemoteStop fallback: WebSocket missing, simulated stop for tx={txn_id}, order={order_id}"
-        )
-        return RemoteResponse(
-            success=True,
-            message="Charging stopped (simulated)",
-            details={"transactionId": txn_id, "orderId": order_id, "simulated": True},
-        )
-    # Get transaction ID and order ID from active chargers
-    txn_id = None
-    order_id = None
-    if charger:
-        session = charger.get("session", {})
-        txn_id = session.get("transaction_id")
-        order_id = session.get("order_id")
-    if not txn_id:
-        return RemoteResponse(
-            success=False,
-            message="No active transaction found",
-            details=None,
-        )
-    try:
-        # Send RemoteStopTransaction (simplified format)
-        call = json.dumps({
-            "action": "RemoteStopTransaction",
-            "transactionId": txn_id,
-        })
-        await ws.send_text(call)
-        
-        # 注意：在实际的OCPP实现中，应该等待StopTransaction响应后再更新订单
-        # 这里简化处理，假设会成功停止
-        # 订单更新会在WebSocket的StopTransaction处理中完成
-        
-        return RemoteResponse(
-            success=True,
-            message="RemoteStopTransaction sent",
-            details={"action": "RemoteStopTransaction", "transactionId": txn_id, "orderId": order_id, "sent": True},
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+                logger.info(f"[{req.chargePointId}] RemoteStopTransaction 已发送，响应: {result}")
+                
+                # 更新订单状态
+                order_id = session.get("order_id")
+                if order_id:
+                    order = get_order(order_id)
+                    if order and order.get("status") == "ongoing":
+                        start_time_str = order.get("start_time")
+                        end_time_str = now_iso()
+                        
+                        start_time = datetime.fromisoformat(start_time_str.replace('Z', '+00:00'))
+                        end_time = datetime.fromisoformat(end_time_str.replace('Z', '+00:00'))
+                        duration_seconds = (end_time - start_time).total_seconds()
+                        duration_minutes = duration_seconds / 60.0
+                        
+                        charging_rate = order.get("charging_rate", 7.0)
+                        energy_kwh = charging_rate * (duration_minutes / 60.0)
+                        
+                        update_order(
+                            order_id=order_id,
+                            end_time=end_time_str,
+                            duration_minutes=round(duration_minutes, 2),
+                            energy_kwh=round(energy_kwh, 2),
+                        )
+                
+                # 更新充电桩状态
+                charger["physical_status"] = "Available"
+                session["transaction_id"] = None
+                session["order_id"] = None
+                session["authorized"] = False
+                save_charger(charger)
+                update_active(req.chargePointId, status="Available", txn_id=None)
+                
+                return RemoteResponse(
+                    success=result.get("success", True),
+                    message="RemoteStopTransaction sent via MQTT",
+                    details={"action": "RemoteStopTransaction", "transactionId": txn_id, "orderId": order_id, "transport": connection_type.value if connection_type else "MQTT", "response": result}
+                )
+            except HTTPException:
+                raise
+            except Exception as e:
+                logger.error(f"[{req.chargePointId}] 通过 MQTT 发送 RemoteStopTransaction 失败: {e}", exc_info=True)
+                # 如果 MQTT 发送失败，继续使用 fallback
+    
+    # Fallback 1: 尝试使用 WebSocket（如果可用）
+    ws = charger_websockets.get(req.chargePointId)
+    if ws:
+        try:
+            # Send RemoteStopTransaction (simplified format)
+            call = json.dumps({
+                "action": "RemoteStopTransaction",
+                "transactionId": txn_id,
+            })
+            await ws.send_text(call)
+            logger.info(f"[{req.chargePointId}] Sent RemoteStopTransaction (WebSocket)")
+            
+            # 注意：在实际的OCPP实现中，应该等待StopTransaction响应后再更新订单
+            # 这里简化处理，假设会成功停止
+            # 订单更新会在WebSocket的StopTransaction处理中完成
+            
+            return RemoteResponse(
+                success=True,
+                message="RemoteStopTransaction sent (WebSocket)",
+                details={"action": "RemoteStopTransaction", "transactionId": txn_id, "orderId": order_id, "sent": True, "transport": "WebSocket"},
+            )
+        except Exception as e:
+            logger.error(f"[{req.chargePointId}] 通过 WebSocket 发送 RemoteStopTransaction 失败: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
+    
+    # Fallback 2: 如果都没有连接，直接更新状态（模拟停止）
+    logger.warning(f"[{req.chargePointId}] RemoteStop fallback: 无连接，模拟停止交易 tx={txn_id}, order={order_id}")
+    
+    # 更新订单：计算电量和时长
+    if order_id:
+        order = get_order(order_id)
+        if order and order.get("status") == "ongoing":
+            start_time_str = order.get("start_time")
+            end_time_str = now_iso()
+            
+            start_time = datetime.fromisoformat(start_time_str.replace('Z', '+00:00'))
+            end_time = datetime.fromisoformat(end_time_str.replace('Z', '+00:00'))
+            duration_seconds = (end_time - start_time).total_seconds()
+            duration_minutes = duration_seconds / 60.0
+            
+            charging_rate = order.get("charging_rate", 7.0)
+            energy_kwh = charging_rate * (duration_minutes / 60.0)
+            
+            update_order(
+                order_id=order_id,
+                end_time=end_time_str,
+                duration_minutes=round(duration_minutes, 2),
+                energy_kwh=round(energy_kwh, 2),
+            )
+    
+    session["transaction_id"] = None
+    session["authorized"] = False
+    session["order_id"] = None
+    charger["physical_status"] = "Available"
+    charger["last_seen"] = now_iso()
+    save_charger(charger)
+    update_active(req.chargePointId, status="Available", txn_id=None)
+    
+    return RemoteResponse(
+        success=True,
+        message="Charging stopped (simulated - no connection)",
+        details={"transactionId": txn_id, "orderId": order_id, "simulated": True},
+    )
 
 
 @app.post("/api/getConfiguration", response_model=RemoteResponse, tags=["REST"])

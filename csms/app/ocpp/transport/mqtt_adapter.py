@@ -24,8 +24,9 @@ class MQTTAdapter(TransportAdapter):
     
     支持 OCPP 消息通过 MQTT 传输
     主题格式:
-    - 充电桩发送: ocpp/{charger_id}/requests
-    - CSMS 发送: ocpp/{charger_id}/responses
+    - 充电桩发送请求: ocpp/{charger_id}/requests (服务器订阅此主题)
+    - 服务器发送响应: ocpp/{charger_id}/responses (充电桩订阅此主题)
+    - 服务器发送请求: ocpp/{charger_id}/responses (充电桩订阅此主题，通过消息格式区分)
     """
     
     def __init__(self, broker_host: str = "localhost", broker_port: int = 1883):
@@ -105,7 +106,7 @@ class MQTTAdapter(TransportAdapter):
                 
                 # 标记充电桩已连接
                 self._connected_chargers.add(charger_id)
-                logger.debug(f"[{charger_id}] 已标记为已连接（MQTT）")
+                logger.info(f"[{charger_id}] 已标记为已连接（MQTT），当前已连接充电桩: {len(self._connected_chargers)} 个")
                 
                 # 异步处理消息（在事件循环中）
                 # 注意：_on_message 在 paho-mqtt 的后台线程中执行，需要使用 run_coroutine_threadsafe
@@ -132,7 +133,7 @@ class MQTTAdapter(TransportAdapter):
             logger.error(f"[{charger_id}] MQTT 消息处理失败: {action}, 错误: {e}", exc_info=True)
             response = {"error": str(e)}
         
-        # 发送响应到响应主题
+        # 发送响应到响应主题（充电桩订阅此主题接收服务器响应）
         response_topic = f"ocpp/{charger_id}/responses"
         response_message = {
             "action": action,
@@ -145,7 +146,7 @@ class MQTTAdapter(TransportAdapter):
                 json.dumps(response_message),
                 qos=1
             )
-            logger.info(f"[{charger_id}] -> MQTT OCPP {action} Response 已发送")
+            logger.info(f"[{charger_id}] -> MQTT OCPP {action} Response 已发送到响应主题")
     
     def _on_disconnect(self, client: mqtt.Client, userdata, rc):
         """MQTT 断开连接回调"""
@@ -158,31 +159,35 @@ class MQTTAdapter(TransportAdapter):
         payload: Dict[str, Any],
         timeout: float = 5.0
     ) -> Dict[str, Any]:
-        """发送消息到充电桩"""
+        """发送消息到充电桩（服务器请求）"""
         if not self.client:
             raise ConnectionError("MQTT 客户端未连接")
         
-        # 发送到请求主题（充电桩会监听此主题）
-        request_topic = f"ocpp/{charger_id}/requests"
+        # 发送到响应主题（充电桩订阅此主题接收服务器请求）
+        # 注意：虽然主题名是 responses，但这里用于发送服务器请求
+        response_topic = f"ocpp/{charger_id}/responses"
         message = {
             "action": action,
             "payload": payload,
-            "from": "csms"
+            "from": "csms"  # 标识消息来源，便于调试
         }
+        logger.debug(f"[{charger_id}] MQTT 发送服务器请求到响应主题: {json.dumps(message)}")
         
         try:
             result = self.client.publish(
-                request_topic,
+                response_topic,
                 json.dumps(message),
                 qos=1
             )
             
             if result.rc == mqtt.MQTT_ERR_SUCCESS:
-                logger.info(f"[{charger_id}] -> MQTT OCPP {action}")
+                logger.info(f"[{charger_id}] -> MQTT OCPP {action} (发送到响应主题: {response_topic})")
+                logger.debug(f"[{charger_id}] 消息内容: {json.dumps(message, ensure_ascii=False)}")
                 # MQTT 是异步的，无法直接等待响应
                 # 实际应用中需要实现请求-响应匹配机制
-                return {"success": True, "message": "Message sent via MQTT"}
+                return {"success": True, "message": "Message sent via MQTT", "topic": response_topic}
             else:
+                logger.error(f"[{charger_id}] MQTT 发布失败，返回码: {result.rc}")
                 raise ConnectionError(f"MQTT 发布失败，返回码: {result.rc}")
                 
         except Exception as e:

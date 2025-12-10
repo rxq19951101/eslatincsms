@@ -4,7 +4,7 @@
  * 仅用于本地测试与演示。
  */
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import {
   View,
   Text,
@@ -71,15 +71,18 @@ export default function SessionScreen({ route, navigation, user }: SessionScreen
   } | null>(null);
   const [lastUpdateTime, setLastUpdateTime] = useState<string>('');
   const [lastTransactionId, setLastTransactionId] = useState<number | null>(null);
+  const lastTransactionIdRef = useRef<number | null>(null);  // 使用 ref 避免闭包问题
   const [hasShownNotFoundAlert, setHasShownNotFoundAlert] = useState(false);
   const [exportingLogs, setExportingLogs] = useState(false);
 
   useEffect(() => {
     fetchChargerStatus();
     // 每10秒刷新充电桩状态（减少服务器压力，充电会话页面需要更频繁的更新）
-    const interval = setInterval(fetchChargerStatus, 10000);
+    const interval = setInterval(() => {
+      fetchChargerStatus();
+    }, 10000);
     return () => clearInterval(interval);
-  }, [chargerId]);
+  }, [chargerId]);  // 只在 chargerId 变化时重新设置定时器
 
   // 每60秒获取一次实时电量数据
   useEffect(() => {
@@ -233,9 +236,7 @@ export default function SessionScreen({ route, navigation, user }: SessionScreen
         setCharger(found);
         
         // 如果找到了充电桩，重置提示标志
-        if (hasShownNotFoundAlert) {
-          setHasShownNotFoundAlert(false);
-        }
+        setHasShownNotFoundAlert(prev => prev ? false : prev);
         
         // 如果正在充电，只在 transaction_id 变化时获取当前订单信息
         // 订单信息在充电过程中不会变化，不需要频繁请求
@@ -243,17 +244,21 @@ export default function SessionScreen({ route, navigation, user }: SessionScreen
         // 使用物理状态判断是否在充电
         if (found.physical_status === 'Charging' && currentTransactionId) {
           // 只在 transaction_id 变化时获取订单（新开始充电时）
-          if (currentTransactionId !== lastTransactionId) {
-            console.log('[SessionScreen] 检测到新的交易ID，获取订单信息:', currentTransactionId);
+          // 使用 ref 来避免闭包问题，确保获取到最新的值
+          if (currentTransactionId !== lastTransactionIdRef.current) {
+            console.log('[SessionScreen] 检测到新的交易ID，获取订单信息:', currentTransactionId, '之前:', lastTransactionIdRef.current);
             fetchCurrentOrder(found.id, currentTransactionId);
+            lastTransactionIdRef.current = currentTransactionId;
             setLastTransactionId(currentTransactionId);
+          } else {
+            // 交易ID没有变化，不需要重复获取订单
+            console.log('[SessionScreen] 交易ID未变化，跳过订单获取:', currentTransactionId);
           }
         } else {
           // 如果不在充电状态，清除订单和交易ID记录
-          if (currentOrder) {
-            setCurrentOrder(null);
-          }
-          if (lastTransactionId !== null) {
+          setCurrentOrder(prev => prev ? null : prev);
+          if (lastTransactionIdRef.current !== null) {
+            lastTransactionIdRef.current = null;
             setLastTransactionId(null);
           }
         }
@@ -262,19 +267,39 @@ export default function SessionScreen({ route, navigation, user }: SessionScreen
         console.warn('[SessionScreen] 充电桩未找到，可能离线或不存在:', chargerId);
         
         // 只在首次检测到不存在时显示一次提示
-        if (!hasShownNotFoundAlert && !charger) {
-          setHasShownNotFoundAlert(true);
-          // 延迟显示，避免在页面加载时立即弹出
-          setTimeout(() => {
-            Alert.alert(
-              '充电桩未找到',
-              `该充电桩（${chargerId}）不在系统中。\n\n可能原因：\n• 该充电桩不属于我公司\n• 充电桩尚未注册到系统\n• 充电桩当前离线`,
-              [{ text: '确定' }]
-            );
-          }, 500);
-        }
+        setHasShownNotFoundAlert(prev => {
+          if (!prev) {
+            // 延迟显示，避免在页面加载时立即弹出
+            setTimeout(() => {
+              Alert.alert(
+                '充电桩未找到',
+                `该充电桩（${chargerId}）不在系统中。\n\n可能原因：\n• 该充电桩不属于我公司\n• 充电桩尚未注册到系统\n• 充电桩当前离线`,
+                [{ text: '确定' }]
+              );
+            }, 500);
+            return true;
+          }
+          return prev;
+        });
         
-        setCharger({
+        setCharger(prev => {
+          // 如果之前没有数据，设置为离线状态
+          if (!prev) {
+            return {
+              id: chargerId,
+              physical_status: 'Unavailable',
+              operational_status: 'ENABLED',
+              is_available: false,
+              last_seen: '', // 离线充电桩没有最后更新时间
+              session: {
+                authorized: false,
+                transaction_id: null,
+                meter: 0,
+              },
+            };
+          }
+          return prev;
+        });
           id: chargerId,
           physical_status: 'Unavailable',
           operational_status: 'ENABLED',
@@ -295,21 +320,24 @@ export default function SessionScreen({ route, navigation, user }: SessionScreen
         endpoint: API_ENDPOINTS.chargers,
       });
       // 网络错误或其他错误，如果还没有充电桩数据，设置为离线状态
-      if (!charger) {
-        console.warn('[SessionScreen] 获取充电桩状态失败，设置为离线状态');
-        setCharger({
-          id: chargerId,
-          physical_status: 'Unavailable',
-          operational_status: 'ENABLED',
-          is_available: false,
-          last_seen: '',
-          session: {
-            authorized: false,
-            transaction_id: null,
-            meter: 0,
-          },
-        });
-      }
+      setCharger(prev => {
+        if (!prev) {
+          console.warn('[SessionScreen] 获取充电桩状态失败，设置为离线状态');
+          return {
+            id: chargerId,
+            physical_status: 'Unavailable',
+            operational_status: 'ENABLED',
+            is_available: false,
+            last_seen: '',
+            session: {
+              authorized: false,
+              transaction_id: null,
+              meter: 0,
+            },
+          };
+        }
+        return prev;
+      });
     } finally {
       setLoading(false);
     }
