@@ -282,14 +282,13 @@ def get_charger_status_timeline(
     
     返回数据包括：
     - 状态变化记录
+    - 每个状态的持续时间
+    - 状态分布统计（离线、空闲、充电中）
     """
     logger.info(
         f"[API] GET /api/v1/statistics/charger/{charger_id}/status-timeline | "
         f"查询小时数: {hours} 小时"
     )
-    - 每个状态的持续时间
-    - 状态分布统计（离线、空闲、充电中）
-    """
     charger = db.query(Charger).filter(Charger.id == charger_id).first()
     if not charger:
         raise HTTPException(status_code=404, detail=f"充电桩 {charger_id} 未找到")

@@ -2410,12 +2410,53 @@ async def ocpp_ws(ws: WebSocket, id: str = Query(..., description="Charger ID"))
 
 
 # ---- 注册 API v1 路由 ----
+# 强制刷新输出，确保日志立即显示
+import sys
+sys.stdout.flush()
+sys.stderr.flush()
+
 try:
+    logger.info("开始注册 API v1 路由...")
     from app.api.v1 import api_router
+    logger.info("API v1 路由模块导入成功")
+    
     app.include_router(api_router)
-    logger.info("API v1 路由已注册")
+    logger.info("API v1 路由已注册到应用")
+    
+    # 验证路由是否注册成功 - 列出所有注册的路由
+    all_routes = []
+    for route in app.routes:
+        if hasattr(route, 'path'):
+            all_routes.append(route.path)
+        elif hasattr(route, 'path_regex'):
+            all_routes.append(str(route.path_regex))
+    
+    logger.info(f"当前已注册的路由总数: {len(all_routes)}")
+    
+    # 检查是否包含 /api/v1/chargers
+    v1_chargers_found = any("/api/v1/chargers" in route for route in all_routes)
+    if v1_chargers_found:
+        logger.info("✓ /api/v1/chargers 路由已确认注册")
+    else:
+        logger.warning(f"⚠ /api/v1/chargers 路由未找到")
+        logger.warning(f"已注册的路由示例（前20个）: {all_routes[:20] if all_routes else '无'}")
+        # 检查是否有其他 /api/v1 路由
+        v1_routes = [r for r in all_routes if "/api/v1" in r]
+        if v1_routes:
+            logger.warning(f"但找到了其他 /api/v1 路由: {v1_routes}")
+        else:
+            logger.error("✗ 完全没有 /api/v1 路由，说明 API v1 路由注册失败")
+    
+    sys.stdout.flush()
+        
 except ImportError as e:
-    logger.warning(f"API v1 路由注册失败（导入错误）: {e}，某些功能可能无法使用")
+    error_msg = f"API v1 路由注册失败（导入错误）: {e}"
+    logger.error(error_msg, exc_info=True)
+    print(f"ERROR: {error_msg}", file=sys.stderr)
+    sys.stderr.flush()
 except Exception as e:
-    logger.error(f"API v1 路由注册出错: {e}", exc_info=True)
+    error_msg = f"API v1 路由注册出错: {e}"
+    logger.error(error_msg, exc_info=True)
+    print(f"ERROR: {error_msg}", file=sys.stderr)
+    sys.stderr.flush()
 

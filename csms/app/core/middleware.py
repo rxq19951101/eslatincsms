@@ -15,7 +15,26 @@ logger = logging.getLogger("ocpp_csms")
 
 
 class LoggingMiddleware(BaseHTTPMiddleware):
-    """请求日志中间件 - 记录所有 API 请求和响应"""
+    """请求日志中间件 - 记录所有 API 请求和响应（过滤本地健康检查）"""
+    
+    def _should_log(self, client_host: str, path: str, status_code: int) -> bool:
+        """
+        判断是否应该记录日志
+        过滤规则：
+        1. 来自 127.0.0.1 的 /health 请求且状态码为 200 的，不记录
+        2. 所有错误（状态码 >= 400）都记录
+        3. 其他情况正常记录
+        """
+        # 如果是错误，始终记录
+        if status_code >= 400:
+            return True
+        
+        # 如果是本地健康检查且成功，不记录
+        if client_host in ("127.0.0.1", "::1", "localhost") and path == "/health" and status_code == 200:
+            return False
+        
+        # 其他情况正常记录
+        return True
     
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         start_time = time.time()
@@ -44,21 +63,27 @@ class LoggingMiddleware(BaseHTTPMiddleware):
             except Exception as e:
                 logger.debug(f"无法读取请求体: {e}")
         
-        # 记录请求开始
-        logger.info(
-            f"[API请求] {request.method} {request.url.path} | "
-            f"客户端: {client_host} | "
-            f"查询参数: {query_params if query_params else '无'}",
-            extra={
-                "event": "api_request_start",
-                "method": request.method,
-                "path": request.url.path,
-                "client_host": client_host,
-                "user_agent": user_agent,
-                "query_params": query_params,
-                "request_body": body,
-            }
-        )
+        # 判断是否记录请求开始日志（先假设会成功，实际在响应时再判断）
+        should_log_request = True
+        if client_host in ("127.0.0.1", "::1", "localhost") and request.url.path == "/health":
+            should_log_request = False
+        
+        # 记录请求开始（如果需要）
+        if should_log_request:
+            logger.info(
+                f"[API请求] {request.method} {request.url.path} | "
+                f"客户端: {client_host} | "
+                f"查询参数: {query_params if query_params else '无'}",
+                extra={
+                    "event": "api_request_start",
+                    "method": request.method,
+                    "path": request.url.path,
+                    "client_host": client_host,
+                    "user_agent": user_agent,
+                    "query_params": query_params,
+                    "request_body": body,
+                }
+            )
         
         # 处理请求
         try:
@@ -73,26 +98,30 @@ class LoggingMiddleware(BaseHTTPMiddleware):
                 except:
                     pass
             
-            # 记录响应完成
+            # 判断是否应该记录响应日志
             status_code = response.status_code
-            log_level = logging.INFO if status_code < 400 else logging.WARNING if status_code < 500 else logging.ERROR
+            should_log_response = self._should_log(client_host, request.url.path, status_code)
             
-            logger.log(
-                log_level,
-                f"[API响应] {request.method} {request.url.path} | "
-                f"状态码: {status_code} | "
-                f"耗时: {process_time:.3f}s | "
-                f"客户端: {client_host}",
-                extra={
-                    "event": "api_request_complete",
-                    "method": request.method,
-                    "path": request.url.path,
-                    "status_code": status_code,
-                    "process_time": process_time,
-                    "client_host": client_host,
-                    "response_size": response_body_size,
-                }
-            )
+            # 记录响应完成（如果需要）
+            if should_log_response:
+                log_level = logging.INFO if status_code < 400 else logging.WARNING if status_code < 500 else logging.ERROR
+                
+                logger.log(
+                    log_level,
+                    f"[API响应] {request.method} {request.url.path} | "
+                    f"状态码: {status_code} | "
+                    f"耗时: {process_time:.3f}s | "
+                    f"客户端: {client_host}",
+                    extra={
+                        "event": "api_request_complete",
+                        "method": request.method,
+                        "path": request.url.path,
+                        "status_code": status_code,
+                        "process_time": process_time,
+                        "client_host": client_host,
+                        "response_size": response_body_size,
+                    }
+                )
             
             # 添加处理时间头
             response.headers["X-Process-Time"] = f"{process_time:.3f}"
