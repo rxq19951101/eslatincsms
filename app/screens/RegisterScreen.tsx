@@ -19,7 +19,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 
 type RegisterScreenProps = {
   navigation: any;
-  onLogin: (user: { username: string; idTag: string }) => void;
+  onLogin: (user: { username: string; idTag: string; role?: string }) => void;
 };
 
 export default function RegisterScreen({ navigation, onLogin }: RegisterScreenProps) {
@@ -64,25 +64,27 @@ export default function RegisterScreen({ navigation, onLogin }: RegisterScreenPr
       // 生成 ID Tag
       const idTag = generateIdTag(username);
 
-      // 保存用户信息
+      // 保存用户信息（默认角色为user）
       const userData = {
         username,
         password,
         phone: phone.trim(),
         idTag,
+        role: 'user',  // 默认角色为普通用户
         createdAt: new Date().toISOString(),
       };
 
       await AsyncStorage.setItem(`user_${username}`, JSON.stringify(userData));
 
-      // 自动登录
+      // 自动登录（包含角色信息）
       await AsyncStorage.setItem('current_user', JSON.stringify({
         username,
         idTag,
+        role: 'user',  // 默认角色为普通用户
       }));
 
       Alert.alert('成功', `注册成功！\n您的充电ID: ${idTag}`, [
-        { text: '确定', onPress: () => onLogin({ username, idTag }) }
+        { text: '确定', onPress: () => onLogin({ username, idTag, role: 'user' }) }
       ]);
     } catch (error) {
       Alert.alert('错误', '注册失败，请稍后重试');

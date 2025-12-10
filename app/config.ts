@@ -122,6 +122,7 @@ export const API_ENDPOINTS = {
   currentOrderMeter: `${CSMS_API_BASE}/api/orders/current/meter`,
   reset: `${CSMS_API_BASE}/api/reset`,
   setMaintenance: `${CSMS_API_BASE}/api/setMaintenance`,
+  exportLogs: `${CSMS_API_BASE}/api/exportLogs`,
   health: `${CSMS_API_BASE}/health`,
 };
 

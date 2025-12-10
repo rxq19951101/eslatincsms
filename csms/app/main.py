@@ -854,6 +854,16 @@ class GetDiagnosticsRequest(BaseModel):
     stopTime: str | None = None
 
 
+class ExportLogsRequest(BaseModel):
+    chargePointId: str
+    location: str = ""  # 可选，用于GetDiagnostics
+    retries: int | None = None
+    retryInterval: int | None = None
+    startTime: str | None = None
+    stopTime: str | None = None
+    userRole: str | None = None  # 用户角色，用于权限验证
+
+
 class UpdateFirmwareRequest(BaseModel):
     chargePointId: str
     location: str
@@ -1573,6 +1583,146 @@ async def get_diagnostics(req: GetDiagnosticsRequest) -> RemoteResponse:
         raise
     except Exception as e:
         logger.error(f"Error in GetDiagnostics: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/exportLogs", tags=["REST"])
+async def export_logs(req: ExportLogsRequest, request: Request = None):
+    """
+    导出充电桩日志。
+    通过GetDiagnostics获取日志文件，然后返回文件下载。
+    仅限管理员（admin）使用。
+    """
+    from fastapi.responses import StreamingResponse
+    import io
+    
+    logger.info(
+        f"[API] POST /api/exportLogs | "
+        f"充电桩ID: {req.chargePointId} | "
+        f"用户角色: {req.userRole or '未提供'}"
+    )
+    
+    # 权限验证：只有管理员才能导出日志
+    if req.userRole != "admin":
+        logger.warning(
+            f"[API] POST /api/exportLogs | 权限拒绝 | "
+            f"充电桩ID: {req.chargePointId} | "
+            f"用户角色: {req.userRole or '未提供'}"
+        )
+        raise HTTPException(
+            status_code=403, 
+            detail="仅管理员可以导出日志。此操作需要管理员权限。"
+        )
+    
+    try:
+        # 检查充电桩是否存在
+        charger = next((c for c in load_chargers() if c["id"] == req.chargePointId), None)
+        if not charger:
+            raise HTTPException(status_code=404, detail=f"Charger {req.chargePointId} not found")
+        
+        # 调用GetDiagnostics获取日志
+        # 如果没有提供location，使用默认值（充电桩会返回日志文件位置）
+        location = req.location if req.location else "internal://logs"
+        
+        payload = {"location": location}
+        if req.retries is not None:
+            payload["retries"] = req.retries
+        if req.retryInterval is not None:
+            payload["retryInterval"] = req.retryInterval
+        if req.startTime is not None:
+            payload["startTime"] = req.startTime
+        if req.stopTime is not None:
+            payload["stopTime"] = req.stopTime
+        
+        # 尝试通过WebSocket发送GetDiagnostics请求
+        result = await send_ocpp_call(
+            req.chargePointId,
+            "GetDiagnostics",
+            payload
+        )
+        
+        # 如果成功，返回日志文件信息
+        # 注意：实际的日志文件可能由充电桩上传到指定位置
+        # 这里我们返回一个包含日志信息的JSON响应，或者如果充电桩返回了文件，则返回文件
+        
+        if result.get("success"):
+            # 如果充电桩返回了文件名，可以在这里处理文件下载
+            # 目前返回一个包含诊断信息的JSON文件
+            diagnostics_data = {
+                "charger_id": req.chargePointId,
+                "timestamp": now_iso(),
+                "diagnostics_result": result.get("data", {}),
+                "charger_info": {
+                    "vendor": charger.get("vendor"),
+                    "model": charger.get("model"),
+                    "firmware_version": charger.get("firmware_version"),
+                    "serial_number": charger.get("serial_number"),
+                    "status": charger.get("status"),
+                    "last_seen": charger.get("last_seen"),
+                }
+            }
+            
+            # 将数据转换为JSON字符串
+            json_content = json.dumps(diagnostics_data, indent=2, ensure_ascii=False)
+            
+            # 创建文件流
+            file_stream = io.BytesIO(json_content.encode('utf-8'))
+            
+            # 生成文件名
+            filename = f"charger_{req.chargePointId}_logs_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            
+            logger.info(
+                f"[API] POST /api/exportLogs 成功 | "
+                f"充电桩ID: {req.chargePointId} | "
+                f"文件名: {filename}"
+            )
+            
+            return StreamingResponse(
+                file_stream,
+                media_type="application/json",
+                headers={
+                    "Content-Disposition": f"attachment; filename={filename}"
+                }
+            )
+        else:
+            # 如果GetDiagnostics失败，仍然返回一个包含基本信息的日志文件
+            logger.warning(
+                f"[API] POST /api/exportLogs | "
+                f"GetDiagnostics失败，返回基本信息 | "
+                f"充电桩ID: {req.chargePointId}"
+            )
+            
+            diagnostics_data = {
+                "charger_id": req.chargePointId,
+                "timestamp": now_iso(),
+                "note": "GetDiagnostics请求失败，以下是充电桩基本信息",
+                "error": result.get("error", "Unknown error"),
+                "charger_info": {
+                    "vendor": charger.get("vendor"),
+                    "model": charger.get("model"),
+                    "firmware_version": charger.get("firmware_version"),
+                    "serial_number": charger.get("serial_number"),
+                    "status": charger.get("status"),
+                    "last_seen": charger.get("last_seen"),
+                }
+            }
+            
+            json_content = json.dumps(diagnostics_data, indent=2, ensure_ascii=False)
+            file_stream = io.BytesIO(json_content.encode('utf-8'))
+            filename = f"charger_{req.chargePointId}_logs_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            
+            return StreamingResponse(
+                file_stream,
+                media_type="application/json",
+                headers={
+                    "Content-Disposition": f"attachment; filename={filename}"
+                }
+            )
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in ExportLogs: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 

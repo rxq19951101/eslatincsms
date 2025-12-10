@@ -19,7 +19,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 
 type LoginScreenProps = {
   navigation: any;
-  onLogin: (user: { username: string; idTag: string }) => void;
+  onLogin: (user: { username: string; idTag: string; role?: string }) => void;
 };
 
 export default function LoginScreen({ navigation, onLogin }: LoginScreenProps) {
@@ -42,14 +42,19 @@ export default function LoginScreen({ navigation, onLogin }: LoginScreenProps) {
       if (storedUser) {
         const userData = JSON.parse(storedUser);
         if (userData.password === password) {
-          // 登录成功，保存当前用户信息
+          // 登录成功，保存当前用户信息（包括角色）
           await AsyncStorage.setItem('current_user', JSON.stringify({
             username: userData.username,
             idTag: userData.idTag,
+            role: userData.role || 'user',  // 默认角色为user，如果没有设置
           }));
           
           Alert.alert('成功', '登录成功！', [
-            { text: '确定', onPress: () => onLogin(userData) }
+            { text: '确定', onPress: () => onLogin({
+              username: userData.username,
+              idTag: userData.idTag,
+              role: userData.role || 'user',
+            }) }
           ]);
         } else {
           Alert.alert('错误', '密码错误');

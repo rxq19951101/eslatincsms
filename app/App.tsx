@@ -31,7 +31,7 @@ function MainTabs({
   onLogout,
   navigation: rootNavigation,
 }: {
-  user: { username: string; idTag: string };
+  user: { username: string; idTag: string; role?: string };
   onLogout: () => void;
   navigation: any;
 }) {
@@ -128,20 +128,25 @@ function MainTabs({
 }
 
 export default function App() {
-  const [user, setUser] = useState<{ username: string; idTag: string } | null>(null);
+  const [user, setUser] = useState<{ username: string; idTag: string; role?: string } | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     // 检查是否已登录
     AsyncStorage.getItem('current_user').then((data) => {
       if (data) {
-        setUser(JSON.parse(data));
+        const userData = JSON.parse(data);
+        // 确保有role字段，默认为'user'
+        setUser({
+          ...userData,
+          role: userData.role || 'user',
+        });
       }
       setLoading(false);
     });
   }, []);
 
-  const handleLogin = (userData: { username: string; idTag: string }) => {
+  const handleLogin = (userData: { username: string; idTag: string; role?: string }) => {
     setUser(userData);
   };
 

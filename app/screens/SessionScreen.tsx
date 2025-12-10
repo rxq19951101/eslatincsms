@@ -13,6 +13,8 @@ import {
   ActivityIndicator,
   ScrollView,
   Alert,
+  Linking,
+  Platform,
 } from 'react-native';
 import { API_ENDPOINTS } from '../config';
 
@@ -47,7 +49,7 @@ type Order = {
 type SessionScreenProps = {
   route: any;
   navigation: any;
-  user?: { username: string; idTag: string };
+  user?: { username: string; idTag: string; role?: string };
 };
 
 export default function SessionScreen({ route, navigation, user }: SessionScreenProps) {
@@ -68,6 +70,7 @@ export default function SessionScreen({ route, navigation, user }: SessionScreen
   const [lastUpdateTime, setLastUpdateTime] = useState<string>('');
   const [lastTransactionId, setLastTransactionId] = useState<number | null>(null);
   const [hasShownNotFoundAlert, setHasShownNotFoundAlert] = useState(false);
+  const [exportingLogs, setExportingLogs] = useState(false);
 
   useEffect(() => {
     fetchChargerStatus();
@@ -648,6 +651,105 @@ export default function SessionScreen({ route, navigation, user }: SessionScreen
     }
   };
 
+  const handleExportLogs = async () => {
+    if (!charger) {
+      Alert.alert('错误', '充电桩信息加载失败');
+      return;
+    }
+
+    try {
+      setExportingLogs(true);
+
+      const res = await fetch(API_ENDPOINTS.exportLogs, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          chargePointId: chargerId,
+          location: '',  // 使用默认位置
+          userRole: user?.role || 'user',  // 传递用户角色
+        }),
+      });
+
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => ({ detail: '导出失败' }));
+        throw new Error(errorData.detail || `HTTP ${res.status}: ${res.statusText}`);
+      }
+
+      // 获取响应内容
+      const text = await res.text();
+      
+      // 尝试使用expo-file-system和expo-sharing保存和分享文件
+      // 如果库不存在，会捕获错误并显示成功消息
+      try {
+        // 动态导入，如果库不存在会抛出错误
+        // 使用类型断言来避免TypeScript错误
+        const FileSystemModule = await import('expo-file-system');
+        let SharingModule: any = null;
+        try {
+          // 使用eval来避免TypeScript静态检查
+          // eslint-disable-next-line no-eval
+          SharingModule = await eval('import("expo-sharing")');
+        } catch {
+          // expo-sharing可能未安装，继续使用FileSystem
+        }
+        
+        const FileSystem = FileSystemModule.default;
+        const Sharing = SharingModule?.default;
+        
+        // 使用类型断言来访问可能存在的属性
+        const docDir = (FileSystem as any).documentDirectory;
+        if (docDir) {
+          const filename = `charger_${chargerId}_logs_${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+          const fileUri = `${docDir}${filename}`;
+          
+          // 写入文件
+          await (FileSystem as any).writeAsStringAsync(fileUri, text);
+          
+          // 分享文件（如果Sharing可用）
+          if (Sharing && await (Sharing as any).isAvailableAsync()) {
+            await (Sharing as any).shareAsync(fileUri, {
+              mimeType: 'application/json',
+              dialogTitle: '导出充电桩日志',
+            });
+            Alert.alert('成功', '日志已导出，请选择保存位置');
+          } else {
+            Alert.alert('成功', `日志已保存到: ${filename}`);
+          }
+          return;
+        }
+      } catch (fileError: any) {
+        // 如果文件系统库不可用，继续执行下面的代码
+        console.log('文件系统库不可用，使用备用方案:', fileError.message);
+      }
+      
+      // 备用方案：显示成功消息，并允许查看日志内容
+      console.log('日志内容:', text);
+      Alert.alert(
+        '成功', 
+        '日志导出请求已发送。\n\n提示：如需保存文件，请安装expo-file-system和expo-sharing库。',
+        [
+          { text: '确定' },
+          { 
+            text: '查看内容', 
+            onPress: () => {
+              // 在开发环境中，可以显示日志内容
+              if (__DEV__) {
+                Alert.alert('日志内容', text.substring(0, 500) + (text.length > 500 ? '...' : ''));
+              }
+            }
+          }
+        ]
+      );
+    } catch (error: any) {
+      console.error('导出日志失败:', error);
+      Alert.alert('失败', error.message || '导出日志失败，请检查网络连接');
+    } finally {
+      setExportingLogs(false);
+    }
+  };
+
   return (
     <ScrollView style={styles.container}>
       <Text style={styles.title}>充电会话</Text>
@@ -802,6 +904,21 @@ export default function SessionScreen({ route, navigation, user }: SessionScreen
             请检查充电桩是否已连接网络，或稍后再试。
           </Text>
         </View>
+      )}
+
+      {/* 日志导出按钮 - 仅管理员可见 */}
+      {charger && user && user.role === 'admin' && (
+        <TouchableOpacity
+          style={[styles.buttonSecondary, exportingLogs && styles.buttonDisabled]}
+          onPress={handleExportLogs}
+          disabled={exportingLogs}
+        >
+          {exportingLogs ? (
+            <ActivityIndicator color="#007AFF" />
+          ) : (
+            <Text style={styles.buttonTextSecondary}>📥 导出日志</Text>
+          )}
+        </TouchableOpacity>
       )}
 
       <TouchableOpacity
