@@ -37,12 +37,12 @@ echo ""
 
 # 确认操作
 echo -e "${YELLOW}警告：此操作将：${NC}"
-echo "  1. 停止所有容器"
+echo "  1. 停止所有容器并删除所有卷（包括数据库数据）"
 echo "  2. 删除所有容器"
 echo "  3. 删除所有镜像（包括项目构建的镜像）"
 echo "  4. 删除所有未使用的镜像、容器、网络和卷"
 echo "  5. 重建所有镜像"
-echo "  6. 启动所有服务"
+echo "  6. 启动所有服务（数据库将重新初始化）"
 echo ""
 read -p "是否继续？(yes/no): " confirm
 
@@ -51,13 +51,13 @@ if [ "$confirm" != "yes" ]; then
     exit 0
 fi
 
-# 1. 停止所有容器
+# 1. 停止所有容器并删除卷
 echo ""
 echo -e "${BLUE}========================================${NC}"
-echo -e "${BLUE}步骤 1/6: 停止所有容器${NC}"
+echo -e "${BLUE}步骤 1/6: 停止所有容器并删除卷${NC}"
 echo -e "${BLUE}========================================${NC}"
-docker compose -f "$COMPOSE_FILE" down || true
-echo -e "${GREEN}✓ 所有容器已停止${NC}"
+docker compose -f "$COMPOSE_FILE" down -v || true
+echo -e "${GREEN}✓ 所有容器已停止，卷已删除${NC}"
 
 # 2. 删除所有容器
 echo ""
@@ -86,13 +86,16 @@ docker image prune -af || true
 
 echo -e "${GREEN}✓ 所有镜像已删除${NC}"
 
-# 4. 清理所有未使用的资源
+# 4. 清理所有未使用的资源（包括卷）
 echo ""
 echo -e "${BLUE}========================================${NC}"
-echo -e "${BLUE}步骤 4/6: 清理所有未使用的资源${NC}"
+echo -e "${BLUE}步骤 4/6: 清理所有未使用的资源（包括卷）${NC}"
 echo -e "${BLUE}========================================${NC}"
-docker system prune -af --volumes || true
-echo -e "${GREEN}✓ 所有未使用的资源已清理${NC}"
+# 删除所有未使用的卷（包括数据库卷）
+docker volume prune -f || true
+# 清理所有未使用的资源
+docker system prune -af || true
+echo -e "${GREEN}✓ 所有未使用的资源已清理（包括数据库卷）${NC}"
 
 # 5. 重建所有镜像（不使用缓存）
 echo ""
