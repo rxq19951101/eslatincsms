@@ -179,7 +179,10 @@ async def run_simulator(charger_id: str, url: str, max_retries: int = 3) -> None
                                 msg = json.loads(msg_raw)
                                 action = msg.get("action", "")
                                 payload = msg.get("payload", {})
-                                print(f"{prefix} ← 收到消息: {action} {json.dumps(payload) if payload else ''}")
+                                timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+                                print(f"{prefix} ← [{timestamp}] 收到服务器请求: {action}")
+                                if payload:
+                                    print(f"{prefix}    载荷: {json.dumps(payload, ensure_ascii=False)}")
                                 
                                 # 处理 RemoteStartTransaction
                                 if action == "RemoteStartTransaction":

@@ -505,7 +505,9 @@ class OCPPSimulator:
         action = message.get("action", "")
         payload = message.get("payload", {})
         
-        print(f"{self.prefix} ← 收到CSMS消息: {action}")
+        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        print(f"{self.prefix} ← [{timestamp}] 收到服务器请求: {action}")
+        print(f"{self.prefix}    载荷: {json.dumps(payload, ensure_ascii=False)}")
         
         # 路由到对应的处理器
         handlers = {
@@ -530,10 +532,16 @@ class OCPPSimulator:
         handler = handlers.get(action)
         if handler:
             try:
+                print(f"{self.prefix}    开始处理请求: {action}")
                 response = await handler(payload)
+                timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+                print(f"{self.prefix} → [{timestamp}] 请求处理完成: {action}")
+                print(f"{self.prefix}    响应: {json.dumps(response, ensure_ascii=False)}")
                 return response
             except Exception as e:
                 print(f"{self.prefix} ✗ 处理消息失败: {e}")
+                import traceback
+                traceback.print_exc()
                 return {"status": "Rejected", "message": str(e)}
         else:
             print(f"{self.prefix} ⚠ 未知消息类型: {action}")
@@ -544,11 +552,15 @@ class OCPPSimulator:
         if not self.ws:
             return
         
+        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
         try:
             await self.ws.send(json.dumps(response))
-            print(f"{self.prefix} → 响应: {json.dumps(response)[:100]}...")
+            print(f"{self.prefix} → [{timestamp}] 发送响应到服务器")
+            print(f"{self.prefix}    响应内容: {json.dumps(response, ensure_ascii=False)}")
         except Exception as e:
-            print(f"{self.prefix} ✗ 发送响应失败: {e}")
+            print(f"{self.prefix} ✗ [{timestamp}] 发送响应失败: {e}")
+            import traceback
+            traceback.print_exc()
     
     async def message_listener(self):
         """监听来自CSMS的消息"""

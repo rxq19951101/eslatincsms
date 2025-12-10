@@ -66,11 +66,13 @@ export default function SessionScreen({ route, navigation, user }: SessionScreen
     timestamp: string;
   } | null>(null);
   const [lastUpdateTime, setLastUpdateTime] = useState<string>('');
+  const [lastTransactionId, setLastTransactionId] = useState<number | null>(null);
+  const [hasShownNotFoundAlert, setHasShownNotFoundAlert] = useState(false);
 
   useEffect(() => {
     fetchChargerStatus();
-    // 每3秒刷新充电桩状态
-    const interval = setInterval(fetchChargerStatus, 3000);
+    // 每10秒刷新充电桩状态（减少服务器压力，充电会话页面需要更频繁的更新）
+    const interval = setInterval(fetchChargerStatus, 10000);
     return () => clearInterval(interval);
   }, [chargerId]);
 
@@ -216,20 +218,104 @@ export default function SessionScreen({ route, navigation, user }: SessionScreen
       const found = chargers.find((c) => c.id === chargerId);
 
       if (found) {
-        setCharger(found);
+        // 检查充电桩是否真的在线：检查 last_seen 时间
+        // 与后台运营软件保持一致：如果 last_seen 超过30秒，认为充电桩离线
+        // 充电桩通常每30秒发送一次心跳，如果超过30秒没更新，肯定离线了
+        let chargerStatus = found.status;
         
-        // 如果正在充电，获取当前订单信息
-        if (found.status === 'Charging' && found.session.transaction_id) {
-          fetchCurrentOrder(found.id, found.session.transaction_id);
+        if (found.last_seen) {
+          try {
+            const lastSeenTime = new Date(found.last_seen);
+            const now = new Date();
+            const secondsSinceLastSeen = (now.getTime() - lastSeenTime.getTime()) / 1000;
+            
+            console.log(`[SessionScreen] 充电桩 ${chargerId} 最后更新时间: ${found.last_seen}, 距离现在: ${secondsSinceLastSeen.toFixed(0)} 秒`);
+            
+            // 如果超过30秒没有更新，认为是离线状态（与后台运营软件保持一致）
+            // 注意：如果正在充电或故障，保持原状态（后端已处理，这里做双重检查）
+            if (secondsSinceLastSeen > 30) {
+              const currentStatus = found.status;
+              // 只有在非充电、非故障状态下才标记为离线
+              if (currentStatus !== 'Charging' && currentStatus !== 'Faulted') {
+                console.warn(`[SessionScreen] 充电桩 ${chargerId} 已离线（超过30秒未更新，${secondsSinceLastSeen.toFixed(0)}秒前）`);
+                chargerStatus = 'Unavailable';
+              } else {
+                console.log(`[SessionScreen] 充电桩 ${chargerId} 状态为 ${currentStatus}，即使离线也保持原状态`);
+              }
+            } else if (secondsSinceLastSeen < 0) {
+              // 如果时间是未来的，可能是时区问题，但先认为是有效的
+              console.warn(`[SessionScreen] 充电桩 ${chargerId} 的 last_seen 是未来时间，可能是时区问题`);
+            }
+          } catch (e) {
+            console.warn('[SessionScreen] 解析 last_seen 时间失败:', e);
+            // 如果无法解析时间，且状态不是充电或故障，认为是离线
+            const currentStatus = found.status;
+            if (currentStatus !== 'Charging' && currentStatus !== 'Faulted') {
+              chargerStatus = 'Unavailable';
+            }
+          }
         } else {
-          setCurrentOrder(null);
+          // 如果没有 last_seen，且状态不是充电或故障，认为是离线
+          const currentStatus = found.status;
+          if (currentStatus !== 'Charging' && currentStatus !== 'Faulted') {
+            console.warn(`[SessionScreen] 充电桩 ${chargerId} 没有 last_seen 时间，认为是离线`);
+            chargerStatus = 'Unavailable';
+          }
+        }
+        
+        // 更新充电桩状态
+        const updatedCharger = {
+          ...found,
+          status: chargerStatus,
+        };
+        setCharger(updatedCharger);
+        
+        // 如果找到了充电桩，重置提示标志
+        if (hasShownNotFoundAlert) {
+          setHasShownNotFoundAlert(false);
+        }
+        
+        // 如果正在充电，只在 transaction_id 变化时获取当前订单信息
+        // 订单信息在充电过程中不会变化，不需要频繁请求
+        const currentTransactionId = updatedCharger.session.transaction_id;
+        // 注意：使用更新后的状态 chargerStatus，而不是 found.status
+        if (chargerStatus === 'Charging' && currentTransactionId) {
+          // 只在 transaction_id 变化时获取订单（新开始充电时）
+          if (currentTransactionId !== lastTransactionId) {
+            console.log('[SessionScreen] 检测到新的交易ID，获取订单信息:', currentTransactionId);
+            fetchCurrentOrder(updatedCharger.id, currentTransactionId);
+            setLastTransactionId(currentTransactionId);
+          }
+        } else {
+          // 如果不在充电状态，清除订单和交易ID记录
+          if (currentOrder) {
+            setCurrentOrder(null);
+          }
+          if (lastTransactionId !== null) {
+            setLastTransactionId(null);
+          }
         }
       } else {
-        // Fallback: 使用假数据
+        // 充电桩不在列表中，可能是离线或不存在
+        console.warn('[SessionScreen] 充电桩未找到，可能离线或不存在:', chargerId);
+        
+        // 只在首次检测到不存在时显示一次提示
+        if (!hasShownNotFoundAlert && !charger) {
+          setHasShownNotFoundAlert(true);
+          // 延迟显示，避免在页面加载时立即弹出
+          setTimeout(() => {
+            Alert.alert(
+              '充电桩未找到',
+              `该充电桩（${chargerId}）不在系统中。\n\n可能原因：\n• 该充电桩不属于我公司\n• 充电桩尚未注册到系统\n• 充电桩当前离线`,
+              [{ text: '确定' }]
+            );
+          }, 500);
+        }
+        
         setCharger({
           id: chargerId,
-          status: 'Available',
-          last_seen: new Date().toISOString(),
+          status: 'Unavailable',
+          last_seen: '', // 离线充电桩没有最后更新时间
           session: {
             authorized: false,
             transaction_id: null,
@@ -244,12 +330,13 @@ export default function SessionScreen({ route, navigation, user }: SessionScreen
         name: error?.name,
         endpoint: API_ENDPOINTS.chargers,
       });
-      // Fallback: 使用假数据
+      // 网络错误或其他错误，如果还没有充电桩数据，设置为离线状态
       if (!charger) {
+        console.warn('[SessionScreen] 获取充电桩状态失败，设置为离线状态');
         setCharger({
           id: chargerId,
-          status: 'Unknown',
-          last_seen: new Date().toISOString(),
+          status: 'Unavailable',
+          last_seen: '',
           session: {
             authorized: false,
             transaction_id: null,
@@ -399,6 +486,45 @@ export default function SessionScreen({ route, navigation, user }: SessionScreen
     }
   };
 
+  const fetchOrderById = async (orderId: string): Promise<Order | null> => {
+    try {
+      // 获取当前用户的订单列表
+      if (!user) {
+        console.warn('[SessionScreen] 用户未登录，无法获取订单');
+        return null;
+      }
+
+      const url = `${API_ENDPOINTS.orders}?userId=${encodeURIComponent(user.idTag)}`;
+      console.log('[SessionScreen] 正在获取订单列表以查找订单:', orderId);
+      
+      const res = await fetch(url, {
+        method: 'GET',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      });
+
+      if (!res.ok) {
+        console.warn('[SessionScreen] 获取订单列表失败:', res.status);
+        return null;
+      }
+
+      const orders: Order[] = await res.json();
+      const order = orders.find((o) => o.id === orderId);
+      
+      if (order) {
+        console.log('[SessionScreen] 找到订单:', orderId);
+        return order;
+      } else {
+        console.warn('[SessionScreen] 未找到订单:', orderId);
+        return null;
+      }
+    } catch (error) {
+      console.error('[SessionScreen] 获取订单失败:', error);
+      return null;
+    }
+  };
+
   const handleStopCharging = async () => {
     if (!charger) {
       Alert.alert('错误', '充电桩信息加载失败');
@@ -409,6 +535,9 @@ export default function SessionScreen({ route, navigation, user }: SessionScreen
       Alert.alert('提示', '当前没有进行中的充电');
       return;
     }
+
+    // 保存当前的订单ID，用于停止后跳转
+    const currentOrderId = currentOrder?.id || charger.session.order_id;
 
     try {
       setCharging(true);
@@ -424,9 +553,51 @@ export default function SessionScreen({ route, navigation, user }: SessionScreen
       });
 
       if (res.ok) {
-        Alert.alert('成功', '充电已停止', [
-          { text: '确定', onPress: () => fetchChargerStatus() },
-        ]);
+        const responseData = await res.json();
+        console.log('[SessionScreen] 停止充电响应:', responseData);
+        
+        // 从响应中获取订单ID（优先使用响应中的，然后是保存的）
+        const orderId = responseData.details?.orderId || currentOrderId;
+        
+        // 更新充电桩状态
+        fetchChargerStatus();
+        
+        if (orderId) {
+          // 等待一小段时间，确保订单已更新为完成状态
+          await new Promise(resolve => setTimeout(resolve, 1500));
+          
+          // 获取订单详情（重试几次，因为订单可能还在更新中）
+          let order: Order | null = null;
+          for (let i = 0; i < 3; i++) {
+            order = await fetchOrderById(orderId);
+            // 如果订单存在且已完成，或者订单存在（可能状态还在更新中），都可以显示
+            if (order) {
+              console.log('[SessionScreen] 找到订单，状态:', order.status);
+              break;
+            }
+            if (i < 2) {
+              console.log(`[SessionScreen] 订单未找到，重试 ${i + 1}/2...`);
+              await new Promise(resolve => setTimeout(resolve, 1000));
+            }
+          }
+          
+          if (order) {
+            // 直接导航到订单详情页面
+            console.log('[SessionScreen] 导航到订单详情页面:', orderId);
+            navigation.navigate('OrderDetail', { order });
+          } else {
+            // 如果找不到订单，显示成功提示
+            console.warn('[SessionScreen] 未找到订单，显示成功提示');
+            Alert.alert('成功', '充电已停止', [
+              { text: '确定' },
+            ]);
+          }
+        } else {
+          // 没有订单ID，只显示成功提示
+          Alert.alert('成功', '充电已停止', [
+            { text: '确定' },
+          ]);
+        }
       } else {
         const errorData = await res.json();
         Alert.alert('失败', errorData.detail || '停止充电失败');
@@ -447,6 +618,12 @@ export default function SessionScreen({ route, navigation, user }: SessionScreen
         return '#ff9500';
       case 'Faulted':
         return '#ff3b30';
+      case 'Maintenance':
+        return '#ff9500'; // 维修中，使用橙色
+      case 'Unavailable':
+        return '#8e8e93';
+      case 'Offline':
+        return '#8e8e93';
       default:
         return '#8b5cf6';
     }
@@ -460,6 +637,12 @@ export default function SessionScreen({ route, navigation, user }: SessionScreen
         return '充电中';
       case 'Faulted':
         return '故障';
+      case 'Maintenance':
+        return '维修中';
+      case 'Unavailable':
+        return '离线';
+      case 'Offline':
+        return '离线';
       default:
         return status;
     }
@@ -581,9 +764,9 @@ export default function SessionScreen({ route, navigation, user }: SessionScreen
         </TouchableOpacity>
       )}
 
-      {/* 如果不在充电状态，显示开始充电按钮 */}
-      {/* 修复：如果状态是 Available，即使有旧的 transaction_id 也应该允许开始新的充电 */}
-      {charger && charger.status !== 'Charging' && (
+      {/* 如果不在充电状态且状态为可用，显示开始充电按钮 */}
+      {/* 只有状态为 Available 时才允许开始充电（维修中、离线、故障等状态禁止使用） */}
+      {charger && charger.status === 'Available' && (
         <TouchableOpacity
           style={[styles.button, charging && styles.buttonDisabled]}
           onPress={handleStartCharging}
@@ -597,19 +780,28 @@ export default function SessionScreen({ route, navigation, user }: SessionScreen
         </TouchableOpacity>
       )}
 
-      {/* 如果没有找到充电桩，也显示开始充电按钮（允许创建新充电桩） */}
-      {!charger && !loading && (
-        <TouchableOpacity
-          style={[styles.button, charging && styles.buttonDisabled]}
-          onPress={handleStartCharging}
-          disabled={charging}
-        >
-          {charging ? (
-            <ActivityIndicator color="#fff" />
-          ) : (
-            <Text style={styles.buttonText}>⚡ 开始充电</Text>
-          )}
-        </TouchableOpacity>
+      {/* 如果充电桩维修中，显示提示信息 */}
+      {charger && charger.status === 'Maintenance' && (
+        <View style={styles.maintenanceContainer}>
+          <Text style={styles.maintenanceIcon}>🔧</Text>
+          <Text style={styles.maintenanceTitle}>充电桩维修中</Text>
+          <Text style={styles.maintenanceText}>
+            该充电桩当前正在维修，暂时无法使用。{'\n'}
+            维修完成后将恢复正常使用。
+          </Text>
+        </View>
+      )}
+
+      {/* 如果充电桩离线或不可用，显示提示信息 */}
+      {charger && (charger.status === 'Unavailable' || charger.status === 'Offline') && (
+        <View style={styles.offlineContainer}>
+          <Text style={styles.offlineIcon}>📴</Text>
+          <Text style={styles.offlineTitle}>充电桩离线</Text>
+          <Text style={styles.offlineText}>
+            该充电桩当前不在线，无法开始充电。{'\n'}
+            请检查充电桩是否已连接网络，或稍后再试。
+          </Text>
+        </View>
       )}
 
       <TouchableOpacity
@@ -775,5 +967,55 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: '#1976d2',
     textAlign: 'center',
+  },
+  offlineContainer: {
+    backgroundColor: '#f5f5f5',
+    borderRadius: 12,
+    padding: 24,
+    marginBottom: 24,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#e0e0e0',
+  },
+  offlineIcon: {
+    fontSize: 48,
+    marginBottom: 16,
+  },
+  offlineTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: '#333',
+    marginBottom: 12,
+  },
+  offlineText: {
+    fontSize: 14,
+    color: '#666',
+    textAlign: 'center',
+    lineHeight: 20,
+  },
+  maintenanceContainer: {
+    backgroundColor: '#fff3cd',
+    borderRadius: 12,
+    padding: 24,
+    marginBottom: 24,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#ffc107',
+  },
+  maintenanceIcon: {
+    fontSize: 48,
+    marginBottom: 16,
+  },
+  maintenanceTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: '#856404',
+    marginBottom: 12,
+  },
+  maintenanceText: {
+    fontSize: 14,
+    color: '#856404',
+    textAlign: 'center',
+    lineHeight: 20,
   },
 });

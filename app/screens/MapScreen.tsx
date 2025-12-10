@@ -46,8 +46,8 @@ export default function MapScreen({ navigation }: MapScreenProps) {
   useEffect(() => {
     requestLocationPermission();
     fetchChargers();
-    // 每3秒更新一次充电桩数据
-    const interval = setInterval(fetchChargers, 3000);
+    // 每15秒更新一次充电桩数据（减少服务器压力）
+    const interval = setInterval(fetchChargers, 15000);
     return () => clearInterval(interval);
   }, []);
 

@@ -14,6 +14,7 @@ import {
 } from 'react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { StackActions, useFocusEffect } from '@react-navigation/native';
+import { API_ENDPOINTS } from '../config';
 
 type ScanScreenProps = {
   navigation: any;
@@ -24,6 +25,7 @@ export default function ScanScreen({ navigation, rootNavigation }: ScanScreenPro
   const [permission, requestPermission] = useCameraPermissions();
   const [scanned, setScanned] = useState(false);
   const [isActive, setIsActive] = useState(true);
+  const [checking, setChecking] = useState(false);
   const navigatingRef = useRef(false);
 
   useEffect(() => {
@@ -84,11 +86,39 @@ export default function ScanScreen({ navigation, rootNavigation }: ScanScreenPro
     }, 500);
   };
 
-  const handleBarCodeScanned = ({ type, data }: { type: string; data: string }) => {
-    if (scanned) return;
+  const checkChargerExists = async (chargerId: string): Promise<boolean> => {
+    try {
+      console.log('[Scan] 正在验证充电桩是否存在:', chargerId);
+      const res = await fetch(API_ENDPOINTS.chargers, {
+        method: 'GET',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      });
+
+      if (!res.ok) {
+        console.warn('[Scan] 获取充电桩列表失败，状态码:', res.status);
+        // 如果API失败，允许继续（可能是网络问题）
+        return true;
+      }
+
+      const chargers: any[] = await res.json();
+      const exists = chargers.some((c) => c.id === chargerId);
+      console.log('[Scan] 充电桩验证结果:', exists ? '存在' : '不存在');
+      return exists;
+    } catch (error: any) {
+      console.error('[Scan] 验证充电桩时出错:', error);
+      // 网络错误时，允许继续（可能是网络问题）
+      return true;
+    }
+  };
+
+  const handleBarCodeScanned = async ({ type, data }: { type: string; data: string }) => {
+    if (scanned || checking) return;
 
     setScanned(true);
     setIsActive(false);
+    setChecking(true);
 
     // 二维码格式：CP-XXXX 或者直接是充电桩ID
     let chargerId = data.trim();
@@ -103,6 +133,32 @@ export default function ScanScreen({ navigation, rootNavigation }: ScanScreenPro
 
     console.log('[Scan] 扫码成功，chargerId=', chargerId);
 
+    // 检查充电桩是否存在
+    const exists = await checkChargerExists(chargerId);
+    setChecking(false);
+
+    if (!exists) {
+      // 充电桩不存在，显示错误提示
+      Alert.alert(
+        '无效的二维码',
+        `该二维码对应的充电桩（${chargerId}）不在系统中。\n\n可能原因：\n• 该二维码不是充电桩二维码\n• 该充电桩不属于我公司\n• 充电桩尚未注册到系统`,
+        [
+          {
+            text: '重新扫码',
+            onPress: () => {
+              console.log('[Scan] 点击重新扫码');
+              setScanned(false);
+              setIsActive(true);
+            },
+            style: 'default',
+          },
+        ],
+        { cancelable: true }
+      );
+      return;
+    }
+
+    // 充电桩存在，显示确认对话框
     Alert.alert(
       '扫码成功',
       `扫描到充电桩: ${chargerId}`,
@@ -172,7 +228,14 @@ export default function ScanScreen({ navigation, rootNavigation }: ScanScreenPro
         </CameraView>
       ) : (
         <View style={[styles.camera, styles.cameraPaused]}>
-          <Text style={styles.pausedText}>相机已暂停</Text>
+          {checking ? (
+            <>
+              <ActivityIndicator size="large" color="#fff" />
+              <Text style={styles.pausedText}>正在验证充电桩...</Text>
+            </>
+          ) : (
+            <Text style={styles.pausedText}>相机已暂停</Text>
+          )}
         </View>
       )}
 

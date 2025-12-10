@@ -120,6 +120,8 @@ export const API_ENDPOINTS = {
   orders: `${CSMS_API_BASE}/api/orders`,
   currentOrder: `${CSMS_API_BASE}/api/orders/current`,
   currentOrderMeter: `${CSMS_API_BASE}/api/orders/current/meter`,
+  reset: `${CSMS_API_BASE}/api/reset`,
+  setMaintenance: `${CSMS_API_BASE}/api/setMaintenance`,
   health: `${CSMS_API_BASE}/health`,
 };
 

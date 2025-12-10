@@ -32,7 +32,9 @@ function getLocalIp() {
 }
 
 // 获取当前环境
-const environment = process.env.NODE_ENV || 'development';
+// 默认使用 production 环境，连接到远程服务器 47.236.134.99
+// 如果需要本地开发，可以通过环境变量 EXPO_PUBLIC_ENV=development 切换
+const environment = process.env.EXPO_PUBLIC_ENV || process.env.NODE_ENV || 'production';
 
 // 自动检测本机 IP（仅在开发环境）
 const detectedIp = environment === 'development' ? getLocalIp() : null;

@@ -35,6 +35,7 @@ export default function HistoryScreen({ navigation }: HistoryScreenProps) {
   const insets = useSafeAreaInsets();
   const [sessions, setSessions] = useState<ChargeSession[]>([]);
   const [refreshing, setRefreshing] = useState(false);
+  const [orders, setOrders] = useState<any[]>([]); // 保存原始订单数据
 
   useEffect(() => {
     loadHistory();
@@ -68,13 +69,19 @@ export default function HistoryScreen({ navigation }: HistoryScreenProps) {
         throw new Error(`HTTP ${res.status}: ${res.statusText}`);
       }
       
-      const orders: any[] = await res.json();
-      console.log('[HistoryScreen] 收到订单数据:', orders.length, '个');
+      const ordersData: any[] = await res.json();
+      console.log('[HistoryScreen] 收到订单数据:', ordersData.length, '个');
+      
+      // 保存原始订单数据，用于详情页面
+      setOrders(ordersData);
       
       // 将订单数据转换为ChargeSession格式
-      const sessions: ChargeSession[] = orders.map((order) => {
+      const sessions: ChargeSession[] = ordersData.map((order) => {
         const status = order.status === 'completed' ? 'completed' :
                       order.status === 'ongoing' ? 'ongoing' : 'cancelled';
+        
+        // 获取费用（优先使用 cost_cop，然后是 total_cost）
+        const cost = order.cost_cop || order.total_cost || undefined;
         
         return {
           id: order.id,
@@ -83,7 +90,7 @@ export default function HistoryScreen({ navigation }: HistoryScreenProps) {
           endTime: order.end_time || undefined,
           duration: order.duration_minutes || undefined,
           energyKwh: order.energy_kwh || 0,
-          cost: undefined, // 费用计算可以后续添加
+          cost: cost,
           status: status,
         };
       });
@@ -173,7 +180,28 @@ export default function HistoryScreen({ navigation }: HistoryScreenProps) {
       ) : (
         <View style={styles.listContainer}>
           {sessions.map((session) => (
-            <View key={session.id} style={styles.sessionCard}>
+            <TouchableOpacity
+              key={session.id}
+              style={styles.sessionCard}
+              onPress={() => {
+                // 如果是进行中的订单，导航到充电会话页面
+                if (session.status === 'ongoing') {
+                  navigation.navigate('Session', { chargerId: session.chargerId });
+                } else {
+                  // 如果是已完成或已取消的订单，导航到订单详情页面
+                  // 需要从原始订单数据中获取完整信息
+                  const originalOrder = orders.find((o: any) => o.id === session.id);
+                  if (originalOrder) {
+                    navigation.navigate('OrderDetail', { order: originalOrder });
+                  } else {
+                    // 如果找不到原始订单，尝试重新获取
+                    console.warn('[HistoryScreen] 未找到订单数据，尝试重新加载');
+                    loadHistory();
+                  }
+                }
+              }}
+              activeOpacity={0.7}
+            >
               <View style={styles.sessionHeader}>
                 <View style={styles.sessionInfo}>
                   <Text style={styles.chargerId}>{session.chargerId}</Text>
@@ -199,17 +227,22 @@ export default function HistoryScreen({ navigation }: HistoryScreenProps) {
                 {session.energyKwh > 0 && (
                   <View style={styles.detailRow}>
                     <Text style={styles.detailLabel}>电量</Text>
-                    <Text style={styles.detailValue}>{session.energyKwh} kWh</Text>
+                    <Text style={styles.detailValue}>{session.energyKwh.toFixed(2)} kWh</Text>
                   </View>
                 )}
                 {session.cost && (
                   <View style={styles.detailRow}>
                     <Text style={styles.detailLabel}>费用</Text>
-                    <Text style={styles.detailValue}>¥{session.cost.toFixed(2)}</Text>
+                    <Text style={styles.detailValue}>{session.cost.toFixed(2)} COP</Text>
                   </View>
                 )}
               </View>
-            </View>
+              <View style={styles.tapHint}>
+                <Text style={styles.tapHintText}>
+                  {session.status === 'ongoing' ? '点击查看充电详情 →' : '点击查看订单详情 →'}
+                </Text>
+              </View>
+            </TouchableOpacity>
           ))}
         </View>
       )}
@@ -304,6 +337,18 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '600',
     color: '#333',
+  },
+  tapHint: {
+    marginTop: 12,
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: '#f0f0f0',
+    alignItems: 'flex-end',
+  },
+  tapHintText: {
+    fontSize: 12,
+    color: '#007AFF',
+    fontStyle: 'italic',
   },
   emptyContainer: {
     alignItems: 'center',

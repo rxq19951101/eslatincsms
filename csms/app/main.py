@@ -479,15 +479,56 @@ def migrate_charger_data(charger: Dict[str, Any]) -> Dict[str, Any]:
 def load_chargers() -> List[Dict[str, Any]]:
     items = redis_client.hgetall(CHARGERS_HASH_KEY)
     chargers: List[Dict[str, Any]] = []
+    now = datetime.now(timezone.utc)
+    
     for _, val in items.items():
         try:
             charger = json.loads(val)
             # 迁移旧数据，补充缺失字段
             charger = migrate_charger_data(charger)
+            
+            # 根据 last_seen 自动判断是否离线
+            # 如果 last_seen 超过 30 秒（与后台运营软件保持一致），自动将状态设为 Unavailable
+            if charger.get("last_seen"):
+                try:
+                    last_seen_str = charger["last_seen"]
+                    # 处理不同的时间格式
+                    if last_seen_str.endswith('Z'):
+                        last_seen_str = last_seen_str.replace('Z', '+00:00')
+                    last_seen_time = datetime.fromisoformat(last_seen_str)
+                    
+                    # 计算时间差（秒）
+                    time_diff_seconds = (now - last_seen_time).total_seconds()
+                    
+                    # 如果超过 30 秒未更新，且当前状态不是 Charging 或 Faulted，则标记为离线
+                    # 注意：如果正在充电或故障，保持原状态
+                    if time_diff_seconds > 30:
+                        current_status = charger.get("status", "Unknown")
+                        # 只有在非充电、非故障状态下才自动标记为离线
+                        if current_status not in ["Charging", "Faulted"]:
+                            charger["status"] = "Unavailable"
+                            logger.debug(
+                                f"[{charger.get('id')}] 自动标记为离线: "
+                                f"last_seen={last_seen_str}, 距离现在={time_diff_seconds:.1f}秒"
+                            )
+                except (ValueError, TypeError) as e:
+                    # 如果时间解析失败，且状态不是 Charging 或 Faulted，标记为离线
+                    current_status = charger.get("status", "Unknown")
+                    if current_status not in ["Charging", "Faulted"]:
+                        charger["status"] = "Unavailable"
+                        logger.warning(f"[{charger.get('id')}] last_seen 解析失败，标记为离线: {e}")
+            else:
+                # 如果没有 last_seen，且状态不是 Charging 或 Faulted，标记为离线
+                current_status = charger.get("status", "Unknown")
+                if current_status not in ["Charging", "Faulted"]:
+                    charger["status"] = "Unavailable"
+                    logger.debug(f"[{charger.get('id')}] 没有 last_seen，标记为离线")
+            
             # 如果数据有更新，保存回去
             save_charger(charger)
             chargers.append(charger)
-        except Exception:
+        except Exception as e:
+            logger.error(f"加载充电桩数据失败: {e}", exc_info=True)
             continue
     return chargers
 
@@ -784,6 +825,10 @@ class ChangeAvailabilityRequest(BaseModel):
     chargePointId: str
     connectorId: int
     type: str  # Inoperative or Operative
+
+class SetMaintenanceRequest(BaseModel):
+    chargePointId: str
+    maintenance: bool  # True: 设置为维修状态, False: 取消维修状态
 
 
 class SetChargingProfileRequest(BaseModel):
@@ -1326,6 +1371,7 @@ async def unlock_connector(req: UnlockConnectorRequest) -> RemoteResponse:
 async def change_availability(req: ChangeAvailabilityRequest) -> RemoteResponse:
     """
     更改充电桩或连接器的可用性。
+    如果设置为 Inoperative，会自动将充电桩状态设为 Maintenance（维修中）。
     """
     logger.info(
         f"[API] POST /api/changeAvailability | "
@@ -1340,6 +1386,24 @@ async def change_availability(req: ChangeAvailabilityRequest) -> RemoteResponse:
             "ChangeAvailability",
             {"connectorId": req.connectorId, "type": req.type}
         )
+        
+        # 如果设置为 Inoperative（不可用），自动将充电桩状态设为 Maintenance（维修中）
+        if req.type == "Inoperative" and result.get("success"):
+            charger = next((c for c in load_chargers() if c["id"] == req.chargePointId), None)
+            if charger:
+                charger["status"] = "Maintenance"
+                save_charger(charger)
+                update_active(req.chargePointId, status="Maintenance")
+                logger.info(f"[{req.chargePointId}] 已设置为维修状态（Inoperative）")
+        # 如果设置为 Operative（可用），且当前状态是 Maintenance，恢复为 Available
+        elif req.type == "Operative" and result.get("success"):
+            charger = next((c for c in load_chargers() if c["id"] == req.chargePointId), None)
+            if charger and charger.get("status") == "Maintenance":
+                charger["status"] = "Available"
+                save_charger(charger)
+                update_active(req.chargePointId, status="Available")
+                logger.info(f"[{req.chargePointId}] 已从维修状态恢复为可用")
+        
         return RemoteResponse(
             success=result.get("success", False),
             message="ChangeAvailability sent" if result.get("success") else "Failed",
@@ -1349,6 +1413,74 @@ async def change_availability(req: ChangeAvailabilityRequest) -> RemoteResponse:
         raise
     except Exception as e:
         logger.error(f"Error in ChangeAvailability: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/setMaintenance", response_model=RemoteResponse, tags=["REST"])
+async def set_maintenance(req: SetMaintenanceRequest) -> RemoteResponse:
+    """
+    设置充电桩为维修状态或取消维修状态。
+    维修状态的充电桩禁止用户使用。
+    """
+    logger.info(
+        f"[API] POST /api/setMaintenance | "
+        f"充电桩ID: {req.chargePointId} | "
+        f"维修状态: {req.maintenance}"
+    )
+    
+    try:
+        charger = next((c for c in load_chargers() if c["id"] == req.chargePointId), None)
+        if not charger:
+            raise HTTPException(status_code=404, detail=f"Charger {req.chargePointId} not found")
+        
+        if req.maintenance:
+            # 设置为维修状态
+            charger["status"] = "Maintenance"
+            save_charger(charger)
+            update_active(req.chargePointId, status="Maintenance")
+            
+            # 同时发送 ChangeAvailability 消息到充电桩（如果连接）
+            try:
+                await send_ocpp_call(
+                    req.chargePointId,
+                    "ChangeAvailability",
+                    {"connectorId": 0, "type": "Inoperative"}  # connectorId=0 表示整个充电桩
+                )
+            except Exception as e:
+                logger.warning(f"[{req.chargePointId}] 发送 ChangeAvailability 失败（可能离线）: {e}")
+            
+            logger.info(f"[{req.chargePointId}] 已设置为维修状态")
+            return RemoteResponse(
+                success=True,
+                message="Charger set to maintenance mode",
+                details={"chargePointId": req.chargePointId, "status": "Maintenance"}
+            )
+        else:
+            # 取消维修状态，恢复为可用
+            charger["status"] = "Available"
+            save_charger(charger)
+            update_active(req.chargePointId, status="Available")
+            
+            # 同时发送 ChangeAvailability 消息到充电桩（如果连接）
+            try:
+                await send_ocpp_call(
+                    req.chargePointId,
+                    "ChangeAvailability",
+                    {"connectorId": 0, "type": "Operative"}  # connectorId=0 表示整个充电桩
+                )
+            except Exception as e:
+                logger.warning(f"[{req.chargePointId}] 发送 ChangeAvailability 失败（可能离线）: {e}")
+            
+            logger.info(f"[{req.chargePointId}] 已取消维修状态，恢复为可用")
+            return RemoteResponse(
+                success=True,
+                message="Charger maintenance mode cancelled",
+                details={"chargePointId": req.chargePointId, "status": "Available"}
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in SetMaintenance: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -1991,10 +2123,31 @@ async def ocpp_ws(ws: WebSocket, id: str = Query(..., description="Charger ID"))
                 )
 
             elif action == "MeterValues":
-                meter = int(payload.get("meter", charger["session"].get("meter", 0)))
-                charger["session"]["meter"] = meter
-                save_charger(charger)
-                logger.info(f"[{id}] -> OCPP MeterValuesAccepted | meter={meter}")
+                # 处理 MeterValues 消息，提取电量数据（OCPP 标准格式）
+                meter_value = payload.get("meterValue", [])
+                meter_wh = charger["session"].get("meter", 0)  # 默认使用当前值
+                
+                if meter_value:
+                    # 取第一个 meterValue 中的 sampledValue
+                    sampled_values = meter_value[0].get("sampledValue", [])
+                    if sampled_values:
+                        # 查找 Energy.Active.Import.Register 类型的值
+                        energy_value = None
+                        for sv in sampled_values:
+                            if sv.get("measurand") == "Energy.Active.Import.Register":
+                                energy_value = sv.get("value")
+                                break
+                        
+                        # 如果找到了能量值，更新充电桩的meter值
+                        if energy_value is not None:
+                            try:
+                                meter_wh = int(float(energy_value))  # 转换为整数（Wh）
+                                charger["session"]["meter"] = meter_wh
+                                save_charger(charger)
+                                logger.info(f"[{id}] MeterValues: 更新电量 = {meter_wh} Wh ({meter_wh/1000.0:.2f} kWh)")
+                            except (ValueError, TypeError) as e:
+                                logger.warning(f"[{id}] MeterValues: 无法解析电量值 {energy_value}: {e}")
+                
                 await ws.send_text(json.dumps({"action": action}))
 
             elif action == "StopTransaction":

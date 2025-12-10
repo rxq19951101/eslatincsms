@@ -94,9 +94,12 @@ class MQTTOCPPSimulator:
         """MQTT 连接回调"""
         if rc == 0:
             print(f"{self.prefix} ✓ MQTT 连接成功")
-            # 订阅响应主题（接收 CSMS 消息）
+            # 订阅响应主题（接收 CSMS 响应）
             client.subscribe(self.response_topic, qos=1)
-            print(f"{self.prefix}   订阅主题: {self.response_topic}")
+            print(f"{self.prefix}   订阅响应主题: {self.response_topic}")
+            # 订阅请求主题（接收 CSMS 请求）
+            client.subscribe(self.request_topic, qos=1)
+            print(f"{self.prefix}   订阅请求主题: {self.request_topic}")
         else:
             print(f"{self.prefix} ✗ MQTT 连接失败，返回码: {rc}")
             sys.exit(1)
@@ -104,19 +107,48 @@ class MQTTOCPPSimulator:
     def _on_message(self, client: mqtt.Client, userdata, msg):
         """MQTT 消息接收回调"""
         try:
+            topic = msg.topic
             payload = json.loads(msg.payload.decode())
-            action = payload.get("action", "")
-            response = payload.get("response", {})
             
-            print(f"{self.prefix} ← MQTT {action} Response: {json.dumps(response)}")
-            
-            # 处理响应
-            asyncio.run_coroutine_threadsafe(
-                self._handle_response(action, response),
-                self.loop
-            )
+            # 判断是请求还是响应
+            if topic == self.request_topic:
+                # 这是来自服务器的请求
+                action = payload.get("action", "")
+                request_payload = payload.get("payload", {})
+                from_sender = payload.get("from", "unknown")
+                
+                timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+                print(f"{self.prefix} ← [{timestamp}] 收到服务器请求: {action}")
+                print(f"{self.prefix}    来源: {from_sender}")
+                print(f"{self.prefix}    主题: {topic}")
+                print(f"{self.prefix}    载荷: {json.dumps(request_payload, ensure_ascii=False)}")
+                
+                # 处理请求
+                asyncio.run_coroutine_threadsafe(
+                    self._handle_request(action, request_payload),
+                    self.loop
+                )
+            elif topic == self.response_topic:
+                # 这是来自服务器的响应
+                action = payload.get("action", "")
+                response = payload.get("response", {})
+                
+                timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+                print(f"{self.prefix} ← [{timestamp}] 收到服务器响应: {action}")
+                print(f"{self.prefix}    主题: {topic}")
+                print(f"{self.prefix}    响应: {json.dumps(response, ensure_ascii=False)}")
+                
+                # 处理响应
+                asyncio.run_coroutine_threadsafe(
+                    self._handle_response(action, response),
+                    self.loop
+                )
+            else:
+                print(f"{self.prefix} ⚠ 收到未知主题的消息: {topic}")
         except Exception as e:
             print(f"{self.prefix} ✗ 消息处理错误: {e}")
+            import traceback
+            traceback.print_exc()
     
     def _on_disconnect(self, client: mqtt.Client, userdata, rc):
         """MQTT 断开连接回调"""
@@ -125,21 +157,138 @@ class MQTTOCPPSimulator:
         else:
             print(f"{self.prefix} MQTT 已断开")
     
-    async def _handle_response(self, action: str, response: Dict[str, Any]):
-        """处理 CSMS 响应"""
+    async def _handle_request(self, action: str, payload: Dict[str, Any]):
+        """处理来自 CSMS 的请求"""
+        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        print(f"{self.prefix} → [{timestamp}] 开始处理服务器请求: {action}")
+        
+        response = None
+        
         if action == "RemoteStartTransaction":
-            if response.get("status") == "Accepted":
-                self.status = ChargerStatus.CHARGING
-                self.transaction_id = response.get("transactionId")
-                print(f"{self.prefix} → 开始充电，交易ID: {self.transaction_id}")
-                # 开始发送计量值
-                asyncio.create_task(self._meter_values_loop())
+            id_tag = payload.get("idTag", "")
+            connector_id = payload.get("connectorId", 1)
+            print(f"{self.prefix}    请求参数: idTag={id_tag}, connectorId={connector_id}")
+            
+            # 生成交易ID
+            self.transaction_id = int(datetime.now(timezone.utc).timestamp())
+            self.current_id_tag = id_tag
+            self.status = ChargerStatus.CHARGING
+            self.meter_value = 0
+            
+            # 发送 StartTransaction
+            self._send_message("StartTransaction", {
+                "connectorId": connector_id,
+                "idTag": id_tag,
+                "meterStart": 0,
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            })
+            
+            # 发送 StatusNotification
+            self._send_message("StatusNotification", {
+                "connectorId": connector_id,
+                "errorCode": "NoError",
+                "status": ChargerStatus.CHARGING.value
+            })
+            
+            # 开始发送计量值
+            asyncio.create_task(self._meter_values_loop())
+            
+            response = {
+                "status": "Accepted",
+                "transactionId": self.transaction_id
+            }
+            print(f"{self.prefix}    响应: 接受远程启动，交易ID={self.transaction_id}")
         
         elif action == "RemoteStopTransaction":
-            if response.get("status") == "Accepted":
+            transaction_id = payload.get("transactionId")
+            print(f"{self.prefix}    请求参数: transactionId={transaction_id}")
+            
+            if self.status == ChargerStatus.CHARGING and self.transaction_id:
+                # 发送 StopTransaction
+                self._send_message("StopTransaction", {
+                    "transactionId": self.transaction_id,
+                    "meterStop": self.meter_value,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "reason": "Remote"
+                })
+                
+                # 发送 StatusNotification
+                self._send_message("StatusNotification", {
+                    "connectorId": 1,
+                    "errorCode": "NoError",
+                    "status": ChargerStatus.AVAILABLE.value
+                })
+                
                 self.status = ChargerStatus.AVAILABLE
                 self.transaction_id = None
-                print(f"{self.prefix} → 停止充电")
+                self.current_id_tag = None
+                
+                response = {"status": "Accepted"}
+                print(f"{self.prefix}    响应: 接受远程停止")
+            else:
+                response = {"status": "Rejected"}
+                print(f"{self.prefix}    响应: 拒绝（当前未在充电状态）")
+        
+        elif action == "ChangeConfiguration":
+            key = payload.get("key", "")
+            value = payload.get("value", "")
+            print(f"{self.prefix}    请求参数: key={key}, value={value}")
+            response = {"status": "Accepted"}
+            print(f"{self.prefix}    响应: 配置已更改")
+        
+        elif action == "GetConfiguration":
+            keys = payload.get("keys", [])
+            print(f"{self.prefix}    请求参数: keys={keys}")
+            response = {"configurationKey": []}
+            print(f"{self.prefix}    响应: 返回配置列表")
+        
+        elif action == "Reset":
+            reset_type = payload.get("type", "Hard")
+            print(f"{self.prefix}    请求参数: type={reset_type}")
+            response = {"status": "Accepted"}
+            print(f"{self.prefix}    响应: 接受重置请求")
+        
+        elif action == "UnlockConnector":
+            connector_id = payload.get("connectorId", 1)
+            print(f"{self.prefix}    请求参数: connectorId={connector_id}")
+            response = {"status": "Unlocked"}
+            print(f"{self.prefix}    响应: 连接器已解锁")
+        
+        elif action == "ChangeAvailability":
+            connector_id = payload.get("connectorId", 1)
+            availability_type = payload.get("type", "Inoperative")
+            print(f"{self.prefix}    请求参数: connectorId={connector_id}, type={availability_type}")
+            response = {"status": "Accepted"}
+            print(f"{self.prefix}    响应: 可用性已更改")
+        
+        else:
+            print(f"{self.prefix}    ⚠ 未知请求类型: {action}")
+            response = {"status": "NotSupported"}
+        
+        # 发送响应
+        if response:
+            response_message = {
+                "action": action,
+                "response": response
+            }
+            try:
+                result = self.client.publish(
+                    self.response_topic,
+                    json.dumps(response_message),
+                    qos=1
+                )
+                if result.rc == mqtt.MQTT_ERR_SUCCESS:
+                    print(f"{self.prefix} → [{timestamp}] 已发送响应: {action}")
+                else:
+                    print(f"{self.prefix} ✗ 响应发送失败，返回码: {result.rc}")
+            except Exception as e:
+                print(f"{self.prefix} ✗ 发送响应错误: {e}")
+    
+    async def _handle_response(self, action: str, response: Dict[str, Any]):
+        """处理 CSMS 响应（保留向后兼容）"""
+        # 这个函数现在主要用于处理之前发送的消息的响应
+        # 实际请求处理在 _handle_request 中
+        pass
     
     def _send_message(self, action: str, payload: Optional[Dict[str, Any]] = None):
         """发送 OCPP 消息到 CSMS"""
@@ -149,6 +298,8 @@ class MQTTOCPPSimulator:
         if payload:
             message["payload"] = payload
         
+        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        
         try:
             result = self.client.publish(
                 self.request_topic,
@@ -157,11 +308,16 @@ class MQTTOCPPSimulator:
             )
             
             if result.rc == mqtt.MQTT_ERR_SUCCESS:
-                print(f"{self.prefix} → MQTT {action} {json.dumps(payload) if payload else ''}")
+                print(f"{self.prefix} → [{timestamp}] 发送消息到服务器: {action}")
+                if payload:
+                    print(f"{self.prefix}    主题: {self.request_topic}")
+                    print(f"{self.prefix}    载荷: {json.dumps(payload, ensure_ascii=False)}")
             else:
-                print(f"{self.prefix} ✗ 消息发送失败，返回码: {result.rc}")
+                print(f"{self.prefix} ✗ [{timestamp}] 消息发送失败，返回码: {result.rc}")
         except Exception as e:
-            print(f"{self.prefix} ✗ 发送错误: {e}")
+            print(f"{self.prefix} ✗ [{timestamp}] 发送错误: {e}")
+            import traceback
+            traceback.print_exc()
     
     async def _meter_values_loop(self):
         """充电时定期发送计量值"""

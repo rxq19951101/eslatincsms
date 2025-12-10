@@ -20,6 +20,7 @@ import HistoryScreen from './screens/HistoryScreen';
 import AccountScreen from './screens/AccountScreen';
 import SupportScreen from './screens/SupportScreen';
 import SessionScreen from './screens/SessionScreen';
+import OrderDetailScreen from './screens/OrderDetailScreen';
 
 const Stack = createStackNavigator();
 const Tab = createBottomTabNavigator();
@@ -190,6 +191,18 @@ export default function App() {
               }}
             >
               {(props) => <SessionScreen {...props} user={user} />}
+            </Stack.Screen>
+            <Stack.Screen
+              name="OrderDetail"
+              options={{
+                headerShown: true,
+                headerStyle: { backgroundColor: '#007AFF' },
+                headerTintColor: '#fff',
+                headerTitleStyle: { fontWeight: '600' },
+                title: '订单详情',
+              }}
+            >
+              {(props) => <OrderDetailScreen {...props} />}
             </Stack.Screen>
           </>
         )}
