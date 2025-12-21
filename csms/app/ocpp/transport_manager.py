@@ -106,7 +106,7 @@ class TransportManager:
     
     async def send_message(
         self,
-        charger_id: str,
+        charge_point_id: str,
         action: str,
         payload: Dict[str, Any],
         preferred_transport: Optional[TransportType] = None,
@@ -115,7 +115,7 @@ class TransportManager:
         """发送消息到充电桩
         
         Args:
-            charger_id: 充电桩ID
+            charge_point_id: 充电桩ID
             action: OCPP动作
             payload: 消息载荷
             preferred_transport: 优先使用的传输方式，如果为 None 则自动选择
@@ -127,9 +127,9 @@ class TransportManager:
         # 如果指定了传输方式，优先使用
         if preferred_transport and preferred_transport in self.adapters:
             adapter = self.adapters[preferred_transport]
-            if adapter.is_connected(charger_id):
+            if adapter.is_connected(charge_point_id):
                 try:
-                    return await adapter.send_message(charger_id, action, payload, timeout)
+                    return await adapter.send_message(charge_point_id, action, payload, timeout)
                 except Exception as e:
                     logger.warning(f"使用 {preferred_transport.value} 发送失败: {e}")
         
@@ -144,9 +144,9 @@ class TransportManager:
         for transport_type in transport_priority:
             if transport_type in self.adapters:
                 adapter = self.adapters[transport_type]
-                if adapter.is_connected(charger_id):
+                if adapter.is_connected(charge_point_id):
                     try:
-                        return await adapter.send_message(charger_id, action, payload, timeout)
+                        return await adapter.send_message(charge_point_id, action, payload, timeout)
                     except Exception as e:
                         logger.warning(f"使用 {transport_type.value} 发送失败: {e}")
                         continue
@@ -154,21 +154,21 @@ class TransportManager:
         # 如果所有方式都失败，尝试使用 HTTP（即使未连接也可以排队）
         if TransportType.HTTP in self.adapters:
             adapter = self.adapters[TransportType.HTTP]
-            return await adapter.send_message(charger_id, action, payload, timeout)
+            return await adapter.send_message(charge_point_id, action, payload, timeout)
         
-        raise ConnectionError(f"无法发送消息到充电桩 {charger_id}，所有传输方式都不可用")
+        raise ConnectionError(f"无法发送消息到充电桩 {charge_point_id}，所有传输方式都不可用")
     
-    def is_connected(self, charger_id: str) -> bool:
+    def is_connected(self, charge_point_id: str) -> bool:
         """检查充电桩是否通过任何传输方式连接"""
         for adapter in self.adapters.values():
-            if adapter.is_connected(charger_id):
+            if adapter.is_connected(charge_point_id):
                 return True
         return False
     
-    def get_connection_type(self, charger_id: str) -> Optional[TransportType]:
+    def get_connection_type(self, charge_point_id: str) -> Optional[TransportType]:
         """获取充电桩使用的传输方式"""
         for transport_type, adapter in self.adapters.items():
-            if adapter.is_connected(charger_id):
+            if adapter.is_connected(charge_point_id):
                 return transport_type
         return None
     

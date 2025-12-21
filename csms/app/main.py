@@ -8,7 +8,8 @@ import logging
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
+from app.core.id_generator import generate_order_id, generate_invoice_id, generate_site_id
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, Body, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -47,12 +48,22 @@ except ImportError as e:
 
 # 数据库支持
 try:
-    from app.database import init_db, check_db_health, SessionLocal, Charger
+    from app.database import init_db, check_db_health, SessionLocal
     from datetime import datetime, timezone as tz
     DATABASE_AVAILABLE = True
 except ImportError as e:
     logger.warning(f"数据库功能不可用: {e}")
     DATABASE_AVAILABLE = False
+
+# OCPP消息处理服务
+try:
+    from app.services.ocpp_message_handler import ocpp_message_handler
+    from app.services.charge_point_service import ChargePointService
+    from app.core.mqtt_auth import MQTTAuthService
+    OCPP_SERVICE_AVAILABLE = True
+except ImportError as e:
+    logger.warning(f"OCPP服务不可用: {e}")
+    OCPP_SERVICE_AVAILABLE = False
 
 
 # ---- 生命周期管理 ----
@@ -130,6 +141,18 @@ async def lifespan(app: FastAPI):
             logger.error(f"传输管理器初始化失败: {e}", exc_info=True)
             # 不阻止应用启动，只是某些传输方式不可用
     
+    # 初始化 Redis 离线检测
+    try:
+        # 配置 Redis keyspace notifications
+        await setup_redis_keyspace_notifications()
+        
+        # 启动后台任务监听离线事件
+        offline_listener_task = asyncio.create_task(listen_charger_offline_events())
+        logger.info("充电桩离线检测监听器已启动（基于 Redis 过期键事件）")
+    except Exception as e:
+        logger.error(f"初始化 Redis 离线检测失败: {e}", exc_info=True)
+        # 不阻止应用启动，但离线检测功能不可用
+    
     yield
     
     # 关闭时
@@ -172,236 +195,35 @@ CHARGERS_HASH_KEY = "chargers"
 MESSAGES_LIST_KEY = "messages"  # Redis list for messages
 ORDERS_HASH_KEY = "orders"  # Redis hash for charging orders
 
+# Redis 离线检测配置
+CHARGER_ONLINE_KEY_PREFIX = "charger:"  # charger:{id}:online
+CHARGER_OFFLINE_TIMEOUT = 90  # 90 秒后自动过期
+
 # ---- WebSocket connection registry ----
 charger_websockets: Dict[str, WebSocket] = {}
 
 
 # ---- 统一的 OCPP 消息处理函数（供 MQTT 和 WebSocket 使用）----
-async def handle_ocpp_message(charger_id: str, action: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    """统一的 OCPP 消息处理函数"""
-    charger = next((c for c in load_chargers() if c["id"] == charger_id), get_default_charger(charger_id))
-    charger["last_seen"] = now_iso()
-    
-    # 处理不同的 OCPP 消息
-    if action == "BootNotification":
-        try:
-            # 只更新物理状态（由 OCPP 控制）
-            charger["physical_status"] = "Available"
-            vendor = str(payload.get("vendor", "")).strip()
-            model = str(payload.get("model", "")).strip()
-            firmware_version = str(payload.get("firmwareVersion", "")).strip()
-            serial_number = str(payload.get("serialNumber", "")).strip()
-            charge_point_vendor = str(payload.get("chargePointVendor", "")).strip()
-            charge_point_model = str(payload.get("chargePointModel", "")).strip()
-            
-            # 使用 chargePointVendor 和 chargePointModel 作为后备（OCPP 1.6 标准字段名）
-            if not vendor and charge_point_vendor:
-                vendor = charge_point_vendor
-            if not model and charge_point_model:
-                model = charge_point_model
-            
-            # 验证必要参数并记录警告
-            missing_params = []
-            if not vendor:
-                missing_params.append("vendor/chargePointVendor")
-            if not model:
-                missing_params.append("model/chargePointModel")
-            if not serial_number:
-                missing_params.append("serialNumber")
-            if not firmware_version:
-                missing_params.append("firmwareVersion")
-            
-            if missing_params:
-                logger.warning(
-                    f"[{charger_id}] BootNotification 参数不足: 缺少 {', '.join(missing_params)}。"
-                    f"当前参数 - vendor: {vendor or '未提供'}, model: {model or '未提供'}, "
-                    f"serialNumber: {serial_number or '未提供'}, firmwareVersion: {firmware_version or '未提供'}"
-                )
-            
-            # 更新充电桩信息
-            charger["vendor"] = vendor if vendor else charger.get("vendor")
-            charger["model"] = model if model else charger.get("model")
-            charger["firmware_version"] = firmware_version if firmware_version else charger.get("firmware_version")
-            charger["serial_number"] = serial_number if serial_number else charger.get("serial_number")
-            
-            update_active(charger_id, vendor=vendor or None, model=model or None, status="Available")
-            save_charger(charger)
-            
-            logger.info(
-                f"[{charger_id}] BootNotification: vendor={vendor or 'N/A'}, model={model or 'N/A'}, "
-                f"firmware={firmware_version or 'N/A'}, serial={serial_number or 'N/A'}"
-            )
-            
-            return {
-                "status": "Accepted",
-                "currentTime": now_iso(),
-                "interval": 30,
-            }
-        except Exception as e:
-            logger.error(f"[{charger_id}] BootNotification处理错误: {e}", exc_info=True)
-            return {"status": "Rejected", "error": str(e)}
-    
-    elif action == "Heartbeat":
-        logger.info(f"[{charger_id}] 处理 Heartbeat 消息，更新 last_seen: {charger['last_seen']}")
-        # Heartbeat 只更新 last_seen，不更新物理状态（物理状态由 StatusNotification 更新）
-        update_active(charger_id)
-        save_charger(charger)
-        logger.info(f"[{charger_id}] Heartbeat 处理完成，已保存到 Redis")
-        
-        # 记录心跳历史
-        if HISTORY_RECORDING_AVAILABLE:
-            try:
-                previous_heartbeat_time = get_last_heartbeat_time(charger_id)
-                record_heartbeat(charger_id, previous_heartbeat_time)
-            except Exception as e:
-                logger.error(f"[{charger_id}] 记录心跳历史失败: {e}", exc_info=True)
-        
-        return {"currentTime": now_iso()}
-    
-    elif action == "StatusNotification":
-        # StatusNotification 只更新物理状态（由充电桩自身通过 OCPP 更新）
-        new_physical_status = str(payload.get("status", "Unknown"))
-        previous_physical_status = charger.get("physical_status", "Unknown")
-        charger["physical_status"] = new_physical_status
-        
-        if new_physical_status == "Available":
-            session = charger.setdefault("session", {
-                "authorized": False,
-                "transaction_id": None,
-                "meter": 0,
-            })
-            if session.get("transaction_id") is not None:
-                session["transaction_id"] = None
-                session["order_id"] = None
-        
-        update_active(charger_id, status=new_physical_status)
-        save_charger(charger)
-        
-        # 记录状态变化历史
-        if HISTORY_RECORDING_AVAILABLE and previous_physical_status != new_physical_status:
-            try:
-                record_status_change(charger_id, new_physical_status, previous_physical_status)
-            except Exception as e:
-                logger.error(f"[{charger_id}] 记录状态历史失败: {e}", exc_info=True)
-        
-        return {}
-    
-    elif action == "Authorize":
-        id_tag = str(payload.get("idTag", ""))
-        charger["session"]["authorized"] = True if id_tag else False
-        save_charger(charger)
-        auth_status = "Accepted" if id_tag else "Invalid"
-        return {"idTagInfo": {"status": auth_status}}
-    
-    elif action == "StartTransaction":
-        tx_id = payload.get("transactionId") or int(datetime.now().timestamp())
-        id_tag = str(payload.get("idTag", ""))
-        charger["session"]["transaction_id"] = tx_id
-        # 只更新物理状态（由 OCPP 控制）
-        charger["physical_status"] = "Charging"
-        
-        charging_rate = charger.get("charging_rate", 7.0)
-        order_id = f"order_{tx_id}"
-        start_time = now_iso()
-        create_order(
-            order_id=order_id,
-            charger_id=charger_id,
-            user_id=id_tag,
-            id_tag=id_tag,
-            charging_rate=charging_rate,
-            start_time=start_time,
+async def handle_ocpp_message(charge_point_id: str, action: str, payload: Dict[str, Any], device_serial_number: Optional[str] = None, evse_id: int = 1) -> Dict[str, Any]:
+    """统一的 OCPP 消息处理函数（使用新表结构）"""
+    if OCPP_SERVICE_AVAILABLE:
+        # 使用新的服务层处理
+        return await ocpp_message_handler.handle_message(
+            charge_point_id=charge_point_id,
+            action=action,
+            payload=payload,
+            device_serial_number=device_serial_number,
+            evse_id=evse_id
         )
-        charger["session"]["order_id"] = order_id
-        
-        update_active(charger_id, status="Charging", txn_id=tx_id)
-        save_charger(charger)
-        
-        return {
-            "transactionId": tx_id,
-            "idTagInfo": {"status": "Accepted"},
-        }
-    
-    elif action == "MeterValues":
-        # 处理 MeterValues 消息，提取电量数据
-        meter_value = payload.get("meterValue", [])
-        if meter_value:
-            # 取第一个 meterValue 中的 sampledValue
-            sampled_values = meter_value[0].get("sampledValue", [])
-            if sampled_values:
-                # 查找 Energy.Active.Import.Register 类型的值
-                energy_value = None
-                for sv in sampled_values:
-                    if sv.get("measurand") == "Energy.Active.Import.Register":
-                        energy_value = sv.get("value")
-                        break
-                
-                # 如果找到了能量值，更新充电桩的meter值
-                if energy_value is not None:
-                    try:
-                        meter_wh = int(float(energy_value))  # 转换为整数（Wh）
-                        charger["session"]["meter"] = meter_wh
-                        save_charger(charger)
-                        logger.info(f"[{charger_id}] MeterValues: 更新电量 = {meter_wh} Wh ({meter_wh/1000.0:.2f} kWh)")
-                    except (ValueError, TypeError) as e:
-                        logger.warning(f"[{charger_id}] MeterValues: 无法解析电量值 {energy_value}: {e}")
-        return {}
-    
-    elif action == "StopTransaction":
-        tx_id = charger["session"].get("transaction_id")
-        order_id = charger["session"].get("order_id")
-        
-        if order_id:
-            order = get_order(order_id)
-            if order and order.get("status") == "ongoing":
-                start_time_str = order.get("start_time")
-                end_time_str = now_iso()
-                
-                start_time = datetime.fromisoformat(start_time_str.replace('Z', '+00:00'))
-                end_time = datetime.fromisoformat(end_time_str.replace('Z', '+00:00'))
-                duration_seconds = (end_time - start_time).total_seconds()
-                duration_minutes = duration_seconds / 60.0
-                
-                charging_rate = order.get("charging_rate", 7.0)
-                energy_kwh = charging_rate * (duration_minutes / 60.0)
-                
-                update_order(
-                    order_id=order_id,
-                    end_time=end_time_str,
-                    duration_minutes=round(duration_minutes, 2),
-                    energy_kwh=round(energy_kwh, 2),
-                )
-        
-        charger["session"]["transaction_id"] = None
-        charger["session"]["order_id"] = None
-        # 只更新物理状态（由 OCPP 控制）
-        charger["physical_status"] = "Available"
-        update_active(charger_id, status="Available", txn_id=None)
-        save_charger(charger)
-        
-        return {
-            "stopped": True,
-            "transactionId": tx_id,
-            "idTagInfo": {"status": "Accepted"},
-        }
-    
-    elif action in ["FirmwareStatusNotification", "DiagnosticsStatusNotification"]:
-        save_charger(charger)
-        return {}
-    
-    elif action == "DataTransfer":
-        save_charger(charger)
-        return {
-            "status": "Accepted",
-            "data": None
-        }
-    
     else:
-        logger.warning(f"[{charger_id}] 未知的 OCPP 动作: {action}")
-        return {"error": "UnknownAction", "action": action}
+    else:
+        # 降级到旧逻辑（如果服务不可用）
+        logger.warning("OCPP服务不可用，使用降级处理")
+        return {"error": "Service unavailable"}
 
 
 # ---- Helper function to send OCPP messages from CSMS to Charge Point ----
-async def send_ocpp_call(charger_id: str, action: str, payload: Dict[str, Any], timeout: float = 5.0) -> Dict[str, Any]:
+async def send_ocpp_call(charge_point_id: str, action: str, payload: Dict[str, Any], timeout: float = 5.0) -> Dict[str, Any]:
     """
     发送OCPP调用从CSMS到充电桩，并等待响应。
     优先使用 MQTT 传输，如果没有 MQTT 连接则使用 WebSocket。
@@ -409,24 +231,24 @@ async def send_ocpp_call(charger_id: str, action: str, payload: Dict[str, Any], 
     """
     # 优先使用 MQTT 传输
     if MQTT_AVAILABLE and hasattr(transport_manager, 'adapters'):
-        if transport_manager.is_connected(charger_id):
+        if transport_manager.is_connected(charge_point_id):
             try:
-                logger.info(f"[{charger_id}] 通过 MQTT 发送 OCPP 调用: {action}")
+                logger.info(f"[{charge_point_id}] 通过 MQTT 发送 OCPP 调用: {action}")
                 result = await transport_manager.send_message(
-                    charger_id,
+                    charge_point_id,
                     action,
                     payload,
                     preferred_transport=TransportType.MQTT,
                     timeout=timeout
                 )
-                logger.info(f"[{charger_id}] MQTT OCPP 调用完成: {action}, 结果: {result}")
+                logger.info(f"[{charge_point_id}] MQTT OCPP 调用完成: {action}, 结果: {result}")
                 return {"success": True, "data": result, "transport": "MQTT"}
             except Exception as e:
-                logger.error(f"[{charger_id}] 通过 MQTT 发送 OCPP 调用失败: {e}", exc_info=True)
+                logger.error(f"[{charge_point_id}] 通过 MQTT 发送 OCPP 调用失败: {e}", exc_info=True)
                 # 如果 MQTT 失败，尝试 WebSocket（如果有）
     
     # Fallback: 使用 WebSocket（如果可用）
-    ws = charger_websockets.get(charger_id)
+    ws = charger_websockets.get(charge_point_id)
     if ws:
         try:
             message = {
@@ -434,23 +256,23 @@ async def send_ocpp_call(charger_id: str, action: str, payload: Dict[str, Any], 
                 "payload": payload
             }
             await ws.send_text(json.dumps(message))
-            logger.info(f"[{charger_id}] -> CSMS发送OCPP调用 (WebSocket): {action}")
+            logger.info(f"[{charge_point_id}] -> CSMS发送OCPP调用 (WebSocket): {action}")
             
             # 等待响应（简化版本，实际应该使用消息ID匹配）
             try:
                 response = await asyncio.wait_for(ws.receive_text(), timeout=timeout)
                 response_data = json.loads(response)
-                logger.info(f"[{charger_id}] <- 收到响应 (WebSocket): {action}")
+                logger.info(f"[{charge_point_id}] <- 收到响应 (WebSocket): {action}")
                 return {"success": True, "data": response_data, "transport": "WebSocket"}
             except asyncio.TimeoutError:
-                logger.warning(f"[{charger_id}] OCPP调用超时 (WebSocket): {action}")
+                logger.warning(f"[{charge_point_id}] OCPP调用超时 (WebSocket): {action}")
                 return {"success": False, "error": "Timeout waiting for response"}
         except Exception as e:
-            logger.error(f"[{charger_id}] 发送OCPP调用失败 (WebSocket): {e}", exc_info=True)
+            logger.error(f"[{charge_point_id}] 发送OCPP调用失败 (WebSocket): {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=f"Failed to send OCPP call: {str(e)}")
     
     # 如果都没有连接，抛出错误
-    raise HTTPException(status_code=404, detail=f"Charger {charger_id} is not connected (MQTT or WebSocket)")
+    raise HTTPException(status_code=404, detail=f"Charger {charge_point_id} is not connected (MQTT or WebSocket)")
 
 
 def now_iso() -> str:
@@ -573,54 +395,99 @@ def save_charger(charger: Dict[str, Any]) -> None:
 
 
 def sync_charger_to_db(charger: Dict[str, Any]) -> None:
-    """将充电桩数据同步到数据库"""
+    """
+    将充电桩数据同步到数据库（兼容层）
+    注意：此函数保留用于向后兼容，新代码应直接使用ChargePointService
+    """
     if not DATABASE_AVAILABLE:
         return
     
     try:
+        from app.database.models import ChargePoint, Site, EVSEStatus
         db = SessionLocal()
         try:
-            charger_id = charger["id"]
+            charge_point_id = charger["id"]
             # 查找或创建充电桩记录
-            db_charger = db.query(Charger).filter(Charger.id == charger_id).first()
+            charge_point = db.query(ChargePoint).filter(ChargePoint.id == charge_point_id).first()
             
-            if not db_charger:
-                # 创建新记录
-                db_charger = Charger(id=charger_id)
-                db.add(db_charger)
+            if not charge_point:
+                # 使用ChargePointService创建
+                ChargePointService.get_or_create_charge_point(
+                    db=db,
+                    charge_point_id=charge_point_id,
+                    vendor=charger.get("vendor"),
+                    model=charger.get("model"),
+                    serial_number=charger.get("serial_number"),
+                    firmware_version=charger.get("firmware_version")
+                )
+                db.flush()
+                charge_point = db.query(ChargePoint).filter(ChargePoint.id == charge_point_id).first()
             
             # 更新字段
             if "vendor" in charger:
-                db_charger.vendor = charger.get("vendor")
+                charge_point.vendor = charger.get("vendor")
             if "model" in charger:
-                db_charger.model = charger.get("model")
+                charge_point.model = charger.get("model")
             if "firmware_version" in charger:
-                db_charger.firmware_version = charger.get("firmware_version")
+                charge_point.firmware_version = charger.get("firmware_version")
             if "serial_number" in charger:
-                db_charger.serial_number = charger.get("serial_number")
-            # 同步物理状态到数据库
-            if "physical_status" in charger:
-                db_charger.status = charger.get("physical_status", "Unknown")
-            if "last_seen" in charger:
-                try:
-                    db_charger.last_seen = datetime.fromisoformat(charger["last_seen"].replace("Z", "+00:00"))
-                except:
-                    db_charger.last_seen = datetime.now(tz.utc)
+                charge_point.serial_number = charger.get("serial_number")
             
-            # 更新位置信息
+            # 更新位置信息（通过站点）
             if "location" in charger:
                 loc = charger["location"]
-                if isinstance(loc, dict):
-                    db_charger.latitude = loc.get("latitude")
-                    db_charger.longitude = loc.get("longitude")
-                    db_charger.address = loc.get("address")
+                if isinstance(loc, dict) and (loc.get("latitude") or loc.get("longitude")):
+                    site = charge_point.site if charge_point.site_id else None
+                    if not site:
+                        # 创建新站点
+                        site = Site(
+                            id=f"site-{charge_point_id}",
+                            name=f"站点-{charge_point_id}",
+                            address=loc.get("address", ""),
+                            latitude=loc.get("latitude", 0.0),
+                            longitude=loc.get("longitude", 0.0)
+                        )
+                        db.add(site)
+                        db.flush()
+                        charge_point.site_id = site.id
+                    else:
+                        site.latitude = loc.get("latitude")
+                        site.longitude = loc.get("longitude")
+                        if loc.get("address"):
+                            site.address = loc.get("address")
             
-            # 更新配置信息
-            if "connector_type" in charger:
-                db_charger.connector_type = charger.get("connector_type", "Type2")
-            if "charging_rate" in charger:
-                db_charger.charging_rate = charger.get("charging_rate", 7.0)
-            if "price_per_kwh" in charger:
+            # 更新EVSE状态
+            if "physical_status" in charger:
+                evse_status = db.query(EVSEStatus).filter(
+                    EVSEStatus.charge_point_id == charge_point_id
+                ).first()
+                if evse_status:
+                    evse_status.status = charger.get("physical_status", "Unknown")
+                    if "last_seen" in charger:
+                        try:
+                            evse_status.last_seen = datetime.fromisoformat(charger["last_seen"].replace("Z", "+00:00"))
+                        except:
+                            evse_status.last_seen = datetime.now(timezone.utc)
+            
+            # 更新定价（通过站点和Tariff）
+            if "price_per_kwh" in charger and charge_point.site_id:
+                from app.database.models import Tariff
+                tariff = db.query(Tariff).filter(
+                    Tariff.site_id == charge_point.site_id,
+                    Tariff.is_active == True
+                ).first()
+                if not tariff:
+                    tariff = Tariff(
+                        site_id=charge_point.site_id,
+                        name="默认定价",
+                        base_price_per_kwh=charger.get("price_per_kwh", 2700.0),
+                        service_fee=0,
+                        valid_from=datetime.now(timezone.utc),
+                        is_active=True
+                    )
+                    db.add(tariff)
+                else:
+                    tariff.base_price_per_kwh = charger.get("price_per_kwh", 2700.0)
                 db_charger.price_per_kwh = charger.get("price_per_kwh", 2700.0)
             
             db_charger.is_active = True
@@ -639,7 +506,7 @@ def sync_charger_to_db(charger: Dict[str, Any]) -> None:
 # ---- Order Management ----
 def create_order(
     order_id: str,
-    charger_id: str,
+    charge_point_id: str,
     user_id: str,
     id_tag: str,
     charging_rate: float,
@@ -648,7 +515,7 @@ def create_order(
     """创建充电订单"""
     order = {
         "id": order_id,
-        "charger_id": charger_id,
+        "charge_point_id": charge_point_id,
         "user_id": user_id,
         "id_tag": id_tag,
         "charging_rate": charging_rate,
@@ -725,6 +592,159 @@ def get_all_orders() -> List[Dict[str, Any]]:
 
 # ---- In-memory active chargers (for quick inspection) ----
 active_chargers: Dict[str, Dict[str, Any]] = {}
+
+
+# ---- Redis 离线检测（基于过期键的事件驱动方案）----
+def set_charger_online(charge_point_id: str) -> None:
+    """
+    设置充电桩在线标记（使用 Redis SETEX，90秒后自动过期）
+    每次收到心跳时调用此函数，刷新过期时间
+    注意：参数名已更新为charge_point_id
+    """
+    try:
+        online_key = f"{CHARGER_ONLINE_KEY_PREFIX}{charge_point_id}:online"
+        redis_client.setex(online_key, CHARGER_OFFLINE_TIMEOUT, "true")
+        logger.debug(f"[{charge_point_id}] 已设置在线标记，{CHARGER_OFFLINE_TIMEOUT}秒后自动过期")
+    except Exception as e:
+        logger.error(f"[{charge_point_id}] 设置在线标记失败: {e}", exc_info=True)
+
+
+def handle_charger_offline(charge_point_id: str) -> None:
+    """
+    处理充电桩离线事件（当 Redis key 过期时触发）
+    更新充电桩状态为离线 - 使用新表结构
+    """
+    try:
+        if DATABASE_AVAILABLE:
+            from app.database.models import EVSEStatus, ChargingSession
+            db = SessionLocal()
+            try:
+                # 获取所有EVSE状态
+                evse_statuses = db.query(EVSEStatus).filter(
+                    EVSEStatus.charge_point_id == charge_point_id
+                ).all()
+                
+                for evse_status in evse_statuses:
+                    current_status = evse_status.status
+                    
+                    # 只有在非离线状态时才更新为离线
+                    # 注意：如果充电桩正在充电，不应该因为心跳超时而标记为离线
+                    if current_status not in ["Charging", "Unavailable"]:
+                        # 检查是否有活跃会话
+                        if evse_status.current_session_id:
+                            session = db.query(ChargingSession).filter(
+                                ChargingSession.id == evse_status.current_session_id
+                            ).first()
+                            if session and session.status == "ongoing":
+                                # 有活跃会话，不更新为离线
+                                logger.debug(
+                                    f"[{charge_point_id}] 充电桩离线检测：有活跃会话，跳过更新"
+                                )
+                                continue
+                        
+                        evse_status.status = "Unavailable"
+                        evse_status.last_seen = datetime.now(timezone.utc)
+                        db.commit()
+                        
+                        logger.info(
+                            f"[{charge_point_id}] 充电桩离线检测：EVSE状态已更新为 Unavailable"
+                        )
+                    else:
+                        logger.debug(
+                            f"[{charge_point_id}] 充电桩离线检测：当前状态为 {current_status}，跳过更新"
+                        )
+            finally:
+                db.close()
+        else:
+            # 降级到Redis逻辑
+            charger = next((c for c in load_chargers() if c["id"] == charge_point_id), None)
+            if charger is None:
+                charger = get_default_charger(charge_point_id)
+            
+            current_physical_status = charger.get("physical_status", "Unknown")
+            if current_physical_status not in ["Charging", "Unavailable"]:
+                charger["physical_status"] = "Unavailable"
+                charger["last_seen"] = now_iso()
+                charger["is_available"] = calculate_is_available(charger)
+                save_charger(charger)
+                logger.info(f"[{charge_point_id}] 充电桩离线检测：物理状态已更新为 Unavailable")
+    except Exception as e:
+        logger.error(f"[{charge_point_id}] 处理充电桩离线事件失败: {e}", exc_info=True)
+
+
+async def setup_redis_keyspace_notifications() -> None:
+    """
+    配置 Redis keyspace notifications，启用过期事件通知
+    需要 Redis 配置：notify-keyspace-events Ex
+    """
+    try:
+        # 配置 Redis 启用过期事件通知
+        # 使用 CONFIG SET 命令（如果 Redis 允许）
+        try:
+            redis_client.config_set("notify-keyspace-events", "Ex")
+            logger.info("Redis keyspace notifications 已启用（过期事件）")
+        except redis.exceptions.ResponseError as e:
+            # 如果配置失败，可能是 Redis 配置文件中已设置或权限不足
+            logger.warning(f"无法通过 CONFIG SET 启用 keyspace notifications: {e}")
+            logger.info("请确保 Redis 配置文件中包含: notify-keyspace-events Ex")
+    except Exception as e:
+        logger.error(f"配置 Redis keyspace notifications 失败: {e}", exc_info=True)
+
+
+async def listen_charger_offline_events() -> None:
+    """
+    监听 Redis 过期事件，当充电桩在线标记过期时，触发离线处理
+    使用 Redis PUB/SUB 机制监听 __keyspace@0__:charger:*:online 的 expired 事件
+    """
+    while True:
+        try:
+            # 创建专用的 Redis 客户端用于订阅（不能使用 decode_responses=True）
+            pubsub_client = redis.from_url(REDIS_URL, decode_responses=False)
+            pubsub = pubsub_client.pubsub()
+            
+            # 订阅过期事件
+            # Redis 会在 key 过期时发布消息到 __keyspace@0__:{key} 频道，事件类型为 "expired"
+            pattern = f"__keyspace@0__:{CHARGER_ONLINE_KEY_PREFIX}*:online"
+            pubsub.psubscribe(pattern)
+            
+            logger.info(f"开始监听充电桩离线事件，模式: {pattern}")
+            
+            # 持续监听
+            for message in pubsub.listen():
+                try:
+                    if message["type"] == "pmessage":
+                        # 消息格式：
+                        # channel: __keyspace@0__:charger:{id}:online
+                        # data: expired
+                        channel = message["channel"].decode("utf-8") if isinstance(message["channel"], bytes) else message["channel"]
+                        data = message["data"].decode("utf-8") if isinstance(message["data"], bytes) else message["data"]
+                        
+                        if data == "expired":
+                            # 从 channel 中提取充电桩 ID
+                            # channel 格式: __keyspace@0__:charger:{id}:online
+                            parts = channel.split(":")
+                            if len(parts) >= 3:
+                                # 找到 "charger" 的位置
+                                try:
+                                    charger_idx = parts.index("charger")
+                                    if charger_idx + 1 < len(parts):
+                                        charge_point_id = parts[charger_idx + 1]
+                                        logger.info(f"[Redis事件] 检测到充电桩离线: {charge_point_id}")
+                                        # 在后台线程中处理离线事件（避免阻塞监听循环）
+                                        await asyncio.to_thread(handle_charger_offline, charge_point_id)
+                                except ValueError:
+                                    logger.warning(f"无法从 channel {channel} 中提取充电桩 ID")
+                except Exception as e:
+                    logger.error(f"处理 Redis 过期事件失败: {e}", exc_info=True)
+                    # 继续监听，不中断
+        except redis.exceptions.ConnectionError as e:
+            logger.error(f"Redis 连接失败: {e}，5秒后重试...")
+            await asyncio.sleep(5)
+        except Exception as e:
+            logger.error(f"监听充电桩离线事件失败: {e}", exc_info=True)
+            # 如果监听失败，等待后重试
+            await asyncio.sleep(5)
+            logger.info("尝试重新连接 Redis 订阅...")
 
 
 def update_active(
@@ -991,19 +1011,70 @@ def get_supported_ocpp_features() -> Dict[str, Any]:
 @app.get("/chargers", tags=["REST"])
 def chargers_list() -> List[Dict[str, Any]]:
     """
-    List all chargers from Redis.
-    Returns: [{"id": str, "status": str, "last_seen": str, "session": {...}}, ...]
+    List all chargers - 使用新表结构
+    Returns: [{"id": str, "status": str, "last_seen": str, ...}, ...]
     """
     logger.info("[API] GET /chargers | 获取所有充电桩列表")
-    chargers = load_chargers()
-    logger.info(f"[API] GET /chargers 成功 | 返回 {len(chargers)} 个充电桩")
-    return chargers
+    
+    if not DATABASE_AVAILABLE:
+        # 降级到Redis
+        chargers = load_chargers()
+        logger.info(f"[API] GET /chargers 成功 | 返回 {len(chargers)} 个充电桩（Redis）")
+        return chargers
+    
+    try:
+        from app.database.models import ChargePoint, EVSEStatus, Site, Tariff
+        db = SessionLocal()
+        try:
+            charge_points = db.query(ChargePoint).all()
+            result = []
+            
+            for cp in charge_points:
+                # 获取EVSE状态
+                evse_status = db.query(EVSEStatus).filter(
+                    EVSEStatus.charge_point_id == cp.id
+                ).first()
+                status = evse_status.status if evse_status else "Unknown"
+                last_seen = evse_status.last_seen if evse_status else None
+                
+                # 获取站点信息
+                site = cp.site if cp.site_id else None
+                
+                # 获取定价
+                tariff = db.query(Tariff).filter(
+                    Tariff.site_id == cp.site_id,
+                    Tariff.is_active == True
+                ).first() if cp.site_id else None
+                
+                result.append({
+                    "id": cp.id,
+                    "vendor": cp.vendor,
+                    "model": cp.model,
+                    "status": status,
+                    "last_seen": last_seen.isoformat() if last_seen else None,
+                    "location": {
+                        "latitude": site.latitude if site else None,
+                        "longitude": site.longitude if site else None,
+                        "address": site.address if site else None,
+                    },
+                    "price_per_kwh": tariff.base_price_per_kwh if tariff else None,
+                })
+            
+            logger.info(f"[API] GET /chargers 成功 | 返回 {len(result)} 个充电桩（数据库）")
+            return result
+        finally:
+            db.close()
+    except Exception as e:
+        logger.error(f"获取充电桩列表失败: {e}", exc_info=True)
+        # 降级到Redis
+        chargers = load_chargers()
+        return chargers
 
 
 @app.post("/api/updateLocation", response_model=RemoteResponse, tags=["REST"])
 async def update_location(req: UpdateLocationRequest) -> RemoteResponse:
     """
-    Update charger location (latitude, longitude, address).
+    Update charger location (latitude, longitude, address) - 使用新表结构
     """
     logger.info(
         f"[API] POST /api/updateLocation | "
@@ -1012,35 +1083,72 @@ async def update_location(req: UpdateLocationRequest) -> RemoteResponse:
         f"地址: {req.address or '无'}"
     )
     
-    charger = next((c for c in load_chargers() if c["id"] == req.chargePointId), None)
-    if not charger:
-        charger = get_default_charger(req.chargePointId)
-        save_charger(charger)
+    if not DATABASE_AVAILABLE:
+        raise HTTPException(status_code=503, detail="数据库不可用")
     
-    charger["location"] = {
-        "latitude": req.latitude,
-        "longitude": req.longitude,
-        "address": req.address,
-    }
-    save_charger(charger)
-    
-    logger.info(
-        f"[API] POST /api/updateLocation 成功 | "
-        f"充电桩ID: {req.chargePointId} | "
-        f"位置: ({req.latitude}, {req.longitude})"
-    )
-    
-    return RemoteResponse(
-        success=True,
-        message="Location updated successfully",
-        details={"chargePointId": req.chargePointId, "location": charger["location"]},
-    )
+    try:
+        from app.database.models import ChargePoint, Site
+        db = SessionLocal()
+        try:
+            charge_point = db.query(ChargePoint).filter(ChargePoint.id == req.chargePointId).first()
+            
+            if not charge_point:
+                # 创建充电桩
+                charge_point = ChargePointService.get_or_create_charge_point(
+                    db=db,
+                    charge_point_id=req.chargePointId
+                )
+            
+            # 更新或创建站点
+            site = charge_point.site if charge_point.site_id else None
+            if not site:
+                site = Site(
+                    id=generate_site_id(f"站点-{req.chargePointId}"),
+                    name=f"站点-{req.chargePointId}",
+                    address=req.address or "",
+                    latitude=req.latitude,
+                    longitude=req.longitude
+                )
+                db.add(site)
+                db.flush()
+                charge_point.site_id = site.id
+            else:
+                site.latitude = req.latitude
+                site.longitude = req.longitude
+                if req.address:
+                    site.address = req.address
+            
+            db.commit()
+            
+            logger.info(
+                f"[API] POST /api/updateLocation 成功 | "
+                f"充电桩ID: {req.chargePointId} | "
+                f"位置: ({req.latitude}, {req.longitude})"
+            )
+            
+            return RemoteResponse(
+                success=True,
+                message="Location updated successfully",
+                details={
+                    "chargePointId": req.chargePointId,
+                    "location": {
+                        "latitude": req.latitude,
+                        "longitude": req.longitude,
+                        "address": req.address
+                    }
+                },
+            )
+        finally:
+            db.close()
+    except Exception as e:
+        logger.error(f"更新位置失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"更新位置失败: {str(e)}")
 
 
 @app.post("/api/updatePrice", response_model=RemoteResponse, tags=["REST"])
 async def update_price(req: UpdatePriceRequest) -> RemoteResponse:
     """
-    Update charger price per kWh.
+    Update charger price per kWh - 使用新表结构
     """
     logger.info(
         f"[API] POST /api/updatePrice | "
@@ -1048,25 +1156,60 @@ async def update_price(req: UpdatePriceRequest) -> RemoteResponse:
         f"价格: {req.pricePerKwh} COP/kWh"
     )
     
-    charger = next((c for c in load_chargers() if c["id"] == req.chargePointId), None)
-    if not charger:
-        charger = get_default_charger(req.chargePointId)
-        save_charger(charger)
+    if not DATABASE_AVAILABLE:
+        raise HTTPException(status_code=503, detail="数据库不可用")
     
-    charger["price_per_kwh"] = req.pricePerKwh
-    save_charger(charger)
-    
-    logger.info(
-        f"[API] POST /api/updatePrice 成功 | "
-        f"充电桩ID: {req.chargePointId} | "
-        f"价格: {req.pricePerKwh} COP/kWh"
-    )
-    
-    return RemoteResponse(
-        success=True,
-        message="Price updated successfully",
-        details={"chargePointId": req.chargePointId, "pricePerKwh": req.pricePerKwh},
-    )
+    try:
+        from app.database.models import ChargePoint, Tariff
+        db = SessionLocal()
+        try:
+            charge_point = db.query(ChargePoint).filter(ChargePoint.id == req.chargePointId).first()
+            
+            if not charge_point:
+                raise HTTPException(status_code=404, detail=f"充电桩 {req.chargePointId} 未找到")
+            
+            if not charge_point.site_id:
+                raise HTTPException(status_code=400, detail="充电桩未配置站点，请先设置位置")
+            
+            # 更新或创建定价规则
+            tariff = db.query(Tariff).filter(
+                Tariff.site_id == charge_point.site_id,
+                Tariff.is_active == True
+            ).first()
+            
+            if not tariff:
+                tariff = Tariff(
+                    site_id=charge_point.site_id,
+                    name="默认定价",
+                    base_price_per_kwh=req.pricePerKwh,
+                    service_fee=0,
+                    valid_from=datetime.now(timezone.utc),
+                    is_active=True
+                )
+                db.add(tariff)
+            else:
+                tariff.base_price_per_kwh = req.pricePerKwh
+            
+            db.commit()
+            
+            logger.info(
+                f"[API] POST /api/updatePrice 成功 | "
+                f"充电桩ID: {req.chargePointId} | "
+                f"价格: {req.pricePerKwh} COP/kWh"
+            )
+            
+            return RemoteResponse(
+                success=True,
+                message="Price updated successfully",
+                details={"chargePointId": req.chargePointId, "pricePerKwh": req.pricePerKwh},
+            )
+        finally:
+            db.close()
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"更新价格失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"更新价格失败: {str(e)}")
 
 
 @app.post("/api/remoteStart", response_model=RemoteResponse, tags=["REST"])
@@ -1138,7 +1281,7 @@ async def remote_start(req: RemoteStartRequest) -> RemoteResponse:
         start_time = now_iso()
         create_order(
             order_id=order_id,
-            charger_id=req.chargePointId,
+            charge_point_id=req.chargePointId,
             user_id=req.idTag,  # 使用idTag作为user_id
             id_tag=req.idTag,
             charging_rate=charging_rate,
@@ -1184,7 +1327,7 @@ async def remote_start(req: RemoteStartRequest) -> RemoteResponse:
         start_time = now_iso()
         create_order(
             order_id=order_id,
-            charger_id=req.chargePointId,
+            charge_point_id=req.chargePointId,
             user_id=req.idTag,  # 使用idTag作为user_id
             id_tag=req.idTag,
             charging_rate=charging_rate,
@@ -1223,20 +1366,38 @@ async def remote_stop(req: RemoteStopRequest) -> RemoteResponse:
         f"充电桩ID: {req.chargePointId}"
     )
     
-    charger = next((c for c in load_chargers() if c["id"] == req.chargePointId), None)
-    if charger is None:
-        charger = get_default_charger(req.chargePointId)
-    
     # 优先使用 MQTT 发送 RemoteStopTransaction
     if MQTT_AVAILABLE and hasattr(transport_manager, 'adapters'):
         if transport_manager.is_connected(req.chargePointId):
             try:
-                session = charger.setdefault("session", {
-                    "authorized": False,
-                    "transaction_id": None,
-                    "meter": 0,
-                })
-                txn_id = session.get("transaction_id")
+                # 从数据库获取活跃会话
+                txn_id = None
+                order_id = None
+                
+                if DATABASE_AVAILABLE:
+                    from app.database.models import ChargingSession, Order
+                    db = SessionLocal()
+                    try:
+                        session = db.query(ChargingSession).filter(
+                            ChargingSession.charge_point_id == req.chargePointId,
+                            ChargingSession.status == "ongoing"
+                        ).order_by(ChargingSession.start_time.desc()).first()
+                        
+                        if session:
+                            txn_id = session.transaction_id
+                            order = db.query(Order).filter(Order.session_id == session.id).first()
+                            if order:
+                                order_id = order.id
+                    finally:
+                        db.close()
+                
+                # 如果数据库中没有，尝试从Redis获取（兼容层）
+                if not txn_id:
+                    charger = next((c for c in load_chargers() if c["id"] == req.chargePointId), None)
+                    if charger:
+                        session = charger.get("session", {})
+                        txn_id = session.get("transaction_id")
+                        order_id = session.get("order_id")
                 
                 if not txn_id:
                     raise HTTPException(status_code=400, detail="No active transaction to stop")
@@ -1256,22 +1417,49 @@ async def remote_stop(req: RemoteStopRequest) -> RemoteResponse:
                 )
                 logger.info(f"[{req.chargePointId}] RemoteStopTransaction 已发送，响应: {result}")
                 
-                # 更新订单状态
-                order_id = session.get("order_id")
-                if order_id:
+                # 更新订单状态（如果数据库可用，使用数据库；否则使用Redis）
+                if DATABASE_AVAILABLE and order_id:
+                    from app.database.models import Order, ChargingSession
+                    db = SessionLocal()
+                    try:
+                        order = db.query(Order).filter(Order.id == order_id).first()
+                        if order and order.status == "ongoing":
+                            # 通过session获取meter值计算能量
+                            session = db.query(ChargingSession).filter(
+                                ChargingSession.id == order.session_id
+                            ).first() if order.session_id else None
+                            
+                            if session and session.end_time:
+                                duration_seconds = (session.end_time - session.start_time).total_seconds()
+                                duration_minutes = duration_seconds / 60.0
+                                
+                                # 从meter值计算能量
+                                if session.meter_stop and session.meter_start:
+                                    energy_wh = session.meter_stop - session.meter_start
+                                    energy_kwh = energy_wh / 1000.0
+                                else:
+                                    energy_kwh = None
+                                
+                                order.end_time = session.end_time
+                                order.duration_minutes = duration_minutes
+                                if energy_kwh:
+                                    order.energy_kwh = energy_kwh
+                                order.status = "completed"
+                                db.commit()
+                    finally:
+                        db.close()
+                elif order_id:
+                    # 降级到Redis
                     order = get_order(order_id)
                     if order and order.get("status") == "ongoing":
                         start_time_str = order.get("start_time")
                         end_time_str = now_iso()
-                        
                         start_time = datetime.fromisoformat(start_time_str.replace('Z', '+00:00'))
                         end_time = datetime.fromisoformat(end_time_str.replace('Z', '+00:00'))
                         duration_seconds = (end_time - start_time).total_seconds()
                         duration_minutes = duration_seconds / 60.0
-                        
                         charging_rate = order.get("charging_rate", 7.0)
                         energy_kwh = charging_rate * (duration_minutes / 60.0)
-                        
                         update_order(
                             order_id=order_id,
                             end_time=end_time_str,
@@ -1279,13 +1467,16 @@ async def remote_stop(req: RemoteStopRequest) -> RemoteResponse:
                             energy_kwh=round(energy_kwh, 2),
                         )
                 
-                # 更新充电桩状态
-                charger["physical_status"] = "Available"
-                session["transaction_id"] = None
-                session["order_id"] = None
-                session["authorized"] = False
-                save_charger(charger)
-                update_active(req.chargePointId, status="Available", txn_id=None)
+                # 更新充电桩状态（兼容层）
+                charger = next((c for c in load_chargers() if c["id"] == req.chargePointId), None)
+                if charger:
+                    charger["physical_status"] = "Available"
+                    session = charger.get("session", {})
+                    session["transaction_id"] = None
+                    session["order_id"] = None
+                    session["authorized"] = False
+                    save_charger(charger)
+                    update_active(req.chargePointId, status="Available", txn_id=None)
                 
                 return RemoteResponse(
                     success=result.get("success", True),
@@ -1302,6 +1493,31 @@ async def remote_stop(req: RemoteStopRequest) -> RemoteResponse:
     ws = charger_websockets.get(req.chargePointId)
     if ws:
         try:
+            # 获取transaction_id（如果还没有）
+            if not txn_id:
+                if DATABASE_AVAILABLE:
+                    from app.database.models import ChargingSession
+                    db = SessionLocal()
+                    try:
+                        session = db.query(ChargingSession).filter(
+                            ChargingSession.charge_point_id == req.chargePointId,
+                            ChargingSession.status == "ongoing"
+                        ).order_by(ChargingSession.start_time.desc()).first()
+                        if session:
+                            txn_id = session.transaction_id
+                    finally:
+                        db.close()
+                
+                if not txn_id:
+                    # 从Redis获取（兼容层）
+                    charger = next((c for c in load_chargers() if c["id"] == req.chargePointId), None)
+                    if charger:
+                        session = charger.get("session", {})
+                        txn_id = session.get("transaction_id")
+            
+            if not txn_id:
+                raise HTTPException(status_code=400, detail="No active transaction to stop")
+            
             # Send RemoteStopTransaction (simplified format)
             call = json.dumps({
                 "action": "RemoteStopTransaction",
@@ -1319,6 +1535,8 @@ async def remote_stop(req: RemoteStopRequest) -> RemoteResponse:
                 message="RemoteStopTransaction sent (WebSocket)",
                 details={"action": "RemoteStopTransaction", "transactionId": txn_id, "orderId": order_id, "sent": True, "transport": "WebSocket"},
             )
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error(f"[{req.chargePointId}] 通过 WebSocket 发送 RemoteStopTransaction 失败: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=str(e))
@@ -2035,7 +2253,7 @@ async def reply_message(req: ReplyMessageRequest) -> RemoteResponse:
 @app.get("/api/orders", tags=["REST"])
 def get_orders(userId: str | None = None) -> List[Dict[str, Any]]:
     """
-    Get charging orders.
+    Get charging orders - 使用新表结构
     If userId is provided, returns only orders for that user.
     Otherwise, returns all orders.
     """
@@ -2044,20 +2262,62 @@ def get_orders(userId: str | None = None) -> List[Dict[str, Any]]:
         f"用户ID: {userId or '全部'}"
     )
     
-    if userId:
-        orders = get_orders_by_user(userId)
-        logger.info(f"[API] GET /api/orders 成功 | 用户 {userId} 的订单数: {len(orders)}")
+    if not DATABASE_AVAILABLE:
+        # 降级到Redis
+        if userId:
+            orders = get_orders_by_user(userId)
+        else:
+            orders = get_all_orders()
         return orders
-    else:
-        orders = get_all_orders()
-        logger.info(f"[API] GET /api/orders 成功 | 全部订单数: {len(orders)}")
-        return orders
+    
+    try:
+        from app.database.models import Order, Invoice
+        db = SessionLocal()
+        try:
+            query = db.query(Order)
+            
+            if userId:
+                query = query.filter(Order.user_id == userId)
+            
+            orders_db = query.order_by(Order.created_at.desc()).all()
+            
+            result = []
+            for o in orders_db:
+                # 获取关联的发票信息
+                invoice = db.query(Invoice).filter(Invoice.order_id == o.id).first()
+                total_cost = invoice.total_amount if invoice else None
+                
+                result.append({
+                    "id": o.id,
+                    "charge_point_id": o.charge_point_id,
+                    "user_id": o.user_id,
+                    "id_tag": o.id_tag,
+                    "start_time": o.start_time.isoformat() if o.start_time else None,
+                    "end_time": o.end_time.isoformat() if o.end_time else None,
+                    "energy_kwh": o.energy_kwh,
+                    "duration_minutes": o.duration_minutes,
+                    "total_cost": total_cost,
+                    "status": o.status,
+                    "created_at": o.created_at.isoformat() if o.created_at else None,
+                })
+            
+            logger.info(f"[API] GET /api/orders 成功 | 返回 {len(result)} 个订单（数据库）")
+            return result
+        finally:
+            db.close()
+    except Exception as e:
+        logger.error(f"获取订单列表失败: {e}", exc_info=True)
+        # 降级到Redis
+        if userId:
+            return get_orders_by_user(userId)
+        else:
+            return get_all_orders()
 
 
 @app.get("/api/orders/current", tags=["REST"])
 def get_current_order(chargePointId: str = Query(...), transactionId: int | None = Query(None)) -> Dict[str, Any]:
     """
-    Get current ongoing order for a charger.
+    Get current ongoing order for a charger - 使用新表结构
     If transactionId is provided, find order by transaction ID.
     Otherwise, find the latest ongoing order for the charger.
     """
@@ -2067,39 +2327,90 @@ def get_current_order(chargePointId: str = Query(...), transactionId: int | None
         f"交易ID: {transactionId or '未指定'}"
     )
     
-    if transactionId:
-        # 尝试通过transaction_id找到订单（订单ID格式为 order_{transactionId}）
-        order_id = f"order_{transactionId}"
-        order = get_order(order_id)
-        if order:
-            # 返回订单，即使状态不是ongoing（可能刚创建）
-            return order
-    
-    # 如果没有提供transactionId或找不到，查找充电桩的订单
-    charger = next((c for c in load_chargers() if c["id"] == chargePointId), None)
-    if charger:
-        session = charger.get("session", {})
-        order_id = session.get("order_id")
-        if order_id:
+    if not DATABASE_AVAILABLE:
+        # 降级到Redis逻辑
+        if transactionId:
+            order_id = generate_order_id(transaction_id=transactionId)
             order = get_order(order_id)
             if order:
                 return order
+        
+        charger = next((c for c in load_chargers() if c["id"] == chargePointId), None)
+        if charger:
+            session = charger.get("session", {})
+            order_id = session.get("order_id")
+            if order_id:
+                order = get_order(order_id)
+                if order:
+                    return order
+        
+        all_orders = get_all_orders()
+        charger_orders = [o for o in all_orders if o.get("charge_point_id") == chargePointId or o.get("charger_id") == chargePointId]
+        if charger_orders:
+            charger_orders.sort(key=lambda x: x.get("start_time", ""), reverse=True)
+            ongoing_order = next((o for o in charger_orders if o.get("status") == "ongoing"), None)
+            if ongoing_order:
+                return ongoing_order
+            return charger_orders[0]
+        
+        raise HTTPException(status_code=404, detail="No order found")
     
-    # 如果都找不到，尝试查找该充电桩的所有订单，返回最新的进行中订单
-    all_orders = get_all_orders()
-    charger_orders = [o for o in all_orders if o.get("charger_id") == chargePointId]
-    if charger_orders:
-        # 按开始时间排序，返回最新的
-        charger_orders.sort(key=lambda x: x.get("start_time", ""), reverse=True)
-        # 优先返回ongoing状态的，否则返回最新的
-        ongoing_order = next((o for o in charger_orders if o.get("status") == "ongoing"), None)
-        if ongoing_order:
-            return ongoing_order
-        logger.info(f"[API] GET /api/orders/current 成功 | 找到订单: {charger_orders[0].get('id')}")
-        return charger_orders[0]
-    
-    logger.warning(f"[API] GET /api/orders/current | 未找到订单 | 充电桩: {chargePointId}")
-    raise HTTPException(status_code=404, detail="No order found")
+    try:
+        from app.database.models import Order, ChargingSession, Invoice
+        db = SessionLocal()
+        try:
+            # 如果提供了transactionId，通过ChargingSession查找
+            if transactionId:
+                session = db.query(ChargingSession).filter(
+                    ChargingSession.charge_point_id == chargePointId,
+                    ChargingSession.transaction_id == transactionId
+                ).first()
+                if session:
+                    order = db.query(Order).filter(Order.session_id == session.id).first()
+                    if order:
+                        invoice = db.query(Invoice).filter(Invoice.order_id == order.id).first()
+                        return {
+                            "id": order.id,
+                            "charge_point_id": order.charge_point_id,
+                            "user_id": order.user_id,
+                            "id_tag": order.id_tag,
+                            "start_time": order.start_time.isoformat() if order.start_time else None,
+                            "end_time": order.end_time.isoformat() if order.end_time else None,
+                            "energy_kwh": order.energy_kwh,
+                            "duration_minutes": order.duration_minutes,
+                            "total_cost": invoice.total_amount if invoice else None,
+                            "status": order.status,
+                        }
+            
+            # 查找最新的进行中订单
+            order = db.query(Order).filter(
+                Order.charge_point_id == chargePointId,
+                Order.status == "ongoing"
+            ).order_by(Order.created_at.desc()).first()
+            
+            if order:
+                invoice = db.query(Invoice).filter(Invoice.order_id == order.id).first()
+                return {
+                    "id": order.id,
+                    "charge_point_id": order.charge_point_id,
+                    "user_id": order.user_id,
+                    "id_tag": order.id_tag,
+                    "start_time": order.start_time.isoformat() if order.start_time else None,
+                    "end_time": order.end_time.isoformat() if order.end_time else None,
+                    "energy_kwh": order.energy_kwh,
+                    "duration_minutes": order.duration_minutes,
+                    "total_cost": invoice.total_amount if invoice else None,
+                    "status": order.status,
+                }
+            
+            raise HTTPException(status_code=404, detail="No order found")
+        finally:
+            db.close()
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取当前订单失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"获取订单失败: {str(e)}")
 
 
 @app.get("/api/orders/current/meter", tags=["REST"])
@@ -2176,9 +2487,9 @@ def get_current_order_meter(
 
 
 # ---- HTTP OCPP 端点（如果启用 HTTP 传输）----
-@app.post("/ocpp/{charger_id}", tags=["OCPP"])
-@app.get("/ocpp/{charger_id}", tags=["OCPP"])
-async def ocpp_http(charger_id: str, request: Request):
+@app.post("/ocpp/{charge_point_id}", tags=["OCPP"])
+@app.get("/ocpp/{charge_point_id}", tags=["OCPP"])
+async def ocpp_http(charge_point_id: str, request: Request):
     """
     HTTP OCPP 端点
     - POST: 充电桩发送 OCPP 消息
@@ -2197,16 +2508,20 @@ async def ocpp_http(charger_id: str, request: Request):
         raise HTTPException(status_code=503, detail="HTTP 传输适配器不可用")
     
     try:
-        return await http_adapter.handle_http_request(charger_id, request)
+        return await http_adapter.handle_http_request(charge_point_id, request)
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"[{charger_id}] HTTP OCPP 请求处理错误: {e}", exc_info=True)
+        logger.error(f"[{charge_point_id}] HTTP OCPP 请求处理错误: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.websocket("/ocpp")
-async def ocpp_ws(ws: WebSocket, id: str = Query(..., description="Charger ID")):
+async def ocpp_ws(ws: WebSocket, id: str = Query(..., description="Charge Point ID")):
+    """
+    WebSocket OCPP端点（使用新服务层）
+    id参数现在表示charge_point_id
+    """
     # Enforce subprotocol negotiation for OCPP 1.6J
     requested_proto = (ws.headers.get("sec-websocket-protocol") or "").strip()
     requested = [p.strip() for p in requested_proto.split(",") if p.strip()]
@@ -2215,25 +2530,21 @@ async def ocpp_ws(ws: WebSocket, id: str = Query(..., description="Charger ID"))
         await ws.close(code=1002)
         return
     await ws.accept(subprotocol="ocpp1.6")
-    # Register WebSocket connection
-    charger_websockets[id] = ws
-    logger.info(f"[{id}] WebSocket connected, subprotocol=ocpp1.6")
     
-    charger = None
+    # 注册WebSocket连接（用于传输管理器）
+    charge_point_id = id
+    charger_websockets[charge_point_id] = ws
+    
+    # 如果启用了WebSocket适配器，也注册到适配器
+    if MQTT_AVAILABLE and hasattr(transport_manager, 'adapters'):
+        ws_adapter = transport_manager.get_adapter(TransportType.WEBSOCKET)
+        if ws_adapter:
+            await ws_adapter.register_connection(charge_point_id, ws)
+    
+    logger.info(f"[{charge_point_id}] WebSocket connected, subprotocol=ocpp1.6")
+    
     try:
-        # Initialize charger record
-        charger = next((c for c in load_chargers() if c["id"] == id), None)
-        if charger is None:
-            charger = get_default_charger(id)
-            try:
-                save_charger(charger)
-                logger.info(f"[{id}] New charger registered")
-            except Exception as e:
-                logger.warning(f"[{id}] 无法保存充电桩到Redis（但继续连接）: {e}")
-        # initialize in-memory record
-        update_active(id)
-
-        await ws.send_text(json.dumps({"result": "Connected", "id": id}))
+        await ws.send_text(json.dumps({"result": "Connected", "id": charge_point_id}))
 
         while True:
             raw = await ws.receive_text()
@@ -2246,277 +2557,84 @@ async def ocpp_ws(ws: WebSocket, id: str = Query(..., description="Charger ID"))
             action = str(msg.get("action", "")).strip()
             payload = msg.get("payload", {})
             
-            logger.info(f"[{id}] <- OCPP {action} | payload={json.dumps(payload)}")
+            logger.info(f"[{charge_point_id}] <- OCPP {action} | payload={json.dumps(payload)}")
 
-            charger = next((c for c in load_chargers() if c["id"] == id), get_default_charger(id))
-            charger["last_seen"] = now_iso()
-
-            # Simplified handlers for demo
-            if action == "BootNotification":
+            # 使用新的服务层处理OCPP消息
+            try:
+                # 从payload中提取evse_id（如果有）
+                evse_id = payload.get("connectorId", 1)
+                if evse_id == 0:
+                    evse_id = 1  # OCPP中0表示整个充电桩
+                
+                # 尝试从payload中提取serial_number（用于BootNotification）
+                device_serial_number = None
+                if action == "BootNotification":
+                    device_serial_number = payload.get("serialNumber")
+                
+                # 调用统一的消息处理函数
+                response = await handle_ocpp_message(
+                    charge_point_id=charge_point_id,
+                    action=action,
+                    payload=payload,
+                    device_serial_number=device_serial_number,
+                    evse_id=evse_id
+                )
+                
+                # 发送响应
+                if response:
+                    # OCPP响应格式
+                    if action in ["BootNotification", "Heartbeat", "StatusNotification", "Authorize", 
+                                 "StartTransaction", "StopTransaction", "MeterValues"]:
+                        # 这些消息需要返回响应
+                        resp_msg = {
+                            "action": action,
+                            **response
+                        }
+                        logger.info(f"[{charge_point_id}] -> OCPP {action}Response | {json.dumps(response)}")
+                        await ws.send_text(json.dumps(resp_msg))
+                    else:
+                        # 其他消息返回简单确认
+                        await ws.send_text(json.dumps({"action": action, **response}))
+                else:
+                    # 无响应消息
+                    await ws.send_text(json.dumps({"action": action}))
+                    
+            except Exception as e:
+                logger.error(f"[{charge_point_id}] OCPP消息处理错误: {e}", exc_info=True)
+                # 发送错误响应
                 try:
-                    charger["physical_status"] = "Available"
-                    vendor = str(payload.get("vendor", "")).strip()
-                    model = str(payload.get("model", "")).strip()
-                    firmware_version = str(payload.get("firmwareVersion", "")).strip()
-                    serial_number = str(payload.get("serialNumber", "")).strip()
-                    charge_point_vendor = str(payload.get("chargePointVendor", "")).strip()
-                    charge_point_model = str(payload.get("chargePointModel", "")).strip()
-                    
-                    # 使用 chargePointVendor 和 chargePointModel 作为后备（OCPP 1.6 标准字段名）
-                    if not vendor and charge_point_vendor:
-                        vendor = charge_point_vendor
-                    if not model and charge_point_model:
-                        model = charge_point_model
-                    
-                    # 验证必要参数并记录警告
-                    missing_params = []
-                    if not vendor:
-                        missing_params.append("vendor/chargePointVendor")
-                    if not model:
-                        missing_params.append("model/chargePointModel")
-                    if not serial_number:
-                        missing_params.append("serialNumber")
-                    if not firmware_version:
-                        missing_params.append("firmwareVersion")
-                    
-                    if missing_params:
-                        logger.warning(
-                            f"[{id}] BootNotification 参数不足: 缺少 {', '.join(missing_params)}。"
-                            f"当前参数 - vendor: {vendor or '未提供'}, model: {model or '未提供'}, "
-                            f"serialNumber: {serial_number or '未提供'}, firmwareVersion: {firmware_version or '未提供'}"
-                        )
-                    
-                    # 更新充电桩信息
-                    charger["vendor"] = vendor if vendor else charger.get("vendor")
-                    charger["model"] = model if model else charger.get("model")
-                    charger["firmware_version"] = firmware_version if firmware_version else charger.get("firmware_version")
-                    charger["serial_number"] = serial_number if serial_number else charger.get("serial_number")
-                    
-                    update_active(id, vendor=vendor or None, model=model or None, status="Available")
-                    save_charger(charger)  # 这里可能失败，但不影响响应
-                    
-                    logger.info(
-                        f"[{id}] BootNotification: vendor={vendor or 'N/A'}, model={model or 'N/A'}, "
-                        f"firmware={firmware_version or 'N/A'}, serial={serial_number or 'N/A'}"
-                    )
-                except Exception as e:
-                    logger.error(f"[{id}] BootNotification处理错误（但继续响应）: {e}", exc_info=True)
-                
-                # 无论Redis是否成功，都返回正常的OCPP响应
-                resp = {
-                    "action": action,
-                    "status": "Accepted",
-                    "currentTime": now_iso(),
-                    "interval": 30,
-                }
-                logger.info(f"[{id}] -> OCPP BootNotificationResponse | status=Accepted")
-                await ws.send_text(json.dumps(resp))
-
-            elif action == "Heartbeat":
-                update_active(id)
-                save_charger(charger)
-                resp = {"action": action, "currentTime": now_iso()}
-                logger.info(f"[{id}] -> OCPP HeartbeatResponse | currentTime={now_iso()}")
-                await ws.send_text(json.dumps(resp))
-
-            elif action == "StatusNotification":
-                new_status = str(payload.get("status", "Unknown"))
-                charger["physical_status"] = new_status
-                # 修复：如果状态变为 Available，自动清理 transaction_id
-                if new_status == "Available":
-                    session = charger.setdefault("session", {
-                        "authorized": False,
-                        "transaction_id": None,
-                        "meter": 0,
-                    })
-                    if session.get("transaction_id") is not None:
-                        logger.info(f"[{id}] Auto-cleared transaction_id when status changed to Available")
-                        session["transaction_id"] = None
-                        session["order_id"] = None
-                update_active(id, status=new_status)
-                save_charger(charger)
-                logger.info(f"[{id}] -> OCPP StatusNotificationAccepted | status={new_status}")
-                await ws.send_text(json.dumps({"action": action}))
-
-            elif action == "Authorize":
-                id_tag = str(payload.get("idTag", ""))
-                charger["session"]["authorized"] = True if id_tag else False
-                save_charger(charger)
-                auth_status = "Accepted" if id_tag else "Invalid"
-                logger.info(f"[{id}] -> OCPP AuthorizeResponse | status={auth_status}")
-                await ws.send_text(
-                    json.dumps(
-                        {
-                            "action": action,
-                            "idTagInfo": {"status": auth_status},
-                        }
-                    )
-                )
-
-            elif action == "StartTransaction":
-                tx_id = payload.get("transactionId") or int(datetime.now().timestamp())
-                id_tag = str(payload.get("idTag", ""))
-                charger["session"]["transaction_id"] = tx_id
-                charger["physical_status"] = "Charging"
-                
-                # 创建充电订单
-                charging_rate = charger.get("charging_rate", 7.0)
-                order_id = f"order_{tx_id}"
-                start_time = now_iso()
-                create_order(
-                    order_id=order_id,
-                    charger_id=id,
-                    user_id=id_tag,  # 使用idTag作为user_id
-                    id_tag=id_tag,
-                    charging_rate=charging_rate,
-                    start_time=start_time,
-                )
-                charger["session"]["order_id"] = order_id
-                
-                update_active(id, status="Charging", txn_id=tx_id)
-                save_charger(charger)
-                logger.info(f"[{id}] -> OCPP StartTransactionResponse | txId={tx_id}, orderId={order_id}")
-                await ws.send_text(
-                    json.dumps(
-                        {
-                            "action": action,
-                            "transactionId": tx_id,
-                            "idTagInfo": {"status": "Accepted"},
-                        }
-                    )
-                )
-
-            elif action == "MeterValues":
-                # 处理 MeterValues 消息，提取电量数据（OCPP 标准格式）
-                meter_value = payload.get("meterValue", [])
-                meter_wh = charger["session"].get("meter", 0)  # 默认使用当前值
-                
-                if meter_value:
-                    # 取第一个 meterValue 中的 sampledValue
-                    sampled_values = meter_value[0].get("sampledValue", [])
-                    if sampled_values:
-                        # 查找 Energy.Active.Import.Register 类型的值
-                        energy_value = None
-                        for sv in sampled_values:
-                            if sv.get("measurand") == "Energy.Active.Import.Register":
-                                energy_value = sv.get("value")
-                                break
-                        
-                        # 如果找到了能量值，更新充电桩的meter值
-                        if energy_value is not None:
-                            try:
-                                meter_wh = int(float(energy_value))  # 转换为整数（Wh）
-                                charger["session"]["meter"] = meter_wh
-                                save_charger(charger)
-                                logger.info(f"[{id}] MeterValues: 更新电量 = {meter_wh} Wh ({meter_wh/1000.0:.2f} kWh)")
-                            except (ValueError, TypeError) as e:
-                                logger.warning(f"[{id}] MeterValues: 无法解析电量值 {energy_value}: {e}")
-                
-                await ws.send_text(json.dumps({"action": action}))
-
-            elif action == "StopTransaction":
-                tx_id = charger["session"].get("transaction_id")
-                order_id = charger["session"].get("order_id")
-                
-                # 更新订单：计算电量和时长
-                if order_id:
-                    order = get_order(order_id)
-                    if order and order.get("status") == "ongoing":
-                        start_time_str = order.get("start_time")
-                        end_time_str = now_iso()
-                        
-                        # 计算时长（分钟）
-                        start_time = datetime.fromisoformat(start_time_str.replace('Z', '+00:00'))
-                        end_time = datetime.fromisoformat(end_time_str.replace('Z', '+00:00'))
-                        duration_seconds = (end_time - start_time).total_seconds()
-                        duration_minutes = duration_seconds / 60.0
-                        
-                        # 计算电量（kWh）= 充电速率（kW）× 时长（小时）
-                        charging_rate = order.get("charging_rate", 7.0)
-                        energy_kwh = charging_rate * (duration_minutes / 60.0)
-                        
-                        update_order(
-                            order_id=order_id,
-                            end_time=end_time_str,
-                            duration_minutes=round(duration_minutes, 2),
-                            energy_kwh=round(energy_kwh, 2),
-                        )
-                
-                charger["session"]["transaction_id"] = None
-                charger["session"]["order_id"] = None
-                charger["physical_status"] = "Available"
-                update_active(id, status="Available", txn_id=None)
-                save_charger(charger)
-                logger.info(f"[{id}] -> OCPP StopTransactionResponse | txId={tx_id}, orderId={order_id}")
-                await ws.send_text(
-                    json.dumps(
-                        {
-                            "action": action,
-                            "stopped": True,
-                            "transactionId": tx_id,
-                            "idTagInfo": {"status": "Accepted"},
-                        }
-                    )
-                )
-
-            elif action == "FirmwareStatusNotification":
-                status = str(payload.get("status", "Unknown"))
-                logger.info(f"[{id}] FirmwareStatusNotification: {status}")
-                save_charger(charger)
-                await ws.send_text(json.dumps({"action": action}))
-
-            elif action == "DiagnosticsStatusNotification":
-                status = str(payload.get("status", "Unknown"))
-                logger.info(f"[{id}] DiagnosticsStatusNotification: {status}")
-                save_charger(charger)
-                await ws.send_text(json.dumps({"action": action}))
-
-            elif action == "DataTransfer":
-                vendor_id = str(payload.get("vendorId", ""))
-                message_id = str(payload.get("messageId", ""))
-                data = payload.get("data")
-                logger.info(f"[{id}] DataTransfer from {vendor_id}, messageId={message_id}")
-                save_charger(charger)
-                # 返回接受状态
-                await ws.send_text(json.dumps({
-                    "action": action,
-                    "status": "Accepted",
-                    "data": None
-                }))
-
-            else:
-                await ws.send_text(json.dumps({"error": "UnknownAction", "action": action}))
+                    await ws.send_text(json.dumps({
+                        "error": "InternalError",
+                        "action": action,
+                        "detail": str(e)[:200]
+                    }))
+                except Exception:
+                    pass  # 连接可能已关闭
 
     except WebSocketDisconnect:
-        # Mark last seen on disconnect
-        logger.info(f"[{id}] WebSocket disconnected")
-        if charger:
-            try:
-                charger["last_seen"] = now_iso()
-                save_charger(charger)
-            except Exception:
-                pass  # Redis错误不影响断开连接
-        update_active(id)
+        logger.info(f"[{charge_point_id}] WebSocket disconnected")
     except Exception as e:
-        logger.error(f"[{id}] WebSocket处理错误: {e}", exc_info=True)
+        logger.error(f"[{charge_point_id}] WebSocket处理错误: {e}", exc_info=True)
         # 尝试发送错误响应（如果连接还活着）
         try:
-            # 检查是否是Redis错误，如果是，发送更友好的错误信息
-            error_detail = str(e)
-            if "MISCONF" in error_detail or "Redis" in error_detail:
-                error_detail = "Redis配置错误，请联系管理员"
-            
             await ws.send_text(json.dumps({
                 "error": "InternalError", 
-                "detail": error_detail[:200]  # 限制错误信息长度
+                "detail": str(e)[:200]  # 限制错误信息长度
             }))
         except Exception:
             # 连接可能已关闭，忽略
             pass
     finally:
-        # Unregister WebSocket connection
-        charger_websockets.pop(id, None)
-        logger.info(f"[{id}] WebSocket unregistered")
+        # 注销WebSocket连接
+        charger_websockets.pop(charge_point_id, None)
+        
+        # 从适配器注销
+        if MQTT_AVAILABLE and hasattr(transport_manager, 'adapters'):
+            ws_adapter = transport_manager.get_adapter(TransportType.WEBSOCKET)
+            if ws_adapter:
+                await ws_adapter.unregister_connection(charge_point_id)
+        
+        logger.info(f"[{charge_point_id}] WebSocket unregistered")
         try:
             await ws.close()
         except Exception:

@@ -36,7 +36,7 @@ class HTTPAdapter(TransportAdapter):
     
     async def send_message(
         self,
-        charger_id: str,
+        charge_point_id: str,
         action: str,
         payload: Dict[str, Any],
         timeout: float = 5.0
@@ -44,19 +44,19 @@ class HTTPAdapter(TransportAdapter):
         """发送消息到充电桩（HTTP 模式下需要充电桩主动轮询）"""
         # HTTP 是请求-响应模式，CSMS 无法主动推送
         # 需要将消息存储，等待充电桩轮询获取
-        request_id = f"{charger_id}_{action}_{id(payload)}"
+        request_id = f"{charge_point_id}_{action}_{id(payload)}"
         
         # 存储待发送的消息
-        if charger_id not in self._pending_requests:
-            self._pending_requests[charger_id] = {}
+        if charge_point_id not in self._pending_requests:
+            self._pending_requests[charge_point_id] = {}
         
-        self._pending_requests[charger_id][request_id] = {
+        self._pending_requests[charge_point_id][request_id] = {
             "action": action,
             "payload": payload,
             "timestamp": None,
         }
         
-        logger.info(f"[{charger_id}] HTTP 消息已排队: {action}")
+        logger.info(f"[{charge_point_id}] HTTP 消息已排队: {action}")
         
         # 返回排队确认
         return {
@@ -65,18 +65,18 @@ class HTTPAdapter(TransportAdapter):
             "request_id": request_id
         }
     
-    def is_connected(self, charger_id: str) -> bool:
+    def is_connected(self, charge_point_id: str) -> bool:
         """检查充电桩是否已连接（HTTP 模式下基于最近请求时间）"""
-        if charger_id in self._charger_sessions:
+        if charge_point_id in self._charger_sessions:
             # 检查会话是否过期（例如 5 分钟内没有请求）
-            session = self._charger_sessions[charger_id]
+            session = self._charger_sessions[charge_point_id]
             # 这里可以添加时间检查逻辑
             return True
         return False
     
     async def handle_http_request(
         self,
-        charger_id: str,
+        charge_point_id: str,
         request: Request
     ) -> Dict[str, Any]:
         """处理 HTTP 请求
@@ -91,19 +91,19 @@ class HTTPAdapter(TransportAdapter):
                 action = body.get("action", "")
                 payload = body.get("payload", {})
                 
-                logger.info(f"[{charger_id}] <- HTTP OCPP {action}")
+                logger.info(f"[{charge_point_id}] <- HTTP OCPP {action}")
                 
                 # 更新会话
-                self._charger_sessions[charger_id] = {
+                self._charger_sessions[charge_point_id] = {
                     "last_seen": None,  # 可以添加时间戳
                     "transport": "http"
                 }
                 
                 # 处理消息
-                response = await self.handle_incoming_message(charger_id, action, payload)
+                response = await self.handle_incoming_message(charge_point_id, action, payload)
                 
                 # 检查是否有待发送的消息
-                pending = self._get_pending_message(charger_id)
+                pending = self._get_pending_message(charge_point_id)
                 
                 return {
                     "response": response,
@@ -111,21 +111,21 @@ class HTTPAdapter(TransportAdapter):
                 }
                 
             except Exception as e:
-                logger.error(f"[{charger_id}] HTTP 请求处理错误: {e}", exc_info=True)
+                logger.error(f"[{charge_point_id}] HTTP 请求处理错误: {e}", exc_info=True)
                 raise HTTPException(status_code=400, detail=str(e))
         
         elif request.method == "GET":
             # 充电桩轮询获取待处理消息
-            pending = self._get_pending_message(charger_id)
+            pending = self._get_pending_message(charge_point_id)
             return {"pending": pending}
         
         else:
             raise HTTPException(status_code=405, detail="Method not allowed")
     
-    def _get_pending_message(self, charger_id: str) -> Optional[Dict[str, Any]]:
+    def _get_pending_message(self, charge_point_id: str) -> Optional[Dict[str, Any]]:
         """获取待发送的消息"""
-        if charger_id in self._pending_requests:
-            requests = self._pending_requests[charger_id]
+        if charge_point_id in self._pending_requests:
+            requests = self._pending_requests[charge_point_id]
             if requests:
                 # 返回第一个待处理的消息
                 request_id, message = next(iter(requests.items()))

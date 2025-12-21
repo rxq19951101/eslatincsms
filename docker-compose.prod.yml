@@ -1,7 +1,6 @@
 #
 # 生产环境 Docker Compose 配置
-# 用于部署运营平台和后端服务到生产服务器
-# 使用 docker-compose version 3.9 格式
+# 使用: docker compose -f docker-compose.prod.yml up -d
 #
 
 version: "3.9"
@@ -11,124 +10,100 @@ services:
     image: postgres:15-alpine
     container_name: ocpp-db-prod
     environment:
-      - POSTGRES_USER=ocpp_user
-      - POSTGRES_PASSWORD=ocpp_prod_password_2024
-      - POSTGRES_DB=ocpp_prod
+      - POSTGRES_USER=${POSTGRES_USER:-ocpp_user}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB:-ocpp}
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./backups:/backups
     networks:
       - ocppnet
-    restart: always
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ocpp_user -d ocpp_prod"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ocpp_user} -d ${POSTGRES_DB:-ocpp}"]
       interval: 10s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '1'
+          memory: 1G
 
   redis:
     image: redis:7-alpine
     container_name: ocpp-redis-prod
-    command: redis-server --appendonly yes ${REDIS_PASSWORD:+--requirepass ${REDIS_PASSWORD}}
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-}
     volumes:
       - redis_data:/data
     networks:
       - ocppnet
-    restart: always
     healthcheck:
-      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
-      interval: 10s
-      timeout: 3s
-      retries: 5
-
-  mqtt-broker:
-    image: eclipse-mosquitto:latest
-    container_name: ocpp-mqtt-prod
-    ports:
-      - "${MQTT_BROKER_PORT:-1883}:1883"
-    volumes:
-      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
-      - mqtt_data:/mosquitto/data
-      - mqtt_logs:/mosquitto/log
-    networks:
-      - ocppnet
-    restart: always
-    healthcheck:
-      test: ["CMD-SHELL", "mosquitto_pub -h localhost -t test -m test || exit 1"]
+      test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 5s
-      retries: 3
-      start_period: 5s
+      retries: 5
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+        reservations:
+          cpus: '0.5'
+          memory: 256M
 
   csms:
-    build:
-      context: ./csms
-      dockerfile: Dockerfile
+    build: ./csms
     container_name: ocpp-csms-prod
     ports:
       - "${CSMS_PORT:-9000}:9000"
     environment:
-      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
-      - PORT=9000
-      - DATABASE_URL=postgresql://ocpp_user:ocpp_prod_password_2024@db:5432/ocpp_prod
-      - MQTT_BROKER_HOST=${MQTT_BROKER_HOST:-mqtt-broker}
+      - ENVIRONMENT=production
+      - DEBUG=false
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_URL=${REDIS_URL}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY}
+      - SECRET_KEY=${SECRET_KEY}
+      - ENCRYPTION_SALT=${ENCRYPTION_SALT}
+      - MQTT_BROKER_HOST=${MQTT_BROKER_HOST}
       - MQTT_BROKER_PORT=${MQTT_BROKER_PORT:-1883}
       - MQTT_USERNAME=${MQTT_USERNAME:-}
       - MQTT_PASSWORD=${MQTT_PASSWORD:-}
-      - MQTT_TOPIC_PREFIX=${MQTT_TOPIC_PREFIX:-ocpp}
-      - ENABLE_MQTT_TRANSPORT=${ENABLE_MQTT_TRANSPORT:-true}
-      - ENABLE_WEBSOCKET_TRANSPORT=${ENABLE_WEBSOCKET_TRANSPORT:-false}
-      - ENABLE_HTTP_TRANSPORT=${ENABLE_HTTP_TRANSPORT:-false}
-      - SECRET_KEY=${SECRET_KEY}
-      - ENVIRONMENT=${ENVIRONMENT:-production}
+      - CORS_ORIGINS=${CORS_ORIGINS}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - LOG_FORMAT=${LOG_FORMAT:-json}
-    volumes:
-      - ./logs:/var/log/csms
+      - DOCS_URL=${DOCS_URL:-None}
+      - REDOC_URL=${REDOC_URL:-None}
     depends_on:
       db:
         condition: service_healthy
       redis:
         condition: service_healthy
-      mqtt-broker:
-        condition: service_healthy
     networks:
       - ocppnet
-    restart: always
-    healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://localhost:9000/health || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-
-  admin:
-    build:
-      context: ./admin
-      dockerfile: Dockerfile.prod
-    container_name: ocpp-admin-prod
-    ports:
-      - "${ADMIN_PORT:-3000}:3000"
-    environment:
-      - NEXT_PUBLIC_CSMS_HTTP=${NEXT_PUBLIC_CSMS_HTTP:-}
-      - NEXT_PUBLIC_API=${NEXT_PUBLIC_API:-}
-      - NODE_ENV=production
-    depends_on:
-      csms:
-        condition: service_healthy
-    networks:
-      - ocppnet
-    restart: always
-    healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://localhost:3000 || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '1'
+          memory: 1G
 
 volumes:
   postgres_data:
+    driver: local
   redis_data:
-  mqtt_data:
-  mqtt_logs:
+    driver: local
 
 networks:
   ocppnet:

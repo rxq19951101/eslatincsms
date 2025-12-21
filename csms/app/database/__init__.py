@@ -5,9 +5,16 @@
 
 # 先导入models以定义Base
 from app.database.models import (
-    Base, Charger, Transaction, MeterValue, 
-    ChargerConfiguration, Order, SupportMessage, OCPPErrorLog,
-    HeartbeatHistory, StatusHistory
+    Base,
+    # 新表结构
+    Site, ChargePoint, EVSE, EVSEStatus,
+    DeviceType, Device,
+    ChargingSession, MeterValue,
+    Order, Invoice, Payment,
+    Tariff, PricingSnapshot,
+    DeviceEvent,
+    DeviceConfig, ChargePointConfig,
+    SupportMessage,
 )
 
 # 然后导入base（需要Base已定义）
@@ -22,13 +29,22 @@ __all__ = [
     "get_db",
     "init_db",
     "check_db_health",
-    "Charger",
-    "Transaction",
+    # 新表结构
+    "Site",
+    "ChargePoint",
+    "EVSE",
+    "EVSEStatus",
+    "DeviceType",
+    "Device",
+    "ChargingSession",
     "MeterValue",
-    "ChargerConfiguration",
     "Order",
+    "Invoice",
+    "Payment",
+    "Tariff",
+    "PricingSnapshot",
+    "DeviceEvent",
+    "DeviceConfig",
+    "ChargePointConfig",
     "SupportMessage",
-    "OCPPErrorLog",
-    "HeartbeatHistory",
-    "StatusHistory",
 ]

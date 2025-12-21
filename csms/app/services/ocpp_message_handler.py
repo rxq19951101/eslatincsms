@@ -1,0 +1,351 @@
+#
+# OCPP消息处理服务
+# 使用新的表结构处理OCPP消息
+#
+
+import logging
+from typing import Dict, Any, Optional
+from datetime import datetime, timezone
+from sqlalchemy.orm import Session
+from app.database.base import SessionLocal
+from app.database.models import DeviceEvent, Device
+from app.services.charge_point_service import ChargePointService
+from app.services.session_service import SessionService
+
+logger = logging.getLogger("ocpp_csms")
+
+
+def now_iso() -> str:
+    """获取当前ISO格式时间"""
+    return datetime.now(timezone.utc).isoformat()
+
+
+class OCPPMessageHandler:
+    """OCPP消息处理器（使用新表结构）"""
+    
+    def __init__(self):
+        self.charge_point_service = ChargePointService()
+        self.session_service = SessionService()
+    
+    async def handle_boot_notification(
+        self,
+        charge_point_id: str,
+        payload: Dict[str, Any],
+        device_serial_number: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """处理BootNotification消息"""
+        db = SessionLocal()
+        try:
+            vendor = str(payload.get("vendor", "")).strip() or str(payload.get("chargePointVendor", "")).strip()
+            model = str(payload.get("model", "")).strip() or str(payload.get("chargePointModel", "")).strip()
+            firmware_version = str(payload.get("firmwareVersion", "")).strip()
+            serial_number = str(payload.get("serialNumber", "")).strip() or device_serial_number
+            
+            # 获取或创建充电桩
+            charge_point = self.charge_point_service.get_or_create_charge_point(
+                db=db,
+                charge_point_id=charge_point_id,
+                device_serial_number=device_serial_number,
+                vendor=vendor or None,
+                model=model or None,
+                serial_number=serial_number or None,
+                firmware_version=firmware_version or None
+            )
+            
+            # 更新EVSE状态为Available
+            self.charge_point_service.update_evse_status(
+                db=db,
+                charge_point_id=charge_point_id,
+                evse_id=1,
+                status="Available"
+            )
+            
+            # 记录Boot事件
+            event = DeviceEvent(
+                charge_point_id=charge_point_id,
+                device_serial_number=device_serial_number,
+                event_type="boot",
+                event_data={
+                    "vendor": vendor,
+                    "model": model,
+                    "firmware_version": firmware_version,
+                    "serial_number": serial_number
+                },
+                timestamp=datetime.now(timezone.utc)
+            )
+            db.add(event)
+            db.commit()
+            
+            logger.info(
+                f"[{charge_point_id}] BootNotification: vendor={vendor or 'N/A'}, "
+                f"model={model or 'N/A'}, firmware={firmware_version or 'N/A'}"
+            )
+            
+            return {
+                "status": "Accepted",
+                "currentTime": now_iso(),
+                "interval": 30,
+            }
+        except Exception as e:
+            logger.error(f"[{charge_point_id}] BootNotification处理错误: {e}", exc_info=True)
+            db.rollback()
+            return {"status": "Rejected", "error": str(e)}
+        finally:
+            db.close()
+    
+    async def handle_heartbeat(
+        self,
+        charge_point_id: str,
+        payload: Dict[str, Any],
+        device_serial_number: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """处理Heartbeat消息"""
+        db = SessionLocal()
+        try:
+            # 记录心跳
+            self.charge_point_service.record_heartbeat(
+                db=db,
+                charge_point_id=charge_point_id,
+                device_serial_number=device_serial_number
+            )
+            
+            logger.info(f"[{charge_point_id}] Heartbeat处理完成")
+            return {"currentTime": now_iso()}
+        except Exception as e:
+            logger.error(f"[{charge_point_id}] Heartbeat处理错误: {e}", exc_info=True)
+            db.rollback()
+            return {"currentTime": now_iso()}
+        finally:
+            db.close()
+    
+    async def handle_status_notification(
+        self,
+        charge_point_id: str,
+        payload: Dict[str, Any],
+        evse_id: int = 1
+    ) -> Dict[str, Any]:
+        """处理StatusNotification消息"""
+        db = SessionLocal()
+        try:
+            from app.database.models import ChargingSession
+            
+            new_status = str(payload.get("status", "Unknown"))
+            
+            # 获取当前状态
+            evse_status = self.charge_point_service.get_evse_status(
+                db=db,
+                charge_point_id=charge_point_id,
+                evse_id=evse_id
+            )
+            
+            previous_status = evse_status.status if evse_status else None
+            
+            # 更新状态
+            self.charge_point_service.update_evse_status(
+                db=db,
+                charge_point_id=charge_point_id,
+                evse_id=evse_id,
+                status=new_status,
+                previous_status=previous_status
+            )
+            
+            # 如果状态变为Available，清理当前会话
+            if new_status == "Available" and evse_status and evse_status.current_session_id:
+                # 停止会话（如果存在）
+                session = db.query(ChargingSession).filter(
+                    ChargingSession.id == evse_status.current_session_id
+                ).first()
+                if session and session.status == "ongoing":
+                    self.session_service.stop_session(
+                        db=db,
+                        charge_point_id=charge_point_id,
+                        transaction_id=session.transaction_id
+                    )
+            
+            logger.info(f"[{charge_point_id}] StatusNotification: {previous_status} -> {new_status}")
+            return {}
+        except Exception as e:
+            logger.error(f"[{charge_point_id}] StatusNotification处理错误: {e}", exc_info=True)
+            db.rollback()
+            return {}
+        finally:
+            db.close()
+    
+    async def handle_start_transaction(
+        self,
+        charge_point_id: str,
+        payload: Dict[str, Any],
+        evse_id: int = 1
+    ) -> Dict[str, Any]:
+        """处理StartTransaction消息"""
+        db = SessionLocal()
+        try:
+            from app.database.models import ChargingSession
+            
+            transaction_id = payload.get("transactionId") or int(datetime.now().timestamp())
+            id_tag = str(payload.get("idTag", ""))
+            meter_start = payload.get("meterStart", 0)
+            
+            # 开始会话
+            session = self.session_service.start_session(
+                db=db,
+                charge_point_id=charge_point_id,
+                evse_id=evse_id,
+                transaction_id=transaction_id,
+                id_tag=id_tag,
+                meter_start=meter_start
+            )
+            
+            logger.info(f"[{charge_point_id}] StartTransaction: transaction_id={transaction_id}, session_id={session.id}")
+            
+            return {
+                "transactionId": transaction_id,
+                "idTagInfo": {"status": "Accepted"}
+            }
+        except Exception as e:
+            logger.error(f"[{charge_point_id}] StartTransaction处理错误: {e}", exc_info=True)
+            db.rollback()
+            return {"transactionId": transaction_id, "idTagInfo": {"status": "Rejected"}}
+        finally:
+            db.close()
+    
+    async def handle_stop_transaction(
+        self,
+        charge_point_id: str,
+        payload: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """处理StopTransaction消息"""
+        db = SessionLocal()
+        try:
+            from app.database.models import ChargingSession
+            
+            transaction_id = payload.get("transactionId")
+            meter_stop = payload.get("meterStop")
+            
+            # 停止会话
+            session = self.session_service.stop_session(
+                db=db,
+                charge_point_id=charge_point_id,
+                transaction_id=transaction_id,
+                meter_stop=meter_stop
+            )
+            
+            if session:
+                logger.info(f"[{charge_point_id}] StopTransaction: transaction_id={transaction_id}, session_id={session.id}")
+                return {
+                    "idTagInfo": {"status": "Accepted"}
+                }
+            else:
+                logger.warning(f"[{charge_point_id}] StopTransaction: 未找到会话 transaction_id={transaction_id}")
+                return {
+                    "idTagInfo": {"status": "Accepted"}  # 即使没找到也返回Accepted
+                }
+        except Exception as e:
+            logger.error(f"[{charge_point_id}] StopTransaction处理错误: {e}", exc_info=True)
+            db.rollback()
+            return {"idTagInfo": {"status": "Accepted"}}
+        finally:
+            db.close()
+    
+    async def handle_meter_values(
+        self,
+        charge_point_id: str,
+        payload: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """处理MeterValues消息"""
+        db = SessionLocal()
+        try:
+            from app.database.models import ChargingSession
+            
+            transaction_id = payload.get("transactionId")
+            meter_value = payload.get("meterValue", [])
+            
+            if transaction_id:
+                # 查找会话
+                session = db.query(ChargingSession).filter(
+                    ChargingSession.charge_point_id == charge_point_id,
+                    ChargingSession.transaction_id == transaction_id,
+                    ChargingSession.status == "ongoing"
+                ).first()
+                
+                if session:
+                    # 处理meter values
+                    # OCPP格式：meterValue是一个数组，每个元素包含connectorId和sampledValue
+                    for mv in meter_value:
+                        connector_id = mv.get("connectorId")
+                        sampled_values = mv.get("sampledValue", [])
+                        
+                        # 从sampledValue中提取主要值（通常是Energy.Active.Import.Register）
+                        value = 0
+                        for sv in sampled_values:
+                            if sv.get("measurand") == "Energy.Active.Import.Register":
+                                try:
+                                    value = int(float(sv.get("value", 0)))
+                                    break
+                                except (ValueError, TypeError):
+                                    pass
+                        
+                        # 如果没有找到Energy值，尝试使用value字段
+                        if value == 0:
+                            value = mv.get("value", 0)
+                        
+                        self.session_service.add_meter_value(
+                            db=db,
+                            session_id=session.id,
+                            value=value,
+                            connector_id=connector_id,
+                            sampled_value=sampled_values if sampled_values else None
+                        )
+            
+            return {}
+        except Exception as e:
+            logger.error(f"[{charge_point_id}] MeterValues处理错误: {e}", exc_info=True)
+            db.rollback()
+            return {}
+        finally:
+            db.close()
+    
+    async def handle_authorize(
+        self,
+        charge_point_id: str,
+        payload: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """处理Authorize消息"""
+        id_tag = str(payload.get("idTag", ""))
+        auth_status = "Accepted" if id_tag else "Invalid"
+        return {"idTagInfo": {"status": auth_status}}
+    
+    async def handle_message(
+        self,
+        charge_point_id: str,
+        action: str,
+        payload: Dict[str, Any],
+        device_serial_number: Optional[str] = None,
+        evse_id: int = 1
+    ) -> Dict[str, Any]:
+        """处理OCPP消息路由"""
+        handler_map = {
+            "BootNotification": self.handle_boot_notification,
+            "Heartbeat": self.handle_heartbeat,
+            "StatusNotification": self.handle_status_notification,
+            "Authorize": self.handle_authorize,
+            "StartTransaction": self.handle_start_transaction,
+            "StopTransaction": self.handle_stop_transaction,
+            "MeterValues": self.handle_meter_values,
+        }
+        
+        handler = handler_map.get(action)
+        if handler:
+            if action in ["BootNotification", "Heartbeat"]:
+                return await handler(charge_point_id, payload, device_serial_number)
+            elif action == "StatusNotification":
+                return await handler(charge_point_id, payload, evse_id)
+            else:
+                return await handler(charge_point_id, payload)
+        else:
+            logger.warning(f"[{charge_point_id}] 未知的OCPP动作: {action}")
+            return {}
+
+
+# 全局消息处理器实例
+ocpp_message_handler = OCPPMessageHandler()

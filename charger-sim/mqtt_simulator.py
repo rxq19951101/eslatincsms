@@ -52,7 +52,8 @@ class MQTTOCPPSimulator:
     
     def __init__(self, charger_id: str, broker_host: str = "localhost", 
                  broker_port: int = 1883, topic_prefix: str = "ocpp",
-                 username: Optional[str] = None, password: Optional[str] = None):
+                 username: Optional[str] = None, password: Optional[str] = None,
+                 charging_power_kw: float = 7.0):
         self.charger_id = charger_id
         self.broker_host = broker_host
         self.broker_port = broker_port
@@ -74,8 +75,13 @@ class MQTTOCPPSimulator:
         self.status = ChargerStatus.UNAVAILABLE
         self.transaction_id: Optional[int] = None
         self.current_id_tag: Optional[str] = None
-        self.meter_value = 0
+        self.meter_value = 0  # 电表值（Wh）
         self.message_id_counter = 1
+        
+        # 充电功率（kW），默认 7kW
+        self.charging_power_kw = charging_power_kw
+        # 电表上报间隔（秒），默认 10 秒
+        self.meter_report_interval = 10
         
         # MQTT 客户端
         self.client = mqtt.Client(client_id=f"charger_{charger_id}", protocol=mqtt.MQTTv311)
@@ -323,9 +329,16 @@ class MQTTOCPPSimulator:
     async def _meter_values_loop(self):
         """充电时定期发送计量值"""
         while self.status == ChargerStatus.CHARGING:
-            await asyncio.sleep(10)  # 每10秒发送一次
+            await asyncio.sleep(self.meter_report_interval)
             if self.status == ChargerStatus.CHARGING:
-                self.meter_value += random.randint(100, 500)  # 增加电量（Wh）
+                # 根据充电功率和时间间隔计算电量增量
+                # 公式：电量（Wh）= 功率（kW）× 时间（小时）× 1000
+                # 例如：7kW × (10秒 / 3600秒) × 1000 = 19.44 Wh
+                energy_increment_wh = self.charging_power_kw * (self.meter_report_interval / 3600.0) * 1000
+                # 添加小的随机波动（±2%）模拟实际充电
+                variation = random.uniform(0.98, 1.02)
+                self.meter_value += int(energy_increment_wh * variation)
+                
                 self._send_message("MeterValues", {
                     "connectorId": 1,
                     "transactionId": self.transaction_id,
@@ -461,6 +474,12 @@ def main():
         default=None,
         help="MQTT 密码（可选）"
     )
+    parser.add_argument(
+        "--power",
+        type=float,
+        default=7.0,
+        help="充电功率（kW），默认 7.0 kW"
+    )
     
     args = parser.parse_args()
     
@@ -475,7 +494,8 @@ def main():
         broker_port=args.port,
         topic_prefix=args.topic_prefix,
         username=args.username,
-        password=args.password
+        password=args.password,
+        charging_power_kw=args.power
     )
     
     try:

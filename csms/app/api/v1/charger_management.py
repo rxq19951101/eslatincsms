@@ -9,9 +9,11 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from datetime import datetime, timezone
 
-from app.database import get_db, Charger
+from app.database import get_db, ChargePoint, Site, Tariff, EVSE, EVSEStatus
+from app.services.charge_point_service import ChargePointService
 from app.core.logging_config import get_logger
 from app.core.config import get_settings
+from app.core.id_generator import generate_site_id
 
 settings = get_settings()
 logger = get_logger("ocpp_csms")
@@ -156,17 +158,24 @@ def get_pending_chargers(db: Session = Depends(get_db)) -> List[ChargerStatus]:
         redis_charger = get_charger_from_redis(charger_id)
         
         # 从数据库获取配置信息
-        db_charger = db.query(Charger).filter(Charger.id == charger_id).first()
+        charge_point = db.query(ChargePoint).filter(ChargePoint.id == charger_id).first()
         
         # 判断是否需要配置
         is_configured = False
         has_location = False
         has_pricing = False
         
-        if db_charger:
+        if charge_point:
             is_configured = True
-            has_location = db_charger.latitude is not None and db_charger.longitude is not None
-            has_pricing = db_charger.price_per_kwh is not None and db_charger.price_per_kwh > 0
+            # 检查站点位置
+            site = charge_point.site if charge_point.site_id else None
+            has_location = site and site.latitude is not None and site.longitude is not None
+            # 检查定价
+            tariff = db.query(Tariff).filter(
+                Tariff.site_id == charge_point.site_id,
+                Tariff.is_active == True
+            ).first() if charge_point.site_id else None
+            has_pricing = tariff and tariff.base_price_per_kwh > 0
         elif redis_charger:
             # 检查Redis中的数据是否完整
             location = redis_charger.get("location", {})
@@ -206,55 +215,102 @@ def create_charger(req: CreateChargerRequest, db: Session = Depends(get_db)) -> 
     )
     
     # 检查充电桩是否已存在
-    charger = db.query(Charger).filter(Charger.id == req.charger_id).first()
+    charge_point = db.query(ChargePoint).filter(ChargePoint.id == req.charger_id).first()
     
-    if charger:
+    if charge_point:
         logger.info(f"[API] 充电桩 {req.charger_id} 已存在，执行更新操作")
-    
-    if charger:
         # 更新现有充电桩
         if req.vendor:
-            charger.vendor = req.vendor
+            charge_point.vendor = req.vendor
         if req.model:
-            charger.model = req.model
+            charge_point.model = req.model
         if req.serial_number:
-            charger.serial_number = req.serial_number
+            charge_point.serial_number = req.serial_number
         if req.firmware_version:
-            charger.firmware_version = req.firmware_version
-        if req.connector_type:
-            charger.connector_type = req.connector_type
-        if req.charging_rate:
-            charger.charging_rate = req.charging_rate
-        if req.latitude is not None:
-            charger.latitude = req.latitude
-        if req.longitude is not None:
-            charger.longitude = req.longitude
-        if req.address:
-            charger.address = req.address
-        if req.price_per_kwh:
-            charger.price_per_kwh = req.price_per_kwh
+            charge_point.firmware_version = req.firmware_version
         
-        charger.updated_at = datetime.now(timezone.utc)
-        charger.is_active = True
+        # 更新站点位置
+        if req.latitude is not None and req.longitude is not None:
+            site = charge_point.site if charge_point.site_id else None
+            if not site:
+                # 创建新站点
+                site = Site(
+                    id=generate_site_id(f"站点-{req.charger_id}"),
+                    name=f"站点-{req.charger_id}",
+                    address=req.address or "",
+                    latitude=req.latitude,
+                    longitude=req.longitude
+                )
+                db.add(site)
+                db.flush()
+                charge_point.site_id = site.id
+            else:
+                site.latitude = req.latitude
+                site.longitude = req.longitude
+                if req.address:
+                    site.address = req.address
+        
+        # 更新定价
+        if req.price_per_kwh:
+            site_id = charge_point.site_id
+            if site_id:
+                tariff = db.query(Tariff).filter(
+                    Tariff.site_id == site_id,
+                    Tariff.is_active == True
+                ).first()
+                if not tariff:
+                    tariff = Tariff(
+                        site_id=site_id,
+                        name="默认定价",
+                        base_price_per_kwh=req.price_per_kwh,
+                        service_fee=0,
+                        valid_from=datetime.now(timezone.utc),
+                        is_active=True
+                    )
+                    db.add(tariff)
+                else:
+                    tariff.base_price_per_kwh = req.price_per_kwh
     else:
         # 创建新充电桩
         logger.info(f"[API] 创建新充电桩: {req.charger_id}")
-        charger = Charger(
+        
+        # 创建或获取站点
+        site = None
+        if req.latitude is not None and req.longitude is not None:
+            site = Site(
+                id=generate_site_id(f"站点-{req.charger_id}"),
+                name=f"站点-{req.charger_id}",
+                address=req.address or "",
+                latitude=req.latitude,
+                longitude=req.longitude
+            )
+            db.add(site)
+            db.flush()
+        
+        # 创建充电桩
+        charge_point = ChargePoint(
             id=req.charger_id,
+            site_id=site.id if site else None,
             vendor=req.vendor,
             model=req.model,
             serial_number=req.serial_number,
             firmware_version=req.firmware_version,
-            connector_type=req.connector_type,
-            charging_rate=req.charging_rate,
-            latitude=req.latitude,
-            longitude=req.longitude,
-            address=req.address or "",
-            price_per_kwh=req.price_per_kwh,
-            status="Unknown",
-            is_active=True
+            device_serial_number=req.serial_number
         )
-        db.add(charger)
+        db.add(charge_point)
+        db.flush()
+        
+        # 创建定价规则
+        if req.price_per_kwh and site:
+            tariff = Tariff(
+                site_id=site.id,
+                name="默认定价",
+                base_price_per_kwh=req.price_per_kwh,
+                service_fee=0,
+                valid_from=datetime.now(timezone.utc),
+                is_active=True
+            )
+            db.add(tariff)
     
     try:
         db.commit()
@@ -295,21 +351,33 @@ def create_charger(req: CreateChargerRequest, db: Session = Depends(get_db)) -> 
             f"价格: {req.price_per_kwh} COP/kWh"
         )
         
+        # 获取站点和定价信息
+        site = charge_point.site if charge_point.site_id else None
+        tariff = db.query(Tariff).filter(
+            Tariff.site_id == charge_point.site_id,
+            Tariff.is_active == True
+        ).first() if charge_point.site_id else None
+        
+        # 获取状态
+        evse_status = db.query(EVSEStatus).filter(
+            EVSEStatus.charge_point_id == charge_point.id
+        ).first()
+        status = evse_status.status if evse_status else "Unknown"
+        
         return {
             "success": True,
             "message": "充电桩已创建/更新",
             "charger": {
-                "id": charger.id,
-                "vendor": charger.vendor,
-                "model": charger.model,
-                "status": charger.status,
+                "id": charge_point.id,
+                "vendor": charge_point.vendor,
+                "model": charge_point.model,
+                "status": status,
                 "location": {
-                    "latitude": charger.latitude,
-                    "longitude": charger.longitude,
-                    "address": charger.address
+                    "latitude": site.latitude if site else None,
+                    "longitude": site.longitude if site else None,
+                    "address": site.address if site else None
                 },
-                "price_per_kwh": charger.price_per_kwh,
-                "charging_rate": charger.charging_rate
+                "price_per_kwh": tariff.base_price_per_kwh if tariff else None
             }
         }
     except Exception as e:
@@ -328,17 +396,30 @@ def update_charger_location(req: UpdateChargerLocationRequest, db: Session = Dep
         f"地址: {req.address or '无'}"
     )
     
-    charger = db.query(Charger).filter(Charger.id == req.charger_id).first()
+    charge_point = db.query(ChargePoint).filter(ChargePoint.id == req.charger_id).first()
     
-    if not charger:
+    if not charge_point:
         logger.warning(f"[API] POST /api/v1/charger-management/location | 充电桩 {req.charger_id} 未找到")
         raise HTTPException(status_code=404, detail=f"充电桩 {req.charger_id} 未找到，请先创建充电桩")
     
-    # 更新位置信息
-    charger.latitude = req.latitude
-    charger.longitude = req.longitude
-    charger.address = req.address
-    charger.updated_at = datetime.now(timezone.utc)
+    # 更新或创建站点位置信息
+    site = charge_point.site if charge_point.site_id else None
+    if not site:
+        # 创建新站点
+            site = Site(
+                id=generate_site_id(f"站点-{req.charger_id}"),
+                name=f"站点-{req.charger_id}",
+            address=req.address or "",
+            latitude=req.latitude,
+            longitude=req.longitude
+        )
+        db.add(site)
+        db.flush()
+        charge_point.site_id = site.id
+    else:
+        site.latitude = req.latitude
+        site.longitude = req.longitude
+        site.address = req.address
     
     try:
         db.commit()
@@ -394,17 +475,34 @@ def update_charger_pricing(req: UpdateChargerPricingRequest, db: Session = Depen
         f"充电速率: {req.charging_rate or '未设置'} kW"
     )
     
-    charger = db.query(Charger).filter(Charger.id == req.charger_id).first()
+    charge_point = db.query(ChargePoint).filter(ChargePoint.id == req.charger_id).first()
     
-    if not charger:
+    if not charge_point:
         logger.warning(f"[API] POST /api/v1/charger-management/pricing | 充电桩 {req.charger_id} 未找到")
         raise HTTPException(status_code=404, detail=f"充电桩 {req.charger_id} 未找到，请先创建充电桩")
     
-    # 更新价格
-    charger.price_per_kwh = req.price_per_kwh
-    if req.charging_rate:
-        charger.charging_rate = req.charging_rate
-    charger.updated_at = datetime.now(timezone.utc)
+    # 确保有站点
+    if not charge_point.site_id:
+        raise HTTPException(status_code=400, detail="充电桩未配置站点，请先设置位置")
+    
+    # 更新或创建定价规则
+    tariff = db.query(Tariff).filter(
+        Tariff.site_id == charge_point.site_id,
+        Tariff.is_active == True
+    ).first()
+    
+    if not tariff:
+        tariff = Tariff(
+            site_id=charge_point.site_id,
+            name="默认定价",
+            base_price_per_kwh=req.price_per_kwh,
+            service_fee=0,
+            valid_from=datetime.now(timezone.utc),
+            is_active=True
+        )
+        db.add(tariff)
+    else:
+        tariff.base_price_per_kwh = req.price_per_kwh
     
     try:
         db.commit()
@@ -438,8 +536,7 @@ def update_charger_pricing(req: UpdateChargerPricingRequest, db: Session = Depen
             "success": True,
             "message": "价格已更新",
             "pricing": {
-                "price_per_kwh": req.price_per_kwh,
-                "charging_rate": charger.charging_rate
+                "price_per_kwh": req.price_per_kwh
             }
         }
     except Exception as e:
@@ -460,16 +557,22 @@ def get_charger_status(charger_id: str, db: Session = Depends(get_db)) -> dict:
     redis_charger = get_charger_from_redis(charger_id)
     
     # 从数据库获取配置信息
-    db_charger = db.query(Charger).filter(Charger.id == charger_id).first()
+    charge_point = db.query(ChargePoint).filter(ChargePoint.id == charger_id).first()
     
     # 判断配置完整性
-    is_configured = db_charger is not None
+    is_configured = charge_point is not None
     has_location = False
     has_pricing = False
     
-    if db_charger:
-        has_location = db_charger.latitude is not None and db_charger.longitude is not None
-        has_pricing = db_charger.price_per_kwh is not None and db_charger.price_per_kwh > 0
+    if charge_point:
+        site = charge_point.site if charge_point.site_id else None
+        has_location = site and site.latitude is not None and site.longitude is not None
+        
+        tariff = db.query(Tariff).filter(
+            Tariff.site_id == charge_point.site_id,
+            Tariff.is_active == True
+        ).first() if charge_point.site_id else None
+        has_pricing = tariff and tariff.base_price_per_kwh > 0
     elif redis_charger:
         location = redis_charger.get("location", {})
         has_location = location.get("latitude") is not None and location.get("longitude") is not None
@@ -489,16 +592,21 @@ def get_charger_status(charger_id: str, db: Session = Depends(get_db)) -> dict:
             "model": redis_charger.get("model") if redis_charger else None,
         },
         "database_info": {
-            "exists": db_charger is not None,
+            "exists": charge_point is not None,
             "location": {
-                "latitude": db_charger.latitude if db_charger else None,
-                "longitude": db_charger.longitude if db_charger else None,
-                "address": db_charger.address if db_charger else None,
-            } if db_charger else None,
-            "pricing": {
-                "price_per_kwh": db_charger.price_per_kwh if db_charger else None,
-                "charging_rate": db_charger.charging_rate if db_charger else None,
-            } if db_charger else None,
+                "latitude": charge_point.site.latitude if charge_point and charge_point.site else None,
+                "longitude": charge_point.site.longitude if charge_point and charge_point.site else None,
+                "address": charge_point.site.address if charge_point and charge_point.site else None,
+            } if charge_point and charge_point.site else None,
+            "pricing": (
+                (lambda: (
+                    (lambda t: {"price_per_kwh": t.base_price_per_kwh} if t else None)(
+                        db.query(Tariff).filter(
+                            Tariff.site_id == charge_point.site_id,
+                            Tariff.is_active == True
+                        ).first()
+                    ) if charge_point and charge_point.site_id else None
+                ))(),
         }
     }
     

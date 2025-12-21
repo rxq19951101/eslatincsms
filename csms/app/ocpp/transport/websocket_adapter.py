@@ -37,28 +37,28 @@ class WebSocketAdapter(TransportAdapter):
         self._connections.clear()
         logger.info("WebSocket 传输适配器已停止")
     
-    async def register_connection(self, charger_id: str, websocket: WebSocket) -> None:
+    async def register_connection(self, charge_point_id: str, websocket: WebSocket) -> None:
         """注册 WebSocket 连接"""
-        self._connections[charger_id] = websocket
-        logger.info(f"[{charger_id}] WebSocket 连接已注册")
+        self._connections[charge_point_id] = websocket
+        logger.info(f"[{charge_point_id}] WebSocket 连接已注册")
     
-    async def unregister_connection(self, charger_id: str) -> None:
+    async def unregister_connection(self, charge_point_id: str) -> None:
         """注销 WebSocket 连接"""
-        if charger_id in self._connections:
-            del self._connections[charger_id]
-            logger.info(f"[{charger_id}] WebSocket 连接已注销")
+        if charge_point_id in self._connections:
+            del self._connections[charge_point_id]
+            logger.info(f"[{charge_point_id}] WebSocket 连接已注销")
     
     async def send_message(
         self,
-        charger_id: str,
+        charge_point_id: str,
         action: str,
         payload: Dict[str, Any],
         timeout: float = 5.0
     ) -> Dict[str, Any]:
         """发送消息到充电桩"""
-        ws = self._connections.get(charger_id)
+        ws = self._connections.get(charge_point_id)
         if not ws:
-            raise ConnectionError(f"Charger {charger_id} is not connected via WebSocket")
+            raise ConnectionError(f"Charger {charge_point_id} is not connected via WebSocket")
         
         try:
             message = {
@@ -66,7 +66,7 @@ class WebSocketAdapter(TransportAdapter):
                 "payload": payload
             }
             await ws.send_text(json.dumps(message))
-            logger.info(f"[{charger_id}] -> WebSocket OCPP {action}")
+            logger.info(f"[{charge_point_id}] -> WebSocket OCPP {action}")
             
             # 等待响应（简化版本，实际应该使用消息ID匹配）
             import asyncio
@@ -75,14 +75,14 @@ class WebSocketAdapter(TransportAdapter):
                 response = json.loads(response_text)
                 return {"success": True, "data": response}
             except asyncio.TimeoutError:
-                logger.warning(f"[{charger_id}] WebSocket 响应超时: {action}")
+                logger.warning(f"[{charge_point_id}] WebSocket 响应超时: {action}")
                 return {"success": False, "error": "Timeout waiting for response"}
                 
         except Exception as e:
-            logger.error(f"[{charger_id}] WebSocket 发送错误: {e}", exc_info=True)
+            logger.error(f"[{charge_point_id}] WebSocket 发送错误: {e}", exc_info=True)
             raise
     
-    def is_connected(self, charger_id: str) -> bool:
+    def is_connected(self, charge_point_id: str) -> bool:
         """检查充电桩是否已连接"""
-        return charger_id in self._connections
+        return charge_point_id in self._connections
 

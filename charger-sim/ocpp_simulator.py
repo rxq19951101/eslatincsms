@@ -302,15 +302,30 @@ class OCPPSimulator:
         return False
     
     async def send_meter_values(self, transaction_id: Optional[int] = None, 
-                                meter_value: Optional[int] = None) -> bool:
-        """发送计量值"""
+                                meter_value: Optional[int] = None,
+                                time_elapsed_seconds: float = 60.0) -> bool:
+        """
+        发送计量值
+        
+        Args:
+            transaction_id: 事务ID
+            meter_value: 直接指定的电表值（如果提供，则使用此值）
+            time_elapsed_seconds: 自上次上报以来经过的时间（秒），默认60秒
+        """
         if transaction_id is None:
             transaction_id = self.transaction_id
         
         if meter_value is not None:
             self.meter_value = meter_value
         else:
-            self.meter_value += 10  # 默认增加10 Wh
+            # 根据充电功率和时间间隔计算电量增量
+            # 公式：电量（Wh）= 功率（kW）× 时间（小时）× 1000
+            # 例如：7kW × (60秒 / 3600秒) × 1000 = 116.67 Wh
+            charging_power_kw = self.device_info.get("charging_rate", 7.0)
+            energy_increment_wh = charging_power_kw * (time_elapsed_seconds / 3600.0) * 1000
+            # 添加小的随机波动（±2%）模拟实际充电
+            variation = random.uniform(0.98, 1.02)
+            self.meter_value += int(energy_increment_wh * variation)
         
         payload = {
             "connectorId": self.connector_id,

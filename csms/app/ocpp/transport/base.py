@@ -41,7 +41,7 @@ class TransportAdapter(ABC):
     @abstractmethod
     async def send_message(
         self,
-        charger_id: str,
+        charge_point_id: str,
         action: str,
         payload: Dict[str, Any],
         timeout: float = 5.0
@@ -49,7 +49,7 @@ class TransportAdapter(ABC):
         """发送消息到充电桩
         
         Args:
-            charger_id: 充电桩ID
+            charge_point_id: 充电桩ID
             action: OCPP动作名称
             payload: 消息载荷
             timeout: 超时时间（秒）
@@ -60,35 +60,38 @@ class TransportAdapter(ABC):
         pass
     
     @abstractmethod
-    def is_connected(self, charger_id: str) -> bool:
+    def is_connected(self, charge_point_id: str) -> bool:
         """检查充电桩是否已连接"""
         pass
     
     def set_message_handler(
         self,
-        handler: Callable[[str, str, Dict[str, Any]], Awaitable[Dict[str, Any]]]
+        handler: Callable[..., Awaitable[Dict[str, Any]]]
     ) -> None:
         """设置消息处理器
         
         Args:
-            handler: 消息处理函数，接收 (charger_id, action, payload) 返回响应
+            handler: 消息处理函数，接收 (charge_point_id, action, payload, device_serial_number, evse_id) 返回响应
         """
         self.message_handler = handler
     
     async def handle_incoming_message(
         self,
-        charger_id: str,
+        charge_point_id: str,
         action: str,
-        payload: Dict[str, Any]
+        payload: Dict[str, Any],
+        device_serial_number: Optional[str] = None,
+        evse_id: int = 1
     ) -> Dict[str, Any]:
         """处理接收到的消息"""
         if not self.message_handler:
-            logger.warning(f"[{charger_id}] 未设置消息处理器")
+            logger.warning(f"[{charge_point_id}] 未设置消息处理器")
             return {"error": "Message handler not set"}
         
         try:
-            return await self.message_handler(charger_id, action, payload)
+            # 调用消息处理器，传递所有参数
+            return await self.message_handler(charge_point_id, action, payload, device_serial_number, evse_id)
         except Exception as e:
-            logger.error(f"[{charger_id}] 消息处理错误: {e}", exc_info=True)
+            logger.error(f"[{charge_point_id}] 消息处理错误: {e}", exc_info=True)
             return {"error": str(e)}
 

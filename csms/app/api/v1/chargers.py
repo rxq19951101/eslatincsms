@@ -1,13 +1,13 @@
 #
 # 充电桩管理API
-# 提供充电桩的CRUD操作
+# 提供充电桩的CRUD操作（使用新表结构）
 #
 
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
-from sqlalchemy import or_
-from app.database import get_db, Charger
+from sqlalchemy import or_, func
+from app.database import get_db, ChargePoint, Site, EVSE, EVSEStatus, Tariff
 from app.core.logging_config import get_logger
 
 logger = get_logger("ocpp_csms")
@@ -21,7 +21,7 @@ def list_chargers(
     db: Session = Depends(get_db)
 ) -> List[dict]:
     """
-    获取充电桩列表
+    获取充电桩列表（使用新表结构）
     
     支持筛选：
     - configured: 只返回已配置的充电桩（有位置和价格）
@@ -29,52 +29,65 @@ def list_chargers(
     """
     logger.info(f"[API] GET /api/v1/chargers | 筛选类型: {filter_type or '全部'}")
     
-    query = db.query(Charger).filter(Charger.is_active == True)
+    query = db.query(ChargePoint)
     
     # 根据筛选类型过滤
     if filter_type == "configured":
-        # 已配置：有位置和价格
-        query = query.filter(
-            Charger.latitude.isnot(None),
-            Charger.longitude.isnot(None),
-            Charger.price_per_kwh.isnot(None),
-            Charger.price_per_kwh > 0
+        # 已配置：有位置和价格（通过站点和定价规则判断）
+        query = query.join(Site).join(Tariff).filter(
+            Site.latitude.isnot(None),
+            Site.longitude.isnot(None),
+            Tariff.is_active == True,
+            Tariff.base_price_per_kwh > 0
         )
     elif filter_type == "unconfigured":
         # 未配置：缺少位置或价格
-        query = query.filter(
+        query = query.outerjoin(Site).outerjoin(Tariff).filter(
             or_(
-                Charger.latitude.is_(None),
-                Charger.longitude.is_(None),
-                Charger.price_per_kwh.is_(None),
-                Charger.price_per_kwh == 0
+                Site.latitude.is_(None),
+                Site.longitude.is_(None),
+                Tariff.is_active == False,
+                Tariff.base_price_per_kwh == 0
             )
         )
     
-    chargers = query.all()
-    logger.info(f"[API] 查询到 {len(chargers)} 个充电桩 | 筛选类型: {filter_type or '全部'}")
+    charge_points = query.all()
+    logger.info(f"[API] 查询到 {len(charge_points)} 个充电桩 | 筛选类型: {filter_type or '全部'}")
     
     result = []
-    for c in chargers:
-        # 判断配置状态
-        has_location = c.latitude is not None and c.longitude is not None
-        has_pricing = c.price_per_kwh is not None and c.price_per_kwh > 0
+    for cp in charge_points:
+        # 获取站点信息
+        site = cp.site if cp.site_id else None
+        has_location = site and site.latitude is not None and site.longitude is not None
+        
+        # 获取定价信息
+        tariff = db.query(Tariff).filter(
+            Tariff.site_id == cp.site_id,
+            Tariff.is_active == True
+        ).first() if cp.site_id else None
+        has_pricing = tariff and tariff.base_price_per_kwh > 0
+        
+        # 获取EVSE状态
+        evse_status = db.query(EVSEStatus).filter(
+            EVSEStatus.charge_point_id == cp.id
+        ).first()
+        status = evse_status.status if evse_status else "Unknown"
+        last_seen = evse_status.last_seen if evse_status else None
+        
         is_configured = has_location and has_pricing
         
         result.append({
-            "id": c.id,
-            "vendor": c.vendor,
-            "model": c.model,
-            "status": c.status,
-            "last_seen": c.last_seen.isoformat() if c.last_seen else None,
+            "id": cp.id,
+            "vendor": cp.vendor,
+            "model": cp.model,
+            "status": status,
+            "last_seen": last_seen.isoformat() if last_seen else None,
             "location": {
-                "latitude": c.latitude,
-                "longitude": c.longitude,
-                "address": c.address,
+                "latitude": site.latitude if site else None,
+                "longitude": site.longitude if site else None,
+                "address": site.address if site else None,
             },
-            "connector_type": c.connector_type,
-            "charging_rate": c.charging_rate,
-            "price_per_kwh": c.price_per_kwh,
+            "price_per_kwh": tariff.base_price_per_kwh if tariff else None,
             "is_configured": is_configured,
             "has_location": has_location,
             "has_pricing": has_pricing,
@@ -84,35 +97,61 @@ def list_chargers(
     return result
 
 
-@router.get("/{charger_id}", summary="获取充电桩详情")
-def get_charger(charger_id: str, db: Session = Depends(get_db)) -> dict:
-    """获取单个充电桩的详细信息"""
-    logger.info(f"[API] GET /api/v1/chargers/{charger_id} | 请求充电桩详情")
+@router.get("/{charge_point_id}", summary="获取充电桩详情")
+def get_charger(charge_point_id: str, db: Session = Depends(get_db)) -> dict:
+    """获取单个充电桩的详细信息（使用新表结构）"""
+    logger.info(f"[API] GET /api/v1/chargers/{charge_point_id} | 请求充电桩详情")
     
-    charger = db.query(Charger).filter(Charger.id == charger_id).first()
-    if not charger:
-        logger.warning(f"[API] GET /api/v1/chargers/{charger_id} | 充电桩未找到")
-        raise HTTPException(status_code=404, detail=f"充电桩 {charger_id} 未找到")
+    charge_point = db.query(ChargePoint).filter(ChargePoint.id == charge_point_id).first()
+    if not charge_point:
+        logger.warning(f"[API] GET /api/v1/chargers/{charge_point_id} | 充电桩未找到")
+        raise HTTPException(status_code=404, detail=f"充电桩 {charge_point_id} 未找到")
+    
+    # 获取站点信息
+    site = charge_point.site if charge_point.site_id else None
+    
+    # 获取定价信息
+    tariff = db.query(Tariff).filter(
+        Tariff.site_id == charge_point.site_id,
+        Tariff.is_active == True
+    ).first() if charge_point.site_id else None
+    
+    # 获取EVSE状态
+    evse_status = db.query(EVSEStatus).filter(
+        EVSEStatus.charge_point_id == charge_point.id
+    ).first()
+    status = evse_status.status if evse_status else "Unknown"
+    last_seen = evse_status.last_seen if evse_status else None
+    
+    # 获取EVSE列表
+    evses = db.query(EVSE).filter(EVSE.charge_point_id == charge_point.id).all()
+    evse_list = []
+    for evse in evses:
+        evse_status_item = db.query(EVSEStatus).filter(EVSEStatus.evse_id == evse.id).first()
+        evse_list.append({
+            "evse_id": evse.evse_id,
+            "status": evse_status_item.status if evse_status_item else "Unknown",
+            "last_seen": evse_status_item.last_seen.isoformat() if evse_status_item and evse_status_item.last_seen else None,
+        })
     
     return {
-        "id": charger.id,
-        "vendor": charger.vendor,
-        "model": charger.model,
-        "serial_number": charger.serial_number,
-        "firmware_version": charger.firmware_version,
-        "status": charger.status,
-        "last_seen": charger.last_seen.isoformat() if charger.last_seen else None,
+        "id": charge_point.id,
+        "vendor": charge_point.vendor,
+        "model": charge_point.model,
+        "serial_number": charge_point.serial_number,
+        "firmware_version": charge_point.firmware_version,
+        "status": status,
+        "last_seen": last_seen.isoformat() if last_seen else None,
         "location": {
-            "latitude": charger.latitude,
-            "longitude": charger.longitude,
-            "address": charger.address,
+            "latitude": site.latitude if site else None,
+            "longitude": site.longitude if site else None,
+            "address": site.address if site else None,
         },
-        "connector_type": charger.connector_type,
-        "charging_rate": charger.charging_rate,
-        "price_per_kwh": charger.price_per_kwh,
-        "created_at": charger.created_at.isoformat() if charger.created_at else None,
-        "updated_at": charger.updated_at.isoformat() if charger.updated_at else None,
+        "price_per_kwh": tariff.base_price_per_kwh if tariff else None,
+        "evses": evse_list,
+        "created_at": charge_point.created_at.isoformat() if charge_point.created_at else None,
+        "updated_at": charge_point.updated_at.isoformat() if charge_point.updated_at else None,
     }
     
-    logger.info(f"[API] GET /api/v1/chargers/{charger_id} 成功 | 状态: {charger.status}")
+    logger.info(f"[API] GET /api/v1/chargers/{charge_point_id} 成功 | 状态: {status}")
 
