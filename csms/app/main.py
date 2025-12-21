@@ -694,6 +694,7 @@ async def listen_charger_offline_events() -> None:
     """
     监听 Redis 过期事件，当充电桩在线标记过期时，触发离线处理
     使用 Redis PUB/SUB 机制监听 __keyspace@0__:charger:*:online 的 expired 事件
+    使用非阻塞方式避免阻塞事件循环
     """
     while True:
         try:
@@ -708,9 +709,17 @@ async def listen_charger_offline_events() -> None:
             
             logger.info(f"开始监听充电桩离线事件，模式: {pattern}")
             
-            # 持续监听
-            for message in pubsub.listen():
+            # 使用非阻塞方式监听，避免阻塞事件循环
+            while True:
                 try:
+                    # 使用 get_message() 非阻塞方式获取消息，超时时间 1 秒
+                    message = pubsub.get_message(timeout=1.0, ignore_subscribe_messages=True)
+                    
+                    if message is None:
+                        # 没有消息，继续循环（让出控制权给事件循环）
+                        await asyncio.sleep(0.1)
+                        continue
+                    
                     if message["type"] == "pmessage":
                         # 消息格式：
                         # channel: __keyspace@0__:charger:{id}:online
@@ -736,6 +745,7 @@ async def listen_charger_offline_events() -> None:
                 except Exception as e:
                     logger.error(f"处理 Redis 过期事件失败: {e}", exc_info=True)
                     # 继续监听，不中断
+                    await asyncio.sleep(1)
         except redis.exceptions.ConnectionError as e:
             logger.error(f"Redis 连接失败: {e}，5秒后重试...")
             await asyncio.sleep(5)

@@ -1,0 +1,127 @@
+#
+# 本地测试生产环境配置
+# 使用与生产环境完全相同的配置，便于本地测试
+# 使用: docker compose -f docker-compose.local-prod.yml up -d
+#
+
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: ocpp-db-local-prod
+    ports:
+      - "5432:5432"  # 本地暴露端口，便于调试
+    environment:
+      - POSTGRES_USER=ocpp_user
+      - POSTGRES_PASSWORD=ocpp_password
+      - POSTGRES_DB=ocpp
+    volumes:
+      - postgres_data_local:/var/lib/postgresql/data
+    networks:
+      - ocppnet
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ocpp_user -d ocpp"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: ocpp-redis-local-prod
+    ports:
+      - "6379:6379"  # 本地暴露端口，便于调试
+    command: redis-server --appendonly yes --protected-mode no
+    volumes:
+      - redis_data_local:/data
+    networks:
+      - ocppnet
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  csms:
+    build: ./csms
+    container_name: ocpp-csms-local-prod
+    ports:
+      - "9000:9000"
+    environment:
+      - ENVIRONMENT=production
+      - DEBUG=false
+      - DATABASE_URL=postgresql://ocpp_user:ocpp_password@db:5432/ocpp
+      - REDIS_URL=redis://redis:6379/0
+      - ENCRYPTION_KEY=
+      - SECRET_KEY=
+      - ENCRYPTION_SALT=ocpp_csms_salt
+      - MQTT_BROKER_HOST=mqtt-broker
+      - MQTT_BROKER_PORT=1883
+      - MQTT_USERNAME=
+      - MQTT_PASSWORD=
+      - LOG_LEVEL=INFO
+      - LOG_FORMAT=json
+      - DOCS_URL=None
+      - REDOC_URL=None
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mqtt-broker:
+        condition: service_started
+    networks:
+      - ocppnet
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  mqtt-broker:
+    image: eclipse-mosquitto:2.0
+    container_name: ocpp-mqtt-local-prod
+    ports:
+      - "1883:1883"
+      - "9001:9001"
+    volumes:
+      - mqtt_data_local:/mosquitto/data
+      - mqtt_log_local:/mosquitto/log
+      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+    networks:
+      - ocppnet
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "mosquitto_pub -h localhost -t test -m 'healthcheck' && mosquitto_sub -h localhost -t test -C 1 -W 2 || exit 0"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  admin:
+    build: ./admin
+    container_name: ocpp-admin-local-prod
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_CSMS_HTTP=http://localhost:9000
+    depends_on:
+      - csms
+    networks:
+      - ocppnet
+    restart: unless-stopped
+
+volumes:
+  postgres_data_local:
+    driver: local
+  redis_data_local:
+    driver: local
+  mqtt_data_local:
+    driver: local
+  mqtt_log_local:
+    driver: local
+
+networks:
+  ocppnet:
+    driver: bridge

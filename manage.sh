@@ -36,9 +36,11 @@ show_help() {
     echo "  rebuild    - 重新构建镜像并启动服务"
     echo "  build      - 重新构建镜像（不启动）"
     echo "  clean      - 清理未使用的镜像和容器"
-    echo "  clean-all  - 清理所有相关镜像和容器（危险）"
-    echo "  down       - 停止并删除容器"
-    echo "  help       - 显示此帮助信息"
+    echo "  clean-all    - 清理所有相关镜像和容器（危险）"
+    echo "  clean-volumes - 清理所有数据卷和镜像（危险，会删除所有数据）"
+    echo "  test-prod    - 本地测试生产环境配置"
+    echo "  down          - 停止并删除容器"
+    echo "  help          - 显示此帮助信息"
     echo ""
 }
 
@@ -503,8 +505,95 @@ main() {
         clean)
             clean_unused
             ;;
-        clean-all)
-            clean_all
+  clean-all)
+    clean_all
+    ;;
+  clean-volumes)
+    echo -e "${BLUE}========================================${NC}"
+    echo -e "${BLUE}清理所有数据卷${NC}"
+    echo -e "${BLUE}========================================${NC}"
+    echo ""
+    check_docker
+    check_compose_file
+    
+    echo -e "${RED}⚠️  危险操作！这将：${NC}"
+    echo -e "${RED}  - 停止并删除所有容器${NC}"
+    echo -e "${RED}  - 删除所有相关数据卷（包括数据库数据）${NC}"
+    echo -e "${RED}  - 删除所有相关镜像${NC}"
+    echo ""
+    echo -e "${YELLOW}所有数据将永久丢失！${NC}"
+    echo ""
+    read -p "确认继续? (输入 'yes' 继续) " -r
+    echo ""
+    if [[ ! $REPLY == "yes" ]]; then
+        echo "已取消"
+        exit 0
+    fi
+    
+    # 停止并删除容器
+    docker compose -f "$COMPOSE_FILE" down
+    
+    # 获取项目相关的镜像
+    echo -e "${BLUE}查找相关镜像...${NC}"
+    local container_images=$(docker ps -a --format "{{.Image}}" | grep -E "(ocpp|csms|eslatincsms)" | sort -u || true)
+    local compose_images=$(docker compose -f "$COMPOSE_FILE" config --images 2>/dev/null || true)
+    local all_images=$(echo -e "$container_images\n$compose_images" | grep -v "^$" | sort -u || true)
+    
+    if [ -n "$all_images" ]; then
+        echo -e "${BLUE}删除相关镜像:${NC}"
+        echo "$all_images" | while read img; do
+            if [ -n "$img" ]; then
+                echo "  - $img"
+                docker rmi -f "$img" 2>/dev/null || true
+            fi
+        done
+    fi
+    
+    # 获取项目相关的数据卷
+    echo -e "${BLUE}查找相关数据卷...${NC}"
+    local project_volumes=$(docker volume ls --format "{{.Name}}" | grep -E "(eslatincsms|ocpp|postgres|redis|mqtt)" || true)
+    
+    if [ -n "$project_volumes" ]; then
+        echo -e "${BLUE}删除相关数据卷:${NC}"
+        echo "$project_volumes" | while read vol; do
+            if [ -n "$vol" ]; then
+                echo "  - $vol"
+                docker volume rm -f "$vol" 2>/dev/null || true
+            fi
+        done
+    fi
+    
+    # 清理未使用的资源
+    docker system prune -af
+    
+    echo ""
+    echo -e "${GREEN}✓ 清理完成（包括数据卷）${NC}"
+    echo ""
+    ;;
+        test-prod)
+            echo -e "${BLUE}本地测试生产环境配置...${NC}"
+            if [ -f "docker-compose.local-prod.yml" ]; then
+                echo -e "${BLUE}使用 docker-compose.local-prod.yml 启动测试环境...${NC}"
+                docker compose -f docker-compose.local-prod.yml down 2>/dev/null || true
+                docker compose -f docker-compose.local-prod.yml up -d --build
+                sleep 10
+                docker compose -f docker-compose.local-prod.yml ps
+                echo ""
+                echo -e "${GREEN}✓ 测试环境已启动${NC}"
+                echo "服务地址:"
+                echo "  - CSMS: http://localhost:9000"
+                echo "  - Admin: http://localhost:3000"
+                echo ""
+                echo "查看日志: docker compose -f docker-compose.local-prod.yml logs -f"
+                echo "停止: docker compose -f docker-compose.local-prod.yml down"
+            else
+                echo -e "${YELLOW}⚠️  docker-compose.local-prod.yml 不存在${NC}"
+                echo "使用生产配置进行测试..."
+                docker compose -f "$COMPOSE_FILE" down 2>/dev/null || true
+                docker compose -f "$COMPOSE_FILE" up -d --build
+                sleep 10
+                docker compose -f "$COMPOSE_FILE" ps
+            fi
             ;;
         down)
             down_services
