@@ -406,9 +406,9 @@ def update_charger_location(req: UpdateChargerLocationRequest, db: Session = Dep
     site = charge_point.site if charge_point.site_id else None
     if not site:
         # 创建新站点
-            site = Site(
-                id=generate_site_id(f"站点-{req.charger_id}"),
-                name=f"站点-{req.charger_id}",
+        site = Site(
+            id=generate_site_id(f"站点-{req.charger_id}"),
+            name=f"站点-{req.charger_id}",
             address=req.address or "",
             latitude=req.latitude,
             longitude=req.longitude
@@ -419,7 +419,8 @@ def update_charger_location(req: UpdateChargerLocationRequest, db: Session = Dep
     else:
         site.latitude = req.latitude
         site.longitude = req.longitude
-        site.address = req.address
+        if req.address:
+            site.address = req.address
     
     try:
         db.commit()
@@ -606,7 +607,8 @@ def get_charger_status(charger_id: str, db: Session = Depends(get_db)) -> dict:
                             Tariff.is_active == True
                         ).first()
                     ) if charge_point and charge_point.site_id else None
-                ))(),
+                ))()
+            ) if charge_point and charge_point.site_id else None,
         }
     }
     

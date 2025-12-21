@@ -216,7 +216,6 @@ async def handle_ocpp_message(charge_point_id: str, action: str, payload: Dict[s
             evse_id=evse_id
         )
     else:
-    else:
         # 降级到旧逻辑（如果服务不可用）
         logger.warning("OCPP服务不可用，使用降级处理")
         return {"error": "Service unavailable"}
