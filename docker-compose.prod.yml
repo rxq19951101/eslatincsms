@@ -138,7 +138,10 @@ services:
     ports:
       - "${ADMIN_PORT:-3000}:3000"
     environment:
-      - NEXT_PUBLIC_CSMS_HTTP=${NEXT_PUBLIC_CSMS_HTTP:-http://localhost:9000}
+      # 前端会自动检测当前页面的 hostname 并使用相同 hostname + 端口 9000
+      # 例如：访问 http://47.236.134.99:3000 时，会自动使用 http://47.236.134.99:9000
+      # 如果需要手动指定，可以设置环境变量：NEXT_PUBLIC_CSMS_HTTP=http://your-ip:9000
+      - NEXT_PUBLIC_CSMS_HTTP=${NEXT_PUBLIC_CSMS_HTTP:-}
     depends_on:
       - csms
     networks:

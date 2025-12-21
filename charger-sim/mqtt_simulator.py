@@ -51,18 +51,30 @@ class MQTTOCPPSimulator:
     ]
     
     def __init__(self, charger_id: str, broker_host: str = "localhost", 
-                 broker_port: int = 1883, topic_prefix: str = "ocpp",
+                 broker_port: int = 1883, type_code: str = "zcf",
+                 serial_number: Optional[str] = None,
                  username: Optional[str] = None, password: Optional[str] = None,
                  charging_power_kw: float = 7.0):
         self.charger_id = charger_id
         self.broker_host = broker_host
         self.broker_port = broker_port
-        self.topic_prefix = topic_prefix
+        self.type_code = type_code  # 设备类型代码（如 zcf, tesla）
         self.prefix = f"[{charger_id}]"
         
-        # MQTT 主题
-        self.request_topic = f"{topic_prefix}/{charger_id}/requests"   # 充电桩发送
-        self.response_topic = f"{topic_prefix}/{charger_id}/responses"  # CSMS 发送
+        # 生成或使用提供的序列号
+        if serial_number:
+            self.serial_number = serial_number
+        else:
+            # 如果没有提供序列号，从 charger_id 生成一个
+            import hashlib
+            charger_hash = int(hashlib.md5(charger_id.encode()).hexdigest()[:15], 16)
+            self.serial_number = str(charger_hash)
+        
+        # MQTT 主题（新格式）
+        # 设备发送消息到: {type_code}/{serial_number}/user/up
+        self.up_topic = f"{type_code}/{self.serial_number}/user/up"
+        # 设备订阅接收: {type_code}/{serial_number}/user/down
+        self.down_topic = f"{type_code}/{self.serial_number}/user/down"
         
         # 生成设备信息
         charger_hash = int(hashlib.md5(charger_id.encode()).hexdigest()[:8], 16)
@@ -100,10 +112,12 @@ class MQTTOCPPSimulator:
         """MQTT 连接回调"""
         if rc == 0:
             print(f"{self.prefix} ✓ MQTT 连接成功")
-            # 只订阅响应主题（接收 CSMS 的响应和请求）
-            # 注意：充电桩不应该订阅 request 主题，因为那是充电桩自己发送请求的地方
-            client.subscribe(self.response_topic, qos=1)
-            print(f"{self.prefix}   订阅响应主题: {self.response_topic} (接收服务器响应和请求)")
+            print(f"{self.prefix}   设备类型: {self.type_code}")
+            print(f"{self.prefix}   序列号: {self.serial_number}")
+            # 订阅 down 主题（接收 CSMS 的响应和请求）
+            client.subscribe(self.down_topic, qos=1)
+            print(f"{self.prefix}   订阅主题: {self.down_topic} (接收服务器消息)")
+            print(f"{self.prefix}   发送主题: {self.up_topic} (发送消息到服务器)")
         else:
             print(f"{self.prefix} ✗ MQTT 连接失败，返回码: {rc}")
             sys.exit(1)
@@ -114,12 +128,13 @@ class MQTTOCPPSimulator:
             topic = msg.topic
             payload = json.loads(msg.payload.decode())
             
-            # 充电桩只订阅 response 主题，接收服务器的响应和请求
-            if topic == self.response_topic:
+            # 充电桩订阅 down 主题，接收服务器的响应和请求
+            if topic == self.down_topic:
                 # 检查是响应还是请求（通过消息格式判断）
+                action = payload.get("action", "")
+                
                 if "response" in payload:
-                    # 这是来自服务器的响应
-                    action = payload.get("action", "")
+                    # 这是来自服务器的响应（针对之前发送的请求）
                     response = payload.get("response", {})
                     
                     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
@@ -132,9 +147,8 @@ class MQTTOCPPSimulator:
                         self._handle_response(action, response),
                         self.loop
                     )
-                elif "payload" in payload or "action" in payload:
-                    # 这是来自服务器的请求（通过 response 主题发送）
-                    action = payload.get("action", "")
+                elif "payload" in payload:
+                    # 这是来自服务器的请求（CSMS 主动发送的请求）
                     request_payload = payload.get("payload", {})
                     from_sender = payload.get("from", "csms")
                     
@@ -271,7 +285,7 @@ class MQTTOCPPSimulator:
             print(f"{self.prefix}    ⚠ 未知请求类型: {action}")
             response = {"status": "NotSupported"}
         
-        # 发送响应
+        # 发送响应（通过 up 主题发送，格式与发送请求相同）
         if response:
             response_message = {
                 "action": action,
@@ -279,12 +293,13 @@ class MQTTOCPPSimulator:
             }
             try:
                 result = self.client.publish(
-                    self.response_topic,
+                    self.up_topic,
                     json.dumps(response_message),
                     qos=1
                 )
                 if result.rc == mqtt.MQTT_ERR_SUCCESS:
                     print(f"{self.prefix} → [{timestamp}] 已发送响应: {action}")
+                    print(f"{self.prefix}    主题: {self.up_topic}")
                 else:
                     print(f"{self.prefix} ✗ 响应发送失败，返回码: {result.rc}")
             except Exception as e:
@@ -297,10 +312,9 @@ class MQTTOCPPSimulator:
         pass
     
     def _send_message(self, action: str, payload: Optional[Dict[str, Any]] = None):
-        """发送 OCPP 消息到 CSMS"""
+        """发送 OCPP 消息到 CSMS（通过 up 主题）"""
         message = {
-            "action": action,
-            "from": "charger"  # 标识消息来源，避免被误认为是服务器消息
+            "action": action
         }
         if payload:
             message["payload"] = payload
@@ -309,7 +323,7 @@ class MQTTOCPPSimulator:
         
         try:
             result = self.client.publish(
-                self.request_topic,
+                self.up_topic,
                 json.dumps(message),
                 qos=1
             )
@@ -317,7 +331,7 @@ class MQTTOCPPSimulator:
             if result.rc == mqtt.MQTT_ERR_SUCCESS:
                 print(f"{self.prefix} → [{timestamp}] 发送消息到服务器: {action}")
                 if payload:
-                    print(f"{self.prefix}    主题: {self.request_topic}")
+                    print(f"{self.prefix}    主题: {self.up_topic}")
                     print(f"{self.prefix}    载荷: {json.dumps(payload, ensure_ascii=False)}")
             else:
                 print(f"{self.prefix} ✗ [{timestamp}] 消息发送失败，返回码: {result.rc}")
@@ -411,6 +425,7 @@ class MQTTOCPPSimulator:
         })
         print(f"{self.prefix}   发送 BootNotification: vendor={self.vendor}, model={self.model}, "
               f"firmware={self.firmware_version}, serial={self.serial_number}")
+        print(f"{self.prefix}   使用 MQTT 主题: {self.up_topic} (发送) / {self.down_topic} (接收)")
         await asyncio.sleep(1)
         
         # 发送 StatusNotification
@@ -437,7 +452,7 @@ class MQTTOCPPSimulator:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="MQTT OCPP 1.6 充电桩模拟器")
+    parser = argparse.ArgumentParser(description="MQTT OCPP 1.6 充电桩模拟器（新格式）")
     parser.add_argument(
         "--id",
         type=str,
@@ -457,10 +472,16 @@ def main():
         help="MQTT broker 端口 (默认: 1883)"
     )
     parser.add_argument(
-        "--topic-prefix",
+        "--type-code",
         type=str,
-        default="ocpp",
-        help="MQTT 主题前缀 (默认: ocpp)"
+        default="zcf",
+        help="设备类型代码，如 zcf, tesla (默认: zcf)"
+    )
+    parser.add_argument(
+        "--serial-number",
+        type=str,
+        default=None,
+        help="设备序列号（可选，不提供则自动生成）"
     )
     parser.add_argument(
         "--username",
@@ -492,7 +513,8 @@ def main():
         charger_id=args.id,
         broker_host=args.broker,
         broker_port=args.port,
-        topic_prefix=args.topic_prefix,
+        type_code=args.type_code,
+        serial_number=args.serial_number,
         username=args.username,
         password=args.password,
         charging_power_kw=args.power
