@@ -10,15 +10,15 @@ services:
     image: postgres:15-alpine
     container_name: ocpp-db-prod
     environment:
-      - POSTGRES_USER=${POSTGRES_USER:-ocpp_user}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_USER=${POSTGRES_USER:-local}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-local}
       - POSTGRES_DB=${POSTGRES_DB:-ocpp}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     networks:
       - ocppnet
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ocpp_user} -d ${POSTGRES_DB:-ocpp}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-local} -d ${POSTGRES_DB:-ocpp}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -35,13 +35,29 @@ services:
   redis:
     image: redis:7-alpine
     container_name: ocpp-redis-prod
-    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-}
+    command: >
+      sh -c "
+      if [ -n \"$$REDIS_PASSWORD\" ]; then
+        redis-server --appendonly yes --requirepass \"$$REDIS_PASSWORD\"
+      else
+        redis-server --appendonly yes
+      fi
+      "
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
     volumes:
       - redis_data:/data
     networks:
       - ocppnet
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: >
+        sh -c "
+        if [ -n \"$$REDIS_PASSWORD\" ]; then
+          redis-cli -a \"$$REDIS_PASSWORD\" ping
+        else
+          redis-cli ping
+        fi
+        "
       interval: 10s
       timeout: 5s
       retries: 5
@@ -63,12 +79,12 @@ services:
     environment:
       - ENVIRONMENT=production
       - DEBUG=false
-      - DATABASE_URL=${DATABASE_URL}
-      - REDIS_URL=${REDIS_URL}
+      - DATABASE_URL=${DATABASE_URL:-postgresql://local:local@db:5432/ocpp}
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
       - ENCRYPTION_KEY=${ENCRYPTION_KEY}
       - SECRET_KEY=${SECRET_KEY}
       - ENCRYPTION_SALT=${ENCRYPTION_SALT}
-      - MQTT_BROKER_HOST=${MQTT_BROKER_HOST}
+      - MQTT_BROKER_HOST=${MQTT_BROKER_HOST:-mqtt-broker}
       - MQTT_BROKER_PORT=${MQTT_BROKER_PORT:-1883}
       - MQTT_USERNAME=${MQTT_USERNAME:-}
       - MQTT_PASSWORD=${MQTT_PASSWORD:-}
@@ -82,6 +98,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      mqtt-broker:
+        condition: service_started
     networks:
       - ocppnet
     restart: unless-stopped
@@ -99,10 +117,59 @@ services:
           cpus: '1'
           memory: 1G
 
+  # MQTT Broker
+  mqtt-broker:
+    image: eclipse-mosquitto:2.0
+    container_name: ocpp-mqtt-prod
+    ports:
+      - "${MQTT_BROKER_PORT:-1883}:1883"
+      - "${MQTT_BROKER_WS_PORT:-9001}:9001"
+    volumes:
+      - mqtt_data:/mosquitto/data
+      - mqtt_log:/mosquitto/log
+    # 允许匿名连接（生产环境应配置认证）
+    # 使用默认配置，允许所有连接
+    networks:
+      - ocppnet
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "mosquitto_sub -h localhost -t test -C 1 || exit 0"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+
+  # Admin管理界面（可选）
+  admin:
+    build: ./admin
+    container_name: ocpp-admin-prod
+    ports:
+      - "${ADMIN_PORT:-3000}:3000"
+    environment:
+      - NEXT_PUBLIC_CSMS_HTTP=${NEXT_PUBLIC_CSMS_HTTP:-http://localhost:9000}
+    depends_on:
+      - csms
+    networks:
+      - ocppnet
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1G
+
 volumes:
   postgres_data:
     driver: local
   redis_data:
+    driver: local
+  mqtt_data:
+    driver: local
+  mqtt_log:
     driver: local
 
 networks:
