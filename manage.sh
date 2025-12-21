@@ -33,12 +33,16 @@ show_help() {
     echo "  logs       - 查看服务日志（实时）"
     echo "  logs-tail  - 查看最近100行日志"
     echo "  health     - 检查服务健康状态"
-    echo "  rebuild    - 重新构建镜像并启动服务"
-    echo "  build      - 重新构建镜像（不启动）"
-    echo "  clean      - 清理未使用的镜像和容器"
-    echo "  clean-all  - 清理所有相关镜像和容器（危险）"
-    echo "  down       - 停止并删除容器"
-    echo "  help       - 显示此帮助信息"
+    echo "  rebuild      - 重新构建镜像并启动服务"
+    echo "  rebuild-csms  - 重新构建 CSMS 镜像（无缓存，推荐）"
+    echo "  rebuild-admin - 重新构建 Admin 镜像（无缓存）"
+    echo "  restart-mqtt  - 重启 MQTT Broker（重新加载配置）"
+    echo "  clean-build   - 清理并重新构建所有镜像（完全重建）"
+    echo "  build         - 重新构建镜像（不启动）"
+    echo "  clean         - 清理未使用的镜像和容器"
+    echo "  clean-all     - 清理所有相关镜像和容器（危险）"
+    echo "  down          - 停止并删除容器"
+    echo "  help          - 显示此帮助信息"
     echo ""
 }
 
@@ -496,6 +500,54 @@ main() {
             ;;
         rebuild)
             rebuild_services
+            ;;
+        rebuild-csms)
+            echo -e "${BLUE}重新构建 CSMS 镜像（无缓存）...${NC}"
+            check_docker
+            check_compose_file
+            docker compose -f "$COMPOSE_FILE" build --no-cache csms
+            docker compose -f "$COMPOSE_FILE" stop csms
+            docker compose -f "$COMPOSE_FILE" rm -f csms
+            docker compose -f "$COMPOSE_FILE" up -d csms
+            wait_for_service "$SERVICE_NAME" $MAX_WAIT_TIME
+            check_health $MAX_WAIT_TIME
+            echo -e "${GREEN}✓ CSMS 服务已重新构建并启动${NC}"
+            ;;
+        rebuild-admin)
+            echo -e "${BLUE}重新构建 Admin 镜像（无缓存）...${NC}"
+            check_docker
+            check_compose_file
+            docker compose -f "$COMPOSE_FILE" build --no-cache admin
+            docker compose -f "$COMPOSE_FILE" stop admin
+            docker compose -f "$COMPOSE_FILE" rm -f admin
+            docker compose -f "$COMPOSE_FILE" up -d admin
+            echo -e "${GREEN}✓ Admin 服务已重新构建并启动${NC}"
+            ;;
+        restart-mqtt)
+            echo -e "${BLUE}重启 MQTT Broker 服务（重新加载配置）...${NC}"
+            check_docker
+            check_compose_file
+            docker compose -f "$COMPOSE_FILE" stop mqtt-broker
+            docker compose -f "$COMPOSE_FILE" rm -f mqtt-broker
+            docker compose -f "$COMPOSE_FILE" up -d mqtt-broker
+            echo -e "${GREEN}✓ MQTT Broker 已重启（配置已重新加载）${NC}"
+            ;;
+        clean-build)
+            echo -e "${BLUE}清理并重新构建所有镜像...${NC}"
+            check_docker
+            check_compose_file
+            echo -e "${YELLOW}⚠️  这将停止所有服务，清理并重新构建所有镜像${NC}"
+            read -p "是否继续? (y/n) " -n 1 -r
+            echo ""
+            if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+                exit 0
+            fi
+            docker compose -f "$COMPOSE_FILE" down
+            docker compose -f "$COMPOSE_FILE" build --no-cache --pull
+            docker compose -f "$COMPOSE_FILE" up -d
+            wait_for_service "$SERVICE_NAME" $MAX_WAIT_TIME
+            check_health $MAX_WAIT_TIME
+            echo -e "${GREEN}✓ 所有服务已清理并重新构建${NC}"
             ;;
         build)
             build_images
