@@ -4,7 +4,7 @@
 #
 
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple
 from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 from app.database.base import SessionLocal
@@ -27,13 +27,45 @@ class OCPPMessageHandler:
         self.charge_point_service = ChargePointService()
         self.session_service = SessionService()
     
+    def _verify_device_authentication(
+        self,
+        db: Session,
+        device_serial_number: Optional[str]
+    ) -> Tuple[bool, Optional[str]]:
+        """
+        验证设备是否已通过认证
+        
+        Returns:
+            (是否通过认证, 错误信息)
+        """
+        if not device_serial_number:
+            # 如果没有提供device_serial_number，允许继续（可能是WebSocket连接）
+            return True, None
+        
+        from app.database.models import Device
+        device = db.query(Device).filter(
+            Device.serial_number == device_serial_number
+        ).first()
+        
+        if not device:
+            return False, f"设备 {device_serial_number} 不存在，未通过认证"
+        
+        if not device.is_active:
+            return False, f"设备 {device_serial_number} 未激活"
+        
+        return True, None
+    
     async def handle_boot_notification(
         self,
         charge_point_id: str,
         payload: Dict[str, Any],
         device_serial_number: Optional[str] = None
     ) -> Dict[str, Any]:
-        """处理BootNotification消息"""
+        """处理BootNotification消息
+        
+        注意：对于MQTT传输，设备认证在broker层完成，能到达这里的消息说明设备已通过认证。
+        对于WebSocket传输，可能没有device_serial_number，需要特殊处理。
+        """
         db = SessionLocal()
         try:
             vendor = str(payload.get("vendor", "")).strip() or str(payload.get("chargePointVendor", "")).strip()
@@ -41,7 +73,25 @@ class OCPPMessageHandler:
             firmware_version = str(payload.get("firmwareVersion", "")).strip()
             serial_number = str(payload.get("serialNumber", "")).strip() or device_serial_number
             
+            # 如果提供了device_serial_number，验证设备是否存在
+            # 对于MQTT传输，设备应该已经存在（因为已通过认证）
+            # 如果设备不存在，说明可能是WebSocket连接或数据不一致，记录警告但不拒绝
+            if device_serial_number:
+                from app.database.models import Device
+                device = db.query(Device).filter(
+                    Device.serial_number == device_serial_number
+                ).first()
+                
+                if not device:
+                    logger.warning(
+                        f"设备 {device_serial_number} 不存在于devices表中，"
+                        f"但消息已到达应用层（charge_point_id={charge_point_id}）。"
+                        f"可能是WebSocket连接或数据不一致。"
+                    )
+                    # 不拒绝请求，允许继续处理（可能是WebSocket连接）
+            
             # 获取或创建充电桩
+            # 注意：如果device_serial_number存在但设备不存在，get_or_create_charge_point不会创建设备
             charge_point = self.charge_point_service.get_or_create_charge_point(
                 db=db,
                 charge_point_id=charge_point_id,
@@ -61,9 +111,23 @@ class OCPPMessageHandler:
             )
             
             # 记录Boot事件
+            # 此时设备应该已经创建（通过get_or_create_charge_point），
+            # 但为了安全起见，仍然检查设备是否存在
+            event_device_serial = device_serial_number
+            if event_device_serial:
+                device = db.query(Device).filter(
+                    Device.serial_number == event_device_serial
+                ).first()
+                if not device:
+                    logger.warning(
+                        f"设备 {event_device_serial} 不存在于devices表中，"
+                        f"boot事件将不关联设备（charge_point_id={charge_point_id}）"
+                    )
+                    event_device_serial = None
+            
             event = DeviceEvent(
                 charge_point_id=charge_point_id,
-                device_serial_number=device_serial_number,
+                device_serial_number=event_device_serial,
                 event_type="boot",
                 event_data={
                     "vendor": vendor,

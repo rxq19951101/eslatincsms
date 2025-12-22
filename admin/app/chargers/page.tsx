@@ -95,9 +95,20 @@ type StatusData = {
 };
 
 const fetcher = async <T = any>(url: string): Promise<T> => {
-  const res = await fetch(url, { cache: "no-store" });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json();
+  try {
+    const res = await fetch(url, { cache: "no-store" });
+    if (!res.ok) {
+      const errorText = await res.text();
+      throw new Error(`HTTP ${res.status}: ${errorText || res.statusText}`);
+    }
+    return res.json();
+  } catch (error: any) {
+    // 提供更详细的错误信息
+    if (error.name === 'TypeError' && error.message.includes('fetch')) {
+      throw new Error(`无法连接到服务器: ${url}。请检查服务器是否运行，网络是否正常。`);
+    }
+    throw error;
+  }
 };
 
 export default function ChargersPage() {
@@ -374,6 +385,38 @@ export default function ChargersPage() {
       )}
 
       {/* Error/Loading */}
+      {error && (
+        <div style={{
+          background: "rgba(255, 59, 48, 0.1)",
+          border: "2px solid #ff3b30",
+          borderRadius: 12,
+          padding: 24,
+          marginBottom: 24,
+          color: "#ff3b30",
+        }}>
+          <h3 style={{ fontSize: 18, fontWeight: "600", marginBottom: 12 }}>
+            ⚠️ 加载失败
+          </h3>
+          <p style={{ marginBottom: 8 }}>{error.message}</p>
+          <p style={{ fontSize: 12, color: "#aaa", marginBottom: 12 }}>
+            API 地址: {apiUrl}
+          </p>
+          <button
+            onClick={() => mutate()}
+            style={{
+              padding: "8px 16px",
+              background: "#ff3b30",
+              border: "none",
+              borderRadius: 6,
+              color: "#fff",
+              fontSize: 14,
+              cursor: "pointer",
+            }}
+          >
+            重试
+          </button>
+        </div>
+      )}
       {error && (
         <div style={{
           background: "rgba(255,59,48,0.2)",
