@@ -61,27 +61,25 @@ class MQTTOCPPSimulator:
         self.type_code = type_code  # 设备类型代码（如 zcf, tesla）
         self.prefix = f"[{charger_id}]"
         
+        # 生成设备信息（用于厂商、型号等）
+        charger_hash = int(hashlib.md5(charger_id.encode()).hexdigest()[:8], 16)
+        vendor_idx = charger_hash % len(self.VENDOR_MODELS)
+        self.vendor, self.model = self.VENDOR_MODELS[vendor_idx]
+        self.firmware_version = f"1.{charger_hash % 10}.{charger_hash % 100}"
+        
         # 生成或使用提供的序列号
         if serial_number:
             self.serial_number = serial_number
         else:
-            # 如果没有提供序列号，从 charger_id 生成一个
-            import hashlib
-            charger_hash = int(hashlib.md5(charger_id.encode()).hexdigest()[:15], 16)
-            self.serial_number = str(charger_hash)
+            # 如果没有提供序列号，从 charger_id 生成一个（使用15位数字）
+            charger_hash_full = int(hashlib.md5(charger_id.encode()).hexdigest()[:15], 16)
+            self.serial_number = str(charger_hash_full)
         
         # MQTT 主题（新格式）
         # 设备发送消息到: {type_code}/{serial_number}/user/up
         self.up_topic = f"{type_code}/{self.serial_number}/user/up"
         # 设备订阅接收: {type_code}/{serial_number}/user/down
         self.down_topic = f"{type_code}/{self.serial_number}/user/down"
-        
-        # 生成设备信息
-        charger_hash = int(hashlib.md5(charger_id.encode()).hexdigest()[:8], 16)
-        vendor_idx = charger_hash % len(self.VENDOR_MODELS)
-        self.vendor, self.model = self.VENDOR_MODELS[vendor_idx]
-        self.serial_number = f"{self.vendor[:3].upper()}-{charger_hash % 10000:04d}"
-        self.firmware_version = f"1.{charger_hash % 10}.{charger_hash % 100}"
         
         # 状态管理
         self.status = ChargerStatus.UNAVAILABLE
