@@ -115,6 +115,22 @@ def create_device(
             detail="设备创建失败"
         )
     
+    logger.info(f"设备对象已创建: {device.serial_number}, 准备提交事务")
+    
+    # 提交事务
+    try:
+        db.commit()
+        logger.info(f"事务已提交: {req.serial_number}")
+        db.refresh(device)  # 刷新以获取数据库生成的值
+        logger.info(f"设备 {req.serial_number} 已成功提交到数据库")
+    except Exception as e:
+        db.rollback()
+        logger.error(f"提交设备创建事务失败: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"设备创建失败: {str(e)}"
+        )
+    
     # 获取派生密码（用于返回给用户）
     try:
         master_secret = decrypt_master_secret(device.master_secret_encrypted)

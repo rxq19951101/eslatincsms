@@ -97,12 +97,13 @@ class MQTTAdapter(TransportAdapter):
             try:
                 device_types = MQTTAuthService.get_all_active_device_types(db)
                 for device_type in device_types:
-                    if device_type.type_code not in self._subscribed_types:
+                    type_code = device_type.get("type_code") if isinstance(device_type, dict) else device_type.type_code
+                    if type_code and type_code not in self._subscribed_types:
                         # 订阅特定品牌的topic：{type_code}/+/user/up
-                        topic = f"{device_type.type_code}/+/user/up"
+                        topic = f"{type_code}/+/user/up"
                         self.client.subscribe(topic, qos=1)
-                        self._subscribed_types.add(device_type.type_code)
-                        logger.info(f"已订阅设备类型topic: {topic} (品牌: {device_type.type_name})")
+                        self._subscribed_types.add(type_code)
+                        logger.info(f"已订阅设备类型topic: {topic} (类型: {type_code})")
             finally:
                 db.close()
         except Exception as e:
