@@ -9,7 +9,7 @@
 import React, { useState, useEffect, useMemo } from "react";
 import useSWR from "swr";
 import { QRCodeSVG } from "qrcode.react";
-import { getApiBase } from "../utils/api";
+import { getApiBase, getApiBaseWithValidation } from "../utils/api";
 import {
   LineChart, Line, BarChart, Bar, PieChart, Pie, Cell,
   XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer
@@ -112,7 +112,8 @@ const fetcher = async <T = any>(url: string): Promise<T> => {
 };
 
 export default function ChargersPage() {
-  const apiBase = getApiBase();
+  // 验证API地址配置
+  const { url: apiBase, error: configError } = getApiBaseWithValidation();
   const [filterType, setFilterType] = useState<"all" | "configured" | "unconfigured">("all");
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedChargerForCharts, setSelectedChargerForCharts] = useState<string | null>(null);
@@ -122,11 +123,15 @@ export default function ChargersPage() {
     ? `${apiBase}/api/v1/chargers`
     : `${apiBase}/api/v1/chargers?filter_type=${filterType}`;
   
-  const { data: chargers = [], error, isLoading, mutate } = useSWR<Charger[]>(
-    apiUrl,
+  const { data: chargers = [], error: fetchError, isLoading, mutate } = useSWR<Charger[]>(
+    // 如果配置错误，不发送请求
+    configError ? null : apiUrl,
     fetcher,
     { refreshInterval: 3000 }
   );
+  
+  // 合并配置错误和请求错误
+  const error = configError || fetchError;
   
   // 搜索过滤
   const filteredChargers = useMemo(() => {
@@ -387,45 +392,118 @@ export default function ChargersPage() {
       {/* Error/Loading */}
       {error && (
         <div style={{
-          background: "rgba(255, 59, 48, 0.1)",
-          border: "2px solid #ff3b30",
+          background: configError ? "rgba(255, 193, 7, 0.1)" : "rgba(255, 59, 48, 0.1)",
+          border: `2px solid ${configError ? "#ffc107" : "#ff3b30"}`,
           borderRadius: 12,
           padding: 24,
           marginBottom: 24,
-          color: "#ff3b30",
+          color: configError ? "#ffc107" : "#ff3b30",
         }}>
           <h3 style={{ fontSize: 18, fontWeight: "600", marginBottom: 12 }}>
-            ⚠️ 加载失败
+            {configError ? "⚠️ 配置错误" : "⚠️ 加载失败"}
           </h3>
-          <p style={{ marginBottom: 8 }}>{error.message}</p>
-          <p style={{ fontSize: 12, color: "#aaa", marginBottom: 12 }}>
-            API 地址: {apiUrl}
-          </p>
-          <button
-            onClick={() => mutate()}
-            style={{
-              padding: "8px 16px",
-              background: "#ff3b30",
-              border: "none",
-              borderRadius: 6,
-              color: "#fff",
+          <p style={{ marginBottom: 8, lineHeight: 1.6 }}>{error.message}</p>
+          {configError ? (
+            <div style={{ 
+              background: "rgba(0,0,0,0.2)", 
+              borderRadius: 8, 
+              padding: 16, 
+              marginTop: 16,
               fontSize: 14,
-              cursor: "pointer",
-            }}
-          >
-            重试
-          </button>
-        </div>
-      )}
-      {error && (
-        <div style={{
-          background: "rgba(255,59,48,0.2)",
-          border: "1px solid #ff3b30",
-          borderRadius: 8,
-          padding: 16,
-          marginBottom: 24,
-        }}>
-          加载失败: {error.message}
+            }}>
+              <p style={{ marginBottom: 12, fontWeight: "600", color: "#ffc107" }}>
+                🔧 生产环境配置修复步骤：
+              </p>
+              <ol style={{ marginLeft: 20, lineHeight: 2.2 }}>
+                <li style={{ marginBottom: 12 }}>
+                  <strong>方法1（推荐）：</strong>在服务器上设置环境变量
+                  <code style={{ 
+                    display: "block", 
+                    background: "rgba(0,0,0,0.4)", 
+                    padding: "10px 14px", 
+                    borderRadius: 4,
+                    marginTop: 8,
+                    fontFamily: "monospace",
+                    fontSize: 13,
+                    color: "#4ade80",
+                    border: "1px solid rgba(74, 222, 128, 0.3)"
+                  }}>
+                    export NEXT_PUBLIC_CSMS_HTTP={typeof window !== 'undefined' ? `http://${window.location.hostname}:9000` : 'http://你的服务器IP:9000'}
+                  </code>
+                  <div style={{ marginTop: 8, fontSize: 12, color: "#aaa" }}>
+                    然后重启服务：<code style={{ background: "rgba(0,0,0,0.3)", padding: "2px 6px", borderRadius: 3 }}>docker compose -f docker-compose.prod.yml restart admin</code>
+                  </div>
+                </li>
+                <li style={{ marginBottom: 12 }}>
+                  <strong>方法2：</strong>在 docker-compose.prod.yml 中直接设置
+                  <code style={{ 
+                    display: "block", 
+                    background: "rgba(0,0,0,0.4)", 
+                    padding: "10px 14px", 
+                    borderRadius: 4,
+                    marginTop: 8,
+                    fontFamily: "monospace",
+                    fontSize: 13,
+                    color: "#4ade80",
+                    border: "1px solid rgba(74, 222, 128, 0.3)"
+                  }}>
+                    admin:<br/>
+                    &nbsp;&nbsp;environment:<br/>
+                    &nbsp;&nbsp;&nbsp;&nbsp;- NEXT_PUBLIC_CSMS_HTTP={typeof window !== 'undefined' ? `http://${window.location.hostname}:9000` : 'http://你的服务器IP:9000'}
+                  </code>
+                </li>
+                <li style={{ marginBottom: 12 }}>
+                  <strong>方法3：</strong>确保访问URL使用正确的服务器IP
+                  <div style={{ marginTop: 8, fontSize: 12, color: "#aaa" }}>
+                    当前访问地址：<code style={{ background: "rgba(0,0,0,0.3)", padding: "2px 6px", borderRadius: 3 }}>
+                      {typeof window !== 'undefined' ? window.location.href : '未知'}
+                    </code>
+                  </div>
+                  <div style={{ marginTop: 4, fontSize: 12, color: "#ff6b6b" }}>
+                    ❌ 错误：使用占位符（如 your-server-ip）<br/>
+                    ✅ 正确：使用实际IP（如 47.236.134.99）
+                  </div>
+                </li>
+              </ol>
+              <div style={{ 
+                marginTop: 16, 
+                padding: 12, 
+                background: "rgba(255, 193, 7, 0.1)", 
+                borderRadius: 6,
+                border: "1px solid rgba(255, 193, 7, 0.3)"
+              }}>
+                <strong style={{ color: "#ffc107" }}>💡 提示：</strong>
+                <div style={{ marginTop: 6, fontSize: 12, color: "#aaa", lineHeight: 1.6 }}>
+                  配置完成后，刷新页面即可生效。如果问题仍然存在，请检查：
+                  <ul style={{ marginLeft: 20, marginTop: 6 }}>
+                    <li>Docker服务是否正常运行</li>
+                    <li>9000端口是否已开放</li>
+                    <li>防火墙规则是否正确</li>
+                  </ul>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <>
+              <p style={{ fontSize: 12, color: "#aaa", marginBottom: 12, marginTop: 8 }}>
+                API 地址: {apiUrl}
+              </p>
+              <button
+                onClick={() => mutate()}
+                style={{
+                  padding: "8px 16px",
+                  background: "#ff3b30",
+                  border: "none",
+                  borderRadius: 6,
+                  color: "#fff",
+                  fontSize: 14,
+                  cursor: "pointer",
+                }}
+              >
+                重试
+              </button>
+            </>
+          )}
         </div>
       )}
 
@@ -885,5 +963,6 @@ function ChargerCard({ charger, offline, timeAgo, onUpdate, apiBase, onShowChart
     </div>
   );
 }
+
 
 

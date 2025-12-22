@@ -138,9 +138,13 @@ services:
     ports:
       - "${ADMIN_PORT:-3000}:3000"
     environment:
-      # 前端会自动检测当前页面的 hostname 并使用相同 hostname + 端口 9000
+      # 前端API地址配置（必须设置！）
+      # 方式1：通过环境变量手动指定（推荐）
+      # 设置方式：export NEXT_PUBLIC_CSMS_HTTP=http://47.236.134.99:9000
+      # 或者在 .env 文件中设置：NEXT_PUBLIC_CSMS_HTTP=http://47.236.134.99:9000
+      # 方式2：如果不设置，前端会自动检测当前页面的 hostname 并使用相同 hostname + 端口 9000
       # 例如：访问 http://47.236.134.99:3000 时，会自动使用 http://47.236.134.99:9000
-      # 如果需要手动指定，可以设置环境变量：NEXT_PUBLIC_CSMS_HTTP=http://your-ip:9000
+      # 注意：如果访问URL包含占位符（如 your-server-ip），会导致连接失败
       - NEXT_PUBLIC_CSMS_HTTP=${NEXT_PUBLIC_CSMS_HTTP:-}
     depends_on:
       - csms
