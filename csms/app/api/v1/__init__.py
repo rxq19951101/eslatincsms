@@ -33,6 +33,7 @@ def register_routes():
         ("admin", "/admin", "管理功能"),
         ("charger_management", "/charger-management", "新充电桩管理"),
         ("statistics", "/statistics", "统计数据"),
+        ("devices", "/devices", "设备管理"),
     ]
     
     for module_name, prefix, tag in routes_config:

@@ -40,6 +40,8 @@ show_help() {
     echo "  clean-volumes - 清理所有数据卷和镜像（危险，会删除所有数据）"
     echo "  test-prod    - 本地测试生产环境配置"
     echo "  down          - 停止并删除容器"
+    echo "  cleanup-db    - 清理无效的充电桩数据（预览模式）"
+    echo "  cleanup-db-exec - 清理无效的充电桩数据（实际执行）"
     echo "  help          - 显示此帮助信息"
     echo ""
 }
@@ -597,6 +599,28 @@ main() {
             ;;
         down)
             down_services
+            ;;
+        cleanup-db)
+            echo -e "${BLUE}清理无效的充电桩数据（预览模式）...${NC}"
+            if ! docker compose -f "$COMPOSE_FILE" ps | grep -q "ocpp-csms-prod.*Up"; then
+                echo -e "${RED}❌ CSMS容器未运行，请先启动服务${NC}"
+                exit 1
+            fi
+            docker compose -f "$COMPOSE_FILE" exec -T csms python scripts/cleanup_invalid_charge_points.py
+            ;;
+        cleanup-db-exec)
+            echo -e "${YELLOW}⚠️  警告：将实际删除无效的充电桩数据！${NC}"
+            read -p "确认要继续吗？(yes/no): " confirm
+            if [ "$confirm" != "yes" ]; then
+                echo "已取消操作"
+                exit 0
+            fi
+            if ! docker compose -f "$COMPOSE_FILE" ps | grep -q "ocpp-csms-prod.*Up"; then
+                echo -e "${RED}❌ CSMS容器未运行，请先启动服务${NC}"
+                exit 1
+            fi
+            echo -e "${BLUE}执行清理操作...${NC}"
+            docker compose -f "$COMPOSE_FILE" exec -T csms python scripts/cleanup_invalid_charge_points.py --execute
             ;;
         help|--help|-h)
             show_help

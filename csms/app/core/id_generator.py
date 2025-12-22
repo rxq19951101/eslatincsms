@@ -38,15 +38,21 @@ def generate_site_id(name: Optional[str] = None) -> str:
 
 
 def generate_charge_point_id(serial_number: Optional[str] = None, vendor: Optional[str] = None) -> str:
-    """生成充电桩ID（格式：cp_<serial_number> 或 cp_<short_uuid>）"""
+    """生成充电桩ID（格式：cp_<serial_number>_<short_uuid> 或 cp_<short_uuid>）
+    
+    注意：即使提供了序列号，也会添加UUID后缀以确保唯一性，避免序列号冲突
+    """
+    short_uuid = generate_short_uuid()
     if serial_number:
-        # 如果提供了序列号，使用序列号
-        return f"cp_{serial_number}"
+        # 如果提供了序列号，使用序列号+UUID后缀确保唯一性
+        # 限制序列号长度，避免ID过长
+        serial_part = serial_number[:20] if len(serial_number) > 20 else serial_number
+        return f"cp_{serial_part}_{short_uuid}"
     if vendor:
-        # 如果提供了厂商，使用厂商前缀
+        # 如果提供了厂商，使用厂商前缀+UUID
         vendor_part = "".join(c for c in vendor.lower() if c.isalnum())[:5]
-        return f"cp_{vendor_part}_{generate_short_uuid()}"
-    return f"cp_{generate_short_uuid()}"
+        return f"cp_{vendor_part}_{short_uuid}"
+    return f"cp_{short_uuid}"
 
 
 def generate_order_id(charge_point_id: Optional[str] = None, transaction_id: Optional[int] = None) -> str:

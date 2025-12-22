@@ -8,7 +8,7 @@ from app.database.models import (
     Base,
     # 新表结构
     Site, ChargePoint, EVSE, EVSEStatus,
-    DeviceType, Device,
+    Device,
     ChargingSession, MeterValue,
     Order, Invoice, Payment,
     Tariff, PricingSnapshot,
@@ -34,7 +34,6 @@ __all__ = [
     "ChargePoint",
     "EVSE",
     "EVSEStatus",
-    "DeviceType",
     "Device",
     "ChargingSession",
     "MeterValue",

@@ -17,6 +17,8 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
+COPY scripts ./scripts
+COPY tests ./tests
 
 ENV PORT=9000
 EXPOSE 9000

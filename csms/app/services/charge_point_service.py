@@ -8,7 +8,7 @@ from typing import Optional, Dict, Any
 from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 from app.database.models import (
-    Site, ChargePoint, EVSE, EVSEStatus, Device, DeviceType,
+    Site, ChargePoint, EVSE, EVSEStatus, Device,
     ChargingSession, DeviceEvent, DeviceConfig, ChargePointConfig
 )
 from app.core.id_generator import generate_site_id, generate_charge_point_id
@@ -56,24 +56,77 @@ class ChargePointService:
                     device_serial_number = None
             
             # 创建默认站点（如果不存在）
+            # 优先查找 "default_site"（向后兼容），如果不存在则创建新的唯一站点
             default_site = db.query(Site).filter(Site.id == "default_site").first()
             if not default_site:
-                default_site = Site(
-                    id="default_site",
-                    name="默认站点",
-                    address="未设置",
-                    latitude=0.0,
-                    longitude=0.0
-                )
-                db.add(default_site)
-                db.flush()
+                # 尝试查找是否有其他默认站点
+                default_site = db.query(Site).filter(Site.name == "默认站点").first()
+                if not default_site:
+                    # 生成唯一的站点ID
+                    site_id = generate_site_id("默认站点")
+                    # 确保站点ID唯一（如果冲突则重新生成）
+                    max_retries = 10
+                    retry_count = 0
+                    while db.query(Site).filter(Site.id == site_id).first() and retry_count < max_retries:
+                        site_id = generate_site_id("默认站点")
+                        retry_count += 1
+                    if retry_count >= max_retries:
+                        # 如果多次重试仍然冲突，使用UUID
+                        from app.core.id_generator import generate_uuid
+                        site_id = f"site_{generate_uuid()[:16]}"
+                        logger.warning(f"站点ID生成冲突，使用UUID: {site_id}")
+                    default_site = Site(
+                        id=site_id,
+                        name="默认站点",
+                        address="未设置",
+                        latitude=0.0,
+                        longitude=0.0
+                    )
+                    db.add(default_site)
+                    db.flush()
+                    logger.info(f"创建新站点: {site_id} (默认站点)")
+            
+            # 检查序列号冲突
+            if serial_number:
+                existing_cp = db.query(ChargePoint).filter(
+                    ChargePoint.serial_number == serial_number
+                ).first()
+                if existing_cp:
+                    logger.warning(
+                        f"序列号 {serial_number} 已被充电桩 {existing_cp.id} 使用，"
+                        f"将生成新的充电桩ID以避免冲突"
+                    )
+                    # 如果序列号冲突，生成新的唯一ID
+                    charge_point_id = None
             
             # 如果charge_point_id未提供，生成新的唯一ID
             if not charge_point_id:
                 charge_point_id = generate_charge_point_id(serial_number=serial_number, vendor=vendor)
+                # 确保ID唯一（如果冲突则重新生成）
+                max_retries = 10
+                retry_count = 0
+                while db.query(ChargePoint).filter(ChargePoint.id == charge_point_id).first() and retry_count < max_retries:
+                    charge_point_id = generate_charge_point_id(serial_number=serial_number, vendor=vendor)
+                    retry_count += 1
+                if retry_count >= max_retries:
+                    # 如果多次重试仍然冲突，使用UUID
+                    from app.core.id_generator import generate_uuid
+                    charge_point_id = f"cp_{generate_uuid()[:16]}"
+                    logger.warning(f"充电桩ID生成冲突，使用UUID: {charge_point_id}")
             # 如果charge_point_id已存在，生成新的唯一ID
             elif db.query(ChargePoint).filter(ChargePoint.id == charge_point_id).first():
+                logger.warning(f"充电桩ID {charge_point_id} 已存在，生成新的唯一ID")
                 charge_point_id = generate_charge_point_id(serial_number=serial_number, vendor=vendor)
+                # 确保新ID唯一
+                max_retries = 10
+                retry_count = 0
+                while db.query(ChargePoint).filter(ChargePoint.id == charge_point_id).first() and retry_count < max_retries:
+                    charge_point_id = generate_charge_point_id(serial_number=serial_number, vendor=vendor)
+                    retry_count += 1
+                if retry_count >= max_retries:
+                    from app.core.id_generator import generate_uuid
+                    charge_point_id = f"cp_{generate_uuid()[:16]}"
+                    logger.warning(f"充电桩ID生成冲突，使用UUID: {charge_point_id}")
             
             # 创建充电桩
             charge_point = ChargePoint(
@@ -182,6 +235,14 @@ class ChargePointService:
         previous_status: Optional[str] = None
     ) -> EVSEStatus:
         """更新EVSE状态"""
+        # 首先检查ChargePoint是否存在
+        charge_point = db.query(ChargePoint).filter(
+            ChargePoint.id == charge_point_id
+        ).first()
+        
+        if not charge_point:
+            raise ValueError(f"ChargePoint {charge_point_id} 不存在，无法更新EVSE状态")
+        
         evse = db.query(EVSE).filter(
             EVSE.charge_point_id == charge_point_id,
             EVSE.evse_id == evse_id
@@ -280,13 +341,8 @@ class ChargePointService:
         ).first()
     
     @staticmethod
-    def get_or_create_device_type(
-        db: Session,
-        vendor: Optional[str] = None
-    ) -> DeviceType:
-        """获取或创建设备类型
-        根据vendor推断type_code，如果不存在则创建默认类型
-        """
+    def infer_type_code(vendor: Optional[str] = None) -> str:
+        """根据vendor推断type_code"""
         # 根据vendor推断type_code（简单映射，可以根据实际情况扩展）
         type_code_map = {
             "zcf": "zcf",
@@ -297,56 +353,26 @@ class ChargePointService:
         }
         
         # 尝试从vendor推断type_code
-        type_code = None
         if vendor:
             vendor_lower = vendor.lower().strip()
             for key, code in type_code_map.items():
                 if key in vendor_lower:
-                    type_code = code
-                    break
+                    return code
         
         # 如果没有匹配到，使用默认类型
-        if not type_code:
-            type_code = "default"
-        
-        # 查找或创建设备类型
-        device_type = db.query(DeviceType).filter(
-            DeviceType.type_code == type_code
-        ).first()
-        
-        if not device_type:
-            # 创建默认设备类型（使用测试密钥，生产环境应该使用强随机密钥）
-            try:
-                from app.core.crypto import encrypt_master_secret
-                default_master_secret = "default_master_secret_12345678901234567890"
-                encrypted_secret = encrypt_master_secret(default_master_secret)
-            except ImportError:
-                # 如果加密模块不可用，使用简单的哈希（仅用于开发环境）
-                import hashlib
-                default_master_secret = "default_master_secret_12345678901234567890"
-                encrypted_secret = hashlib.sha256(default_master_secret.encode()).hexdigest()
-                logger.warning("加密模块不可用，使用简单哈希（仅用于开发环境）")
-            
-            device_type = DeviceType(
-                type_code=type_code,
-                type_name=vendor or "默认设备类型",
-                master_secret_encrypted=encrypted_secret,
-                encryption_algorithm="AES-256-GCM"
-            )
-            db.add(device_type)
-            db.flush()
-            logger.info(f"创建新设备类型: {type_code}")
-        
-        return device_type
+        return "default"
     
     @staticmethod
     def get_or_create_device(
         db: Session,
         device_serial_number: str,
-        vendor: Optional[str] = None
+        vendor: Optional[str] = None,
+        type_code: Optional[str] = None
     ) -> Optional[Device]:
         """获取或创建设备
         如果device_serial_number无效（长度不是15位），返回None
+        
+        注意：如果设备序列号已存在，会检查是否已被其他充电桩使用
         """
         if not device_serial_number or len(device_serial_number) != 15:
             logger.warning(f"设备序列号无效: {device_serial_number}（必须是15位）")
@@ -358,19 +384,38 @@ class ChargePointService:
         ).first()
         
         if not device:
-            # 获取或创建设备类型
-            device_type = ChargePointService.get_or_create_device_type(db, vendor)
+            # 推断设备类型代码（如果未提供）
+            if not type_code:
+                type_code = ChargePointService.infer_type_code(vendor)
             
             # 生成MQTT信息
-            mqtt_client_id = f"{device_type.type_code}&{device_serial_number}"
+            mqtt_client_id = f"{type_code}&{device_serial_number}"
             mqtt_username = device_serial_number
             
-            # 创建设备
+            # 为每个设备生成独立的master_secret（使用设备序列号作为种子）
+            try:
+                from app.core.crypto import encrypt_master_secret
+                import secrets
+                # 生成随机master_secret（生产环境应该使用强随机密钥）
+                # 使用设备序列号作为种子的一部分，确保每个设备都有唯一的secret
+                master_secret = secrets.token_urlsafe(32) + device_serial_number[:8]
+                encrypted_secret = encrypt_master_secret(master_secret)
+            except ImportError:
+                # 如果加密模块不可用，使用简单的哈希（仅用于开发环境）
+                import hashlib
+                import secrets
+                master_secret = f"device_secret_{device_serial_number}_{secrets.token_urlsafe(16)}"
+                encrypted_secret = hashlib.sha256(master_secret.encode()).hexdigest()
+                logger.warning("加密模块不可用，使用简单哈希（仅用于开发环境）")
+            
+            # 创建设备（每个设备独立存储master_secret）
             device = Device(
                 serial_number=device_serial_number,
-                device_type_id=device_type.id,
+                type_code=type_code,
                 mqtt_client_id=mqtt_client_id,
                 mqtt_username=mqtt_username,
+                master_secret_encrypted=encrypted_secret,
+                encryption_algorithm="AES-256-GCM",
                 is_active=True,
                 last_connected=datetime.now(timezone.utc)
             )
@@ -394,7 +439,17 @@ class ChargePointService:
                 db.add(config)
             
             db.flush()
-            logger.info(f"创建新设备: {device_serial_number} (type: {device_type.type_code})")
+            logger.info(f"创建新设备: {device_serial_number} (type: {type_code})")
+        else:
+            # 设备已存在，检查是否已被其他充电桩使用
+            existing_cp = db.query(ChargePoint).filter(
+                ChargePoint.device_serial_number == device_serial_number
+            ).first()
+            if existing_cp:
+                logger.warning(
+                    f"设备序列号 {device_serial_number} 已被充电桩 {existing_cp.id} 使用。"
+                    f"如果这是新设备，请使用不同的序列号。"
+                )
         
         return device
     

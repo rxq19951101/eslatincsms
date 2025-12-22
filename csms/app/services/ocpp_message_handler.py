@@ -7,6 +7,7 @@ import logging
 from typing import Dict, Any, Optional, Tuple
 from datetime import datetime, timezone
 from sqlalchemy.orm import Session
+from typing import Optional
 from app.database.base import SessionLocal
 from app.database.models import DeviceEvent, Device
 from app.services.charge_point_service import ChargePointService
@@ -59,14 +60,19 @@ class OCPPMessageHandler:
         self,
         charge_point_id: str,
         payload: Dict[str, Any],
-        device_serial_number: Optional[str] = None
+        device_serial_number: Optional[str] = None,
+        db: Optional[Session] = None
     ) -> Dict[str, Any]:
         """处理BootNotification消息
         
         注意：对于MQTT传输，设备认证在broker层完成，能到达这里的消息说明设备已通过认证。
         对于WebSocket传输，可能没有device_serial_number，需要特殊处理。
         """
-        db = SessionLocal()
+        if db is None:
+            db = SessionLocal()
+            should_close = True
+        else:
+            should_close = False
         try:
             vendor = str(payload.get("vendor", "")).strip() or str(payload.get("chargePointVendor", "")).strip()
             model = str(payload.get("model", "")).strip() or str(payload.get("chargePointModel", "")).strip()
@@ -152,19 +158,26 @@ class OCPPMessageHandler:
             }
         except Exception as e:
             logger.error(f"[{charge_point_id}] BootNotification处理错误: {e}", exc_info=True)
-            db.rollback()
+            if should_close:
+                db.rollback()
             return {"status": "Rejected", "error": str(e)}
         finally:
-            db.close()
+            if should_close:
+                db.close()
     
     async def handle_heartbeat(
         self,
         charge_point_id: str,
         payload: Dict[str, Any],
-        device_serial_number: Optional[str] = None
+        device_serial_number: Optional[str] = None,
+        db: Optional[Session] = None
     ) -> Dict[str, Any]:
         """处理Heartbeat消息"""
-        db = SessionLocal()
+        if db is None:
+            db = SessionLocal()
+            should_close = True
+        else:
+            should_close = False
         try:
             # 记录心跳
             self.charge_point_service.record_heartbeat(
@@ -177,21 +190,42 @@ class OCPPMessageHandler:
             return {"currentTime": now_iso()}
         except Exception as e:
             logger.error(f"[{charge_point_id}] Heartbeat处理错误: {e}", exc_info=True)
-            db.rollback()
+            if should_close:
+                db.rollback()
             return {"currentTime": now_iso()}
         finally:
-            db.close()
+            if should_close:
+                db.close()
     
     async def handle_status_notification(
         self,
         charge_point_id: str,
         payload: Dict[str, Any],
-        evse_id: int = 1
+        evse_id: int = 1,
+        db: Optional[Session] = None
     ) -> Dict[str, Any]:
         """处理StatusNotification消息"""
-        db = SessionLocal()
+        if db is None:
+            db = SessionLocal()
+            should_close = True
+        else:
+            should_close = False
         try:
-            from app.database.models import ChargingSession
+            from app.database.models import ChargingSession, ChargePoint
+            
+            # 首先检查ChargePoint是否存在
+            charge_point = db.query(ChargePoint).filter(
+                ChargePoint.id == charge_point_id
+            ).first()
+            
+            if not charge_point:
+                logger.warning(
+                    f"ChargePoint {charge_point_id} 不存在，拒绝StatusNotification请求。"
+                    f"设备必须先发送BootNotification。"
+                )
+                if should_close:
+                    db.close()
+                return {}
             
             new_status = str(payload.get("status", "Unknown"))
             
@@ -230,19 +264,26 @@ class OCPPMessageHandler:
             return {}
         except Exception as e:
             logger.error(f"[{charge_point_id}] StatusNotification处理错误: {e}", exc_info=True)
-            db.rollback()
+            if should_close:
+                db.rollback()
             return {}
         finally:
-            db.close()
+            if should_close:
+                db.close()
     
     async def handle_start_transaction(
         self,
         charge_point_id: str,
         payload: Dict[str, Any],
-        evse_id: int = 1
+        evse_id: int = 1,
+        db: Optional[Session] = None
     ) -> Dict[str, Any]:
         """处理StartTransaction消息"""
-        db = SessionLocal()
+        if db is None:
+            db = SessionLocal()
+            should_close = True
+        else:
+            should_close = False
         try:
             from app.database.models import ChargingSession
             
@@ -268,18 +309,26 @@ class OCPPMessageHandler:
             }
         except Exception as e:
             logger.error(f"[{charge_point_id}] StartTransaction处理错误: {e}", exc_info=True)
-            db.rollback()
+            if should_close:
+                db.rollback()
+            transaction_id = payload.get("transactionId", 0)
             return {"transactionId": transaction_id, "idTagInfo": {"status": "Rejected"}}
         finally:
-            db.close()
+            if should_close:
+                db.close()
     
     async def handle_stop_transaction(
         self,
         charge_point_id: str,
-        payload: Dict[str, Any]
+        payload: Dict[str, Any],
+        db: Optional[Session] = None
     ) -> Dict[str, Any]:
         """处理StopTransaction消息"""
-        db = SessionLocal()
+        if db is None:
+            db = SessionLocal()
+            should_close = True
+        else:
+            should_close = False
         try:
             from app.database.models import ChargingSession
             
@@ -306,18 +355,25 @@ class OCPPMessageHandler:
                 }
         except Exception as e:
             logger.error(f"[{charge_point_id}] StopTransaction处理错误: {e}", exc_info=True)
-            db.rollback()
+            if should_close:
+                db.rollback()
             return {"idTagInfo": {"status": "Accepted"}}
         finally:
-            db.close()
+            if should_close:
+                db.close()
     
     async def handle_meter_values(
         self,
         charge_point_id: str,
-        payload: Dict[str, Any]
+        payload: Dict[str, Any],
+        db: Optional[Session] = None
     ) -> Dict[str, Any]:
         """处理MeterValues消息"""
-        db = SessionLocal()
+        if db is None:
+            db = SessionLocal()
+            should_close = True
+        else:
+            should_close = False
         try:
             from app.database.models import ChargingSession
             
@@ -364,10 +420,12 @@ class OCPPMessageHandler:
             return {}
         except Exception as e:
             logger.error(f"[{charge_point_id}] MeterValues处理错误: {e}", exc_info=True)
-            db.rollback()
+            if should_close:
+                db.rollback()
             return {}
         finally:
-            db.close()
+            if should_close:
+                db.close()
     
     async def handle_authorize(
         self,

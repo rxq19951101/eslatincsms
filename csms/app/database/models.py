@@ -147,49 +147,26 @@ class EVSEStatus(Base):
 
 # ==================== 设备认证层 ====================
 
-class DeviceType(Base):
-    """设备类型表
-    存储不同品牌的充电桩类型信息
-    使用master_secret（加密存储）而不是明文密码
-    """
-    __tablename__ = "device_types"
-    
-    id = Column(Integer, primary_key=True, index=True)
-    type_code = Column(String(50), nullable=False, unique=True, index=True)  # 设备类型代码，如 "zcf", "tesla", "abb"
-    type_name = Column(String(100), nullable=False)  # 设备类型名称
-    
-    # 安全：使用加密的master secret，而不是明文密码
-    master_secret_encrypted = Column(Text, nullable=False)  # 加密存储的master secret
-    encryption_algorithm = Column(String(50), default="AES-256-GCM")  # 加密算法
-    
-    # 元数据
-    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
-    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
-    is_active = Column(Boolean, default=True)
-    
-    # 关系
-    devices = relationship("Device", back_populates="device_type", cascade="all, delete-orphan")
-    
-    __table_args__ = (
-        Index('idx_device_types_code', 'type_code'),
-    )
-
-
 class Device(Base):
     """设备表
     存储设备SN号和MQTT认证信息
+    每个设备独立存储master_secret（加密）
     """
     __tablename__ = "devices"
     
     # 设备SN号（15位字符串，主键）
     serial_number = Column(String(15), primary_key=True, index=True)
     
-    # 关联设备类型（品牌）
-    device_type_id = Column(Integer, ForeignKey("device_types.id"), nullable=False, index=True)
+    # 设备类型代码（用于MQTT topic和client_id，如 "zcf", "tesla", "abb"）
+    type_code = Column(String(50), nullable=False, index=True, default="default")  # 设备类型代码
     
     # MQTT认证信息
     mqtt_client_id = Column(String(200), nullable=False, unique=True, index=True)  # {type_code}&{serial_number}
     mqtt_username = Column(String(15), nullable=False, unique=True, index=True)  # {serial_number}
+    
+    # 安全：每个设备独立存储加密的master secret
+    master_secret_encrypted = Column(Text, nullable=False)  # 加密存储的master secret
+    encryption_algorithm = Column(String(50), default="AES-256-GCM")  # 加密算法
     
     # 设备状态
     is_active = Column(Boolean, default=True)
@@ -200,11 +177,10 @@ class Device(Base):
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
     
     # 关系
-    device_type = relationship("DeviceType", back_populates="devices")
     charge_points = relationship("ChargePoint", foreign_keys="ChargePoint.device_serial_number", back_populates="device")
     
     __table_args__ = (
-        Index('idx_devices_type', 'device_type_id'),
+        Index('idx_devices_type_code', 'type_code'),
         Index('idx_devices_mqtt_client_id', 'mqtt_client_id'),
         Index('idx_devices_mqtt_username', 'mqtt_username'),
     )

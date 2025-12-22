@@ -8,7 +8,7 @@
 import logging
 from typing import Optional, Tuple, List, Dict
 from sqlalchemy.orm import Session
-from app.database.models import Device, DeviceType, ChargePoint
+from app.database.models import Device, ChargePoint
 from app.core.crypto import derive_password, decrypt_master_secret
 
 logger = logging.getLogger("ocpp_csms")
@@ -81,28 +81,15 @@ class MQTTAuthService:
                 logger.warning(f"Username mismatch for device {serial_number}")
                 return False, "Username mismatch"
             
-            # 验证密码（从设备类型获取）
-            device_type = db.query(DeviceType).filter(
-                DeviceType.id == device.device_type_id
-            ).first()
-            
-            if not device_type:
-                logger.error(f"Device type not found for device {serial_number}")
-                return False, "Device type not found"
-            
-            if not device_type.is_active:
-                logger.warning(f"Device type is inactive: {device_type.type_code}")
-                return False, "Device type is inactive"
-            
             # 验证type_code是否匹配
-            if device_type.type_code != type_code:
-                logger.warning(f"Device type code mismatch: expected {device_type.type_code}, got {type_code}")
+            if device.type_code != type_code:
+                logger.warning(f"Device type code mismatch: expected {device.type_code}, got {type_code}")
                 return False, "Device type code mismatch"
             
-            # 使用HMAC派生密码进行验证
+            # 使用HMAC派生密码进行验证（从设备直接获取master_secret）
             try:
                 # 解密master secret
-                master_secret = decrypt_master_secret(device_type.master_secret_encrypted)
+                master_secret = decrypt_master_secret(device.master_secret_encrypted)
                 # 派生该设备的密码
                 expected_password = derive_password(master_secret, serial_number)
                 
@@ -118,7 +105,7 @@ class MQTTAuthService:
             device.last_connected = datetime.now(timezone.utc)
             db.commit()
             
-            logger.info(f"Device authenticated successfully: {serial_number} (type: {device_type.type_code})")
+            logger.info(f"Device authenticated successfully: {serial_number} (type: {device.type_code})")
             return True, None
             
         except Exception as e:
@@ -175,12 +162,8 @@ class MQTTAuthService:
                 return False, "Serial number in topic does not match username"
             
             # 验证设备类型
-            device_type = db.query(DeviceType).filter(
-                DeviceType.id == device.device_type_id
-            ).first()
-            
-            if not device_type or device_type.type_code != type_code:
-                return False, f"Device type mismatch: expected {device_type.type_code if device_type else 'unknown'}, got {type_code}"
+            if device.type_code != type_code:
+                return False, f"Device type mismatch: expected {device.type_code}, got {type_code}"
             
             # 权限规则：
             # - 设备只能发布到 {type_code}/{serial_number}/user/up
@@ -232,11 +215,14 @@ class MQTTAuthService:
         return None
     
     @staticmethod
-    def get_all_active_device_types(db: Session) -> List[DeviceType]:
-        """获取所有激活的设备类型（用于动态订阅topic）"""
-        return db.query(DeviceType).filter(
-            DeviceType.is_active == True
+    def get_all_active_device_types(db: Session) -> List[dict]:
+        """获取所有激活的设备类型代码（用于动态订阅topic）"""
+        # 从设备表中获取所有唯一的type_code
+        devices = db.query(Device).filter(
+            Device.is_active == True
         ).all()
+        type_codes = list(set([d.type_code for d in devices]))
+        return [{"type_code": tc} for tc in type_codes]
     
     @staticmethod
     def build_topic_up(type_code: str, serial_number: str) -> str:
@@ -262,15 +248,10 @@ class MQTTAuthService:
             ).first()
             
             if device:
-                device_type = db.query(DeviceType).filter(
-                    DeviceType.id == device.device_type_id
-                ).first()
-                
-                if device_type:
-                    return {
-                        "type_code": device_type.type_code,
-                        "serial_number": device.serial_number
-                    }
+                return {
+                    "type_code": device.type_code,
+                    "serial_number": device.serial_number
+                }
         
         # 如果charge_point_id本身就是serial_number，尝试直接查找设备
         device = db.query(Device).filter(
@@ -278,14 +259,9 @@ class MQTTAuthService:
         ).first()
         
         if device:
-            device_type = db.query(DeviceType).filter(
-                DeviceType.id == device.device_type_id
-            ).first()
-            
-            if device_type:
-                return {
-                    "type_code": device_type.type_code,
-                    "serial_number": device.serial_number
-                }
+            return {
+                "type_code": device.type_code,
+                "serial_number": device.serial_number
+            }
         
         return None

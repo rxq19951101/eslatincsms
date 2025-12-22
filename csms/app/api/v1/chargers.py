@@ -5,6 +5,7 @@
 
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy import or_, func
 from app.database import get_db, ChargePoint, Site, EVSE, EVSEStatus, Tariff
@@ -13,6 +14,13 @@ from app.core.logging_config import get_logger
 logger = get_logger("ocpp_csms")
 
 router = APIRouter()
+
+
+class CreateChargerRequest(BaseModel):
+    id: str
+    vendor: Optional[str] = None
+    model: Optional[str] = None
+    site_id: Optional[str] = None
 
 
 @router.get("", summary="获取所有充电桩")
@@ -154,4 +162,95 @@ def get_charger(charge_point_id: str, db: Session = Depends(get_db)) -> dict:
     }
     
     logger.info(f"[API] GET /api/v1/chargers/{charge_point_id} 成功 | 状态: {status}")
+
+
+@router.post("", summary="创建充电桩", status_code=201)
+def create_charger(
+    req: CreateChargerRequest,
+    db: Session = Depends(get_db)
+) -> dict:
+    """创建新的充电桩"""
+    logger.info(f"[API] POST /api/v1/chargers | 充电桩ID: {req.id}")
+    
+    # 检查是否已存在
+    existing = db.query(ChargePoint).filter(ChargePoint.id == req.id).first()
+    if existing:
+        logger.warning(f"[API] POST /api/v1/chargers | 充电桩 {req.id} 已存在")
+        raise HTTPException(status_code=400, detail=f"充电桩 {req.id} 已存在")
+    
+    # 创建新充电桩
+    charge_point = ChargePoint(
+        id=req.id,
+        vendor=req.vendor,
+        model=req.model,
+        site_id=req.site_id,
+        is_active=True
+    )
+    db.add(charge_point)
+    db.commit()
+    db.refresh(charge_point)
+    
+    logger.info(f"[API] POST /api/v1/chargers 成功 | 充电桩ID: {req.id}")
+    return {
+        "id": charge_point.id,
+        "vendor": charge_point.vendor,
+        "model": charge_point.model,
+        "site_id": charge_point.site_id,
+        "is_active": charge_point.is_active,
+    }
+
+
+class UpdateChargerRequest(BaseModel):
+    vendor: Optional[str] = None
+    model: Optional[str] = None
+
+
+@router.put("/{charge_point_id}", summary="更新充电桩")
+def update_charger(
+    charge_point_id: str,
+    req: UpdateChargerRequest,
+    db: Session = Depends(get_db)
+) -> dict:
+    """更新充电桩信息"""
+    logger.info(f"[API] PUT /api/v1/chargers/{charge_point_id}")
+    
+    charge_point = db.query(ChargePoint).filter(ChargePoint.id == charge_point_id).first()
+    if not charge_point:
+        logger.warning(f"[API] PUT /api/v1/chargers/{charge_point_id} | 充电桩未找到")
+        raise HTTPException(status_code=404, detail=f"充电桩 {charge_point_id} 未找到")
+    
+    if req.vendor is not None:
+        charge_point.vendor = req.vendor
+    if req.model is not None:
+        charge_point.model = req.model
+    
+    db.commit()
+    db.refresh(charge_point)
+    
+    logger.info(f"[API] PUT /api/v1/chargers/{charge_point_id} 成功")
+    return {
+        "id": charge_point.id,
+        "vendor": charge_point.vendor,
+        "model": charge_point.model,
+    }
+
+
+@router.delete("/{charge_point_id}", summary="删除充电桩", status_code=200)
+def delete_charger(
+    charge_point_id: str,
+    db: Session = Depends(get_db)
+) -> dict:
+    """删除充电桩"""
+    logger.info(f"[API] DELETE /api/v1/chargers/{charge_point_id}")
+    
+    charge_point = db.query(ChargePoint).filter(ChargePoint.id == charge_point_id).first()
+    if not charge_point:
+        logger.warning(f"[API] DELETE /api/v1/chargers/{charge_point_id} | 充电桩未找到")
+        raise HTTPException(status_code=404, detail=f"充电桩 {charge_point_id} 未找到")
+    
+    db.delete(charge_point)
+    db.commit()
+    
+    logger.info(f"[API] DELETE /api/v1/chargers/{charge_point_id} 成功")
+    return {"message": f"充电桩 {charge_point_id} 已删除"}
 

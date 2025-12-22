@@ -391,7 +391,9 @@ def get_charger_status_timeline(
             last_record = hour_statuses[-1]
             last_status = last_record.event_data.get("status", "Unknown") if isinstance(last_record.event_data, dict) else "Unknown"
             if last_status in status_counts:
-            status_counts[last_status] = 1
+                status_counts[last_status] = 1
+            else:
+                status_counts[last_status] = 1
         else:
             # 如果没有状态变化，使用当前状态
             if current_status in status_counts:

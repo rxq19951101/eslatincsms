@@ -625,9 +625,9 @@ def handle_charger_offline(charge_point_id: str) -> None:
                 
                 for evse_status in evse_statuses:
                     current_status = evse_status.status
-        
-        # 只有在非离线状态时才更新为离线
-        # 注意：如果充电桩正在充电，不应该因为心跳超时而标记为离线
+                    
+                    # 只有在非离线状态时才更新为离线
+                    # 注意：如果充电桩正在充电，不应该因为心跳超时而标记为离线
                     if current_status not in ["Charging", "Unavailable"]:
                         # 检查是否有活跃会话
                         if evse_status.current_session_id:
@@ -644,14 +644,16 @@ def handle_charger_offline(charge_point_id: str) -> None:
                         evse_status.status = "Unavailable"
                         evse_status.last_seen = datetime.now(timezone.utc)
                         db.commit()
-            
-            logger.info(
+                        logger.info(
                             f"[{charge_point_id}] 充电桩离线检测：EVSE状态已更新为 Unavailable"
-            )
-        else:
-            logger.debug(
+                        )
+                    else:
+                        logger.debug(
                             f"[{charge_point_id}] 充电桩离线检测：当前状态为 {current_status}，跳过更新"
                         )
+            except Exception as e:
+                logger.error(f"[{charge_point_id}] 充电桩离线检测处理错误: {e}", exc_info=True)
+                db.rollback()
             finally:
                 db.close()
         else:
@@ -1027,7 +1029,7 @@ def chargers_list() -> List[Dict[str, Any]]:
     
     if not DATABASE_AVAILABLE:
         # 降级到Redis
-    chargers = load_chargers()
+        chargers = load_chargers()
         logger.info(f"[API] GET /chargers 成功 | 返回 {len(chargers)} 个充电桩（Redis）")
         return chargers
     
@@ -1128,30 +1130,36 @@ async def update_location(req: UpdateLocationRequest) -> RemoteResponse:
                     site.address = req.address
             
             db.commit()
-    
-    logger.info(
-        f"[API] POST /api/updateLocation 成功 | "
-        f"充电桩ID: {req.chargePointId} | "
-        f"位置: ({req.latitude}, {req.longitude})"
-    )
+            
+            logger.info(
+                f"[API] POST /api/updateLocation 成功 | "
+                f"充电桩ID: {req.chargePointId} | "
+                f"位置: ({req.latitude}, {req.longitude})"
+            )
+        except Exception as e:
+            db.rollback()
+            logger.error(f"[API] POST /api/updateLocation 失败: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"更新位置失败: {str(e)}")
+        finally:
+            db.close()
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[API] POST /api/updateLocation 失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"更新位置失败: {str(e)}")
     
     return RemoteResponse(
         success=True,
         message="Location updated successfully",
-                details={
-                    "chargePointId": req.chargePointId,
-                    "location": {
-                        "latitude": req.latitude,
-                        "longitude": req.longitude,
-                        "address": req.address
-                    }
-                },
+        details={
+            "chargePointId": req.chargePointId,
+            "location": {
+                "latitude": req.latitude,
+                "longitude": req.longitude,
+                "address": req.address
+            }
+        },
     )
-        finally:
-            db.close()
-    except Exception as e:
-        logger.error(f"更新位置失败: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"更新位置失败: {str(e)}")
 
 
 @app.post("/api/updatePrice", response_model=RemoteResponse, tags=["REST"])
@@ -1200,25 +1208,29 @@ async def update_price(req: UpdatePriceRequest) -> RemoteResponse:
                 tariff.base_price_per_kwh = req.pricePerKwh
             
             db.commit()
-    
-    logger.info(
-        f"[API] POST /api/updatePrice 成功 | "
-        f"充电桩ID: {req.chargePointId} | "
-        f"价格: {req.pricePerKwh} COP/kWh"
-    )
+            
+            logger.info(
+                f"[API] POST /api/updatePrice 成功 | "
+                f"充电桩ID: {req.chargePointId} | "
+                f"价格: {req.pricePerKwh} COP/kWh"
+            )
+        except Exception as e:
+            db.rollback()
+            logger.error(f"[API] POST /api/updatePrice 失败: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"更新价格失败: {str(e)}")
+        finally:
+            db.close()
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[API] POST /api/updatePrice 失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"更新价格失败: {str(e)}")
     
     return RemoteResponse(
         success=True,
         message="Price updated successfully",
         details={"chargePointId": req.chargePointId, "pricePerKwh": req.pricePerKwh},
     )
-        finally:
-            db.close()
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"更新价格失败: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"更新价格失败: {str(e)}")
 
 
 @app.post("/api/remoteStart", response_model=RemoteResponse, tags=["REST"])
@@ -1405,7 +1417,7 @@ async def remote_stop(req: RemoteStopRequest) -> RemoteResponse:
                     charger = next((c for c in load_chargers() if c["id"] == req.chargePointId), None)
                     if charger:
                         session = charger.get("session", {})
-                txn_id = session.get("transaction_id")
+                        txn_id = session.get("transaction_id")
                         order_id = session.get("order_id")
                 
                 if not txn_id:
@@ -1479,12 +1491,12 @@ async def remote_stop(req: RemoteStopRequest) -> RemoteResponse:
                 # 更新充电桩状态（兼容层）
                 charger = next((c for c in load_chargers() if c["id"] == req.chargePointId), None)
                 if charger:
-                charger["physical_status"] = "Available"
+                    charger["physical_status"] = "Available"
                     session = charger.get("session", {})
-                session["transaction_id"] = None
-                session["order_id"] = None
-                session["authorized"] = False
-                save_charger(charger)
+                    session["transaction_id"] = None
+                    session["order_id"] = None
+                    session["authorized"] = False
+                    save_charger(charger)
                 update_active(req.chargePointId, status="Available", txn_id=None)
                 
                 return RemoteResponse(
@@ -2273,10 +2285,10 @@ def get_orders(userId: str | None = None) -> List[Dict[str, Any]]:
     
     if not DATABASE_AVAILABLE:
         # 降级到Redis
-    if userId:
-        orders = get_orders_by_user(userId)
-    else:
-        orders = get_all_orders()
+        if userId:
+            orders = get_orders_by_user(userId)
+        else:
+            orders = get_all_orders()
         return orders
     
     try:
@@ -2338,11 +2350,11 @@ def get_current_order(chargePointId: str = Query(...), transactionId: int | None
     
     if not DATABASE_AVAILABLE:
         # 降级到Redis逻辑
-    if transactionId:
+        if transactionId:
             order_id = generate_order_id(transaction_id=transactionId)
-        order = get_order(order_id)
-        if order:
-            return order
+            order = get_order(order_id)
+            if order:
+                return order
     
     charger = next((c for c in load_chargers() if c["id"] == chargePointId), None)
     if charger:
@@ -2354,7 +2366,7 @@ def get_current_order(chargePointId: str = Query(...), transactionId: int | None
                 return order
     
     all_orders = get_all_orders()
-        charger_orders = [o for o in all_orders if o.get("charge_point_id") == chargePointId or o.get("charger_id") == chargePointId]
+    charger_orders = [o for o in all_orders if o.get("charge_point_id") == chargePointId or o.get("charger_id") == chargePointId]
     if charger_orders:
         charger_orders.sort(key=lambda x: x.get("start_time", ""), reverse=True)
         ongoing_order = next((o for o in charger_orders if o.get("status") == "ongoing"), None)
@@ -2577,7 +2589,7 @@ async def ocpp_ws(ws: WebSocket, id: str = Query(..., description="Charge Point 
                 
                 # 尝试从payload中提取serial_number（用于BootNotification）
                 device_serial_number = None
-            if action == "BootNotification":
+                if action == "BootNotification":
                     device_serial_number = payload.get("serialNumber")
                 
                 # 调用统一的消息处理函数
@@ -2596,9 +2608,9 @@ async def ocpp_ws(ws: WebSocket, id: str = Query(..., description="Charge Point 
                                  "StartTransaction", "StopTransaction", "MeterValues"]:
                         # 这些消息需要返回响应
                         resp_msg = {
-                    "action": action,
+                            "action": action,
                             **response
-                }
+                        }
                         logger.info(f"[{charge_point_id}] -> OCPP {action}Response | {json.dumps(response)}")
                         await ws.send_text(json.dumps(resp_msg))
                     else:
@@ -2606,15 +2618,15 @@ async def ocpp_ws(ws: WebSocket, id: str = Query(..., description="Charge Point 
                         await ws.send_text(json.dumps({"action": action, **response}))
                 else:
                     # 无响应消息
-                await ws.send_text(json.dumps({"action": action}))
+                    await ws.send_text(json.dumps({"action": action}))
 
             except Exception as e:
                 logger.error(f"[{charge_point_id}] OCPP消息处理错误: {e}", exc_info=True)
                 # 发送错误响应
                 try:
-                await ws.send_text(json.dumps({
+                    await ws.send_text(json.dumps({
                         "error": "InternalError",
-                    "action": action,
+                        "action": action,
                         "detail": str(e)[:200]
                 }))
                 except Exception:
