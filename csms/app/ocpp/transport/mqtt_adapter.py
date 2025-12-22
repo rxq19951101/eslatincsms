@@ -61,6 +61,15 @@ class MQTTAdapter(TransportAdapter):
         
         # 连接到 MQTT broker
         try:
+            logger.info("=" * 60)
+            logger.info("正在初始化 MQTT 连接...")
+            logger.info("=" * 60)
+            logger.info(f"Broker 地址: {self.broker_host}:{self.broker_port}")
+            logger.info(f"客户端 ID: csms_server")
+            logger.info(f"协议版本: MQTTv311")
+            logger.info(f"Keepalive: 60 秒")
+            logger.info("=" * 60)
+            
             self.client.connect(self.broker_host, self.broker_port, 60)
             self.client.loop_start()
             
@@ -113,9 +122,34 @@ class MQTTAdapter(TransportAdapter):
     def _on_connect(self, client: mqtt.Client, userdata, flags, rc):
         """MQTT 连接回调"""
         if rc == 0:
-            logger.info("MQTT 连接成功")
+            logger.info("=" * 60)
+            logger.info("MQTT 连接成功 - 连接信息详情")
+            logger.info("=" * 60)
+            logger.info(f"Broker 地址: {self.broker_host}:{self.broker_port}")
+            logger.info(f"客户端 ID: {client._client_id}")
+            logger.info(f"协议版本: MQTTv311")
+            logger.info(f"连接标志 (flags):")
+            logger.info(f"  - session present: {flags.get('session present', False)}")
+            logger.info(f"  - clean session: {client._clean_session}")
+            logger.info(f"Keepalive: {client._keepalive} 秒")
+            logger.info(f"返回码 (rc): {rc} (0=成功)")
+            logger.info("=" * 60)
         else:
-            logger.error(f"MQTT 连接失败，返回码: {rc}")
+            logger.error("=" * 60)
+            logger.error("MQTT 连接失败 - 连接信息详情")
+            logger.error("=" * 60)
+            logger.error(f"Broker 地址: {self.broker_host}:{self.broker_port}")
+            logger.error(f"客户端 ID: {client._client_id}")
+            logger.error(f"返回码 (rc): {rc}")
+            error_messages = {
+                1: "连接被拒绝 - 协议版本不正确",
+                2: "连接被拒绝 - 客户端标识符无效",
+                3: "连接被拒绝 - 服务器不可用",
+                4: "连接被拒绝 - 用户名或密码错误",
+                5: "连接被拒绝 - 未授权"
+            }
+            logger.error(f"错误说明: {error_messages.get(rc, '未知错误')}")
+            logger.error("=" * 60)
     
     def _on_message(self, client: mqtt.Client, userdata, msg):
         """MQTT 消息接收回调"""
@@ -126,6 +160,7 @@ class MQTTAdapter(TransportAdapter):
             # 解析新格式：{type_code}/{serial_number}/user/up
             if len(topic_parts) != 4:
                 logger.warning(f"无效的 MQTT 主题格式: {topic}，期望格式: {{type_code}}/{{serial_number}}/user/up")
+                logger.warning(f"消息详情: QoS={msg.qos}, MID={msg.mid}, Retain={msg.retain}, Payload长度={len(msg.payload)}")
                 return
             
             type_code = topic_parts[0]
@@ -136,6 +171,7 @@ class MQTTAdapter(TransportAdapter):
             # 验证topic格式
             if category != "user" or direction != "up":
                 logger.warning(f"无效的 MQTT 主题格式: {topic}，期望: {{type_code}}/{{serial_number}}/user/up")
+                logger.warning(f"消息详情: QoS={msg.qos}, MID={msg.mid}, Retain={msg.retain}, Payload长度={len(msg.payload)}")
                 return
             
             # 从serial_number获取charge_point_id（如果设备关联了充电桩）
@@ -151,9 +187,42 @@ class MQTTAdapter(TransportAdapter):
             
             logger.info(f"[{charge_point_id}] <- MQTT OCPP {action} (品牌: {type_code}, SN: {serial_number}) | payload: {payload_data}")
             
+            # 检查是否是第一次连接（新设备）
+            is_first_connection = charge_point_id not in self._connected_chargers
+            
             # 标记充电桩已连接
             self._connected_chargers.add(charge_point_id)
-            logger.info(f"[{charge_point_id}] 已标记为已连接（MQTT），当前已连接充电桩: {len(self._connected_chargers)} 个")
+            
+            if is_first_connection:
+                # 第一次连接时，打印详细的连接信息
+                logger.info("=" * 60)
+                logger.info(f"🔌 新设备首次连接 - {charge_point_id}")
+                logger.info("=" * 60)
+                logger.info(f"设备信息:")
+                logger.info(f"  - 充电桩ID: {charge_point_id}")
+                logger.info(f"  - 设备类型代码: {type_code}")
+                logger.info(f"  - 设备序列号: {serial_number}")
+                logger.info(f"MQTT 消息包信息:")
+                logger.info(f"  - 消息主题: {topic}")
+                logger.info(f"  - 主题格式: {type_code}/{serial_number}/user/up")
+                logger.info(f"  - QoS: {msg.qos}")
+                logger.info(f"  - 消息ID (MID): {msg.mid}")
+                logger.info(f"  - 保留标志 (Retain): {msg.retain}")
+                logger.info(f"  - 原始Payload长度: {len(msg.payload)} 字节")
+                logger.info(f"  - Payload (原始): {msg.payload.hex()[:100]}..." if len(msg.payload) > 50 else f"  - Payload (原始): {msg.payload.hex()}")
+                logger.info(f"消息内容:")
+                logger.info(f"  - Action: {action}")
+                logger.info(f"  - Payload (JSON):")
+                # 格式化 JSON 输出，每行缩进
+                payload_str = json.dumps(payload_data, ensure_ascii=False, indent=4)
+                for line in payload_str.split('\n'):
+                    logger.info(f"    {line}")
+                logger.info(f"连接状态:")
+                logger.info(f"  - 当前已连接充电桩总数: {len(self._connected_chargers)} 个")
+                logger.info(f"  - 连接时间戳: {msg.timestamp if hasattr(msg, 'timestamp') else 'N/A'}")
+                logger.info("=" * 60)
+            else:
+                logger.info(f"[{charge_point_id}] 已标记为已连接（MQTT），当前已连接充电桩: {len(self._connected_chargers)} 个")
             
             # 异步处理消息
             if self._loop and self._loop.is_running():

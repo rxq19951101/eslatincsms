@@ -247,7 +247,7 @@ def create_charger(req: CreateChargerRequest, db: Session = Depends(get_db)) -> 
             else:
                 site.latitude = req.latitude
                 site.longitude = req.longitude
-                if req.address:
+        if req.address:
                     site.address = req.address
         
         # 更新定价
@@ -308,8 +308,8 @@ def create_charger(req: CreateChargerRequest, db: Session = Depends(get_db)) -> 
                 base_price_per_kwh=req.price_per_kwh,
                 service_fee=0,
                 valid_from=datetime.now(timezone.utc),
-                is_active=True
-            )
+            is_active=True
+        )
             db.add(tariff)
     
     try:
