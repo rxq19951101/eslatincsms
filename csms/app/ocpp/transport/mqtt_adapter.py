@@ -42,7 +42,7 @@ class MQTTAdapter(TransportAdapter):
         self.broker_port = broker_port
         self.client: Optional[mqtt.Client] = None
         self._connected_chargers: set[str] = set()
-        self._pending_responses: Dict[str, Dict[str, Any]] = {}
+        self._pending_responses: Dict[str, asyncio.Future] = {}  # 等待响应的 Future
         self._loop = None
         self._subscribed_types: set[str] = set()  # 已订阅的设备类型
         self._mqtt_connected: bool = False  # MQTT 连接状态标志
@@ -242,14 +242,47 @@ class MQTTAdapter(TransportAdapter):
             unique_id = None  # 用于保存 OCPP 标准格式的 UniqueId
             is_ocpp_standard_format = False
             
-            if isinstance(raw_payload, list) and len(raw_payload) >= 4:
-                # OCPP 1.6 标准格式: [MessageType, UniqueId, Action, Payload]
+            if isinstance(raw_payload, list) and len(raw_payload) >= 3:
+                # OCPP 1.6 标准格式: [MessageType, UniqueId, ...]
                 # MessageType: 2 = CALL (充电桩发送给服务器的请求)
+                # MessageType: 3 = CALLRESULT (充电桩响应服务器的请求)
+                # MessageType: 4 = CALLERROR (充电桩响应服务器的请求，错误)
                 message_type = raw_payload[0]
+                unique_id = raw_payload[1]
                 
-                # 验证 MessageType 必须是 2 (CALL)
-                if message_type != 2:
-                    logger.error(f"[{charge_point_id}] 无效的 MessageType: {message_type}, 期望 2 (CALL), 消息: {raw_payload}")
+                # 处理 CALLRESULT (MessageType=3): [3, UniqueId, Payload]
+                if message_type == 3:
+                    if unique_id in self._pending_responses:
+                        future = self._pending_responses.pop(unique_id)
+                        payload_data = raw_payload[2] if len(raw_payload) > 2 else {}
+                        if not future.done():
+                            future.set_result(payload_data)
+                        logger.info(f"[{charge_point_id}] <- MQTT CALLRESULT (UniqueId: {unique_id}, 品牌: {type_code}, SN: {serial_number}) | payload: {payload_data}")
+                    else:
+                        logger.warning(f"[{charge_point_id}] 收到未预期的 CALLRESULT (UniqueId: {unique_id})")
+                    return
+                
+                # 处理 CALLERROR (MessageType=4): [4, UniqueId, ErrorCode, ErrorDescription, ErrorDetails(可选)]
+                if message_type == 4:
+                    if unique_id in self._pending_responses:
+                        future = self._pending_responses.pop(unique_id)
+                        error_code = raw_payload[2] if len(raw_payload) > 2 else "UnknownError"
+                        error_description = raw_payload[3] if len(raw_payload) > 3 else "Unknown error"
+                        error_details = raw_payload[4] if len(raw_payload) > 4 else None
+                        if not future.done():
+                            future.set_exception(Exception(f"{error_code}: {error_description}"))
+                        logger.warning(f"[{charge_point_id}] <- MQTT CALLERROR (UniqueId: {unique_id}, ErrorCode: {error_code}, 品牌: {type_code}, SN: {serial_number})")
+                    else:
+                        logger.warning(f"[{charge_point_id}] 收到未预期的 CALLERROR (UniqueId: {unique_id})")
+                    return
+                
+                # 处理 CALL (MessageType=2): [2, UniqueId, Action, Payload]
+                if message_type == 2:
+                    if len(raw_payload) < 4:
+                        logger.error(f"[{charge_point_id}] 无效的 CALL 消息格式，长度不足: {raw_payload}")
+                        return
+                else:
+                    logger.error(f"[{charge_point_id}] 无效的 MessageType: {message_type}, 期望 2 (CALL), 3 (CALLRESULT), 或 4 (CALLERROR), 消息: {raw_payload}")
                     return
                 
                 # 验证 UniqueId 必须是字符串
@@ -453,6 +486,13 @@ class MQTTAdapter(TransportAdapter):
         
         logger.debug(f"[{charge_point_id}] MQTT 发送服务器请求到主题: {topic}, 消息: {json.dumps(message)}")
         
+        # 创建 Future 用于等待响应
+        if self._loop is None:
+            self._loop = asyncio.get_event_loop()
+        
+        future = self._loop.create_future()
+        self._pending_responses[unique_id] = future
+        
         try:
             result = self.client.publish(
                 topic,
@@ -461,13 +501,32 @@ class MQTTAdapter(TransportAdapter):
             )
             
             if result.rc == mqtt.MQTT_ERR_SUCCESS:
-                logger.info(f"[{charge_point_id}] -> MQTT OCPP {action} (发送到主题: {topic})")
-                return {"success": True, "message": "Message sent via MQTT", "topic": topic}
+                logger.info(f"[{charge_point_id}] -> MQTT OCPP {action} (UniqueId: {unique_id}, 发送到主题: {topic})")
+                
+                # 等待响应
+                try:
+                    response_payload = await asyncio.wait_for(future, timeout=timeout)
+                    logger.info(f"[{charge_point_id}] <- MQTT OCPP {action} 响应 (UniqueId: {unique_id}): {response_payload}")
+                    return response_payload
+                except asyncio.TimeoutError:
+                    # 超时，移除 Future
+                    self._pending_responses.pop(unique_id, None)
+                    logger.warning(f"[{charge_point_id}] MQTT OCPP {action} 响应超时 (UniqueId: {unique_id}, 超时: {timeout}秒)")
+                    raise TimeoutError(f"等待 {action} 响应超时 ({timeout}秒)")
+                except Exception as e:
+                    # 其他错误（如 CALLERROR），移除 Future
+                    self._pending_responses.pop(unique_id, None)
+                    logger.error(f"[{charge_point_id}] MQTT OCPP {action} 响应错误 (UniqueId: {unique_id}): {e}")
+                    raise
             else:
+                # 发布失败，移除 Future
+                self._pending_responses.pop(unique_id, None)
                 logger.error(f"[{charge_point_id}] MQTT 发布失败，返回码: {result.rc}")
                 raise ConnectionError(f"MQTT 发布失败，返回码: {result.rc}")
                 
         except Exception as e:
+            # 发生错误，移除 Future
+            self._pending_responses.pop(unique_id, None)
             logger.error(f"[{charge_point_id}] MQTT 发送错误: {e}", exc_info=True)
             raise
     

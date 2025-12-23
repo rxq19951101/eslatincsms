@@ -25,8 +25,27 @@ class OCPPMessageSender:
     ) -> Dict[str, Any]:
         """
         发送OCPP调用从CSMS到充电桩，并等待响应。
+        优先使用 transport_manager（支持 MQTT 和 WebSocket），如果没有则使用 WebSocket。
         返回响应数据或错误信息。
         """
+        # 优先使用 transport_manager（支持 MQTT 和 WebSocket）
+        try:
+            from app.ocpp.transport_manager import transport_manager, TransportType
+            if hasattr(transport_manager, 'adapters') and transport_manager.adapters:
+                if transport_manager.is_connected(charger_id):
+                    logger.info(f"[{charger_id}] message_sender.send_call 通过 transport_manager 发送: {action}")
+                    result = await transport_manager.send_message(
+                        charger_id,
+                        action,
+                        payload,
+                        preferred_transport=TransportType.MQTT,
+                        timeout=timeout
+                    )
+                    return {"success": True, "data": result, "transport": "MQTT"}
+        except Exception as e:
+            logger.warning(f"[{charger_id}] transport_manager 发送失败: {e}，回退到 WebSocket")
+        
+        # Fallback: 使用 WebSocket（如果可用）
         ws = connection_manager.get_connection(charger_id)
         if not ws:
             raise HTTPException(

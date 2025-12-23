@@ -85,8 +85,13 @@ async def remote_start(req: RemoteStartRequest) -> RemoteResponse:
     is_connected = False
     if TRANSPORT_MANAGER_AVAILABLE and transport_manager:
         try:
-            is_connected = transport_manager.is_connected(req.chargePointId)
-            logger.debug(f"[API] transport_manager.is_connected({req.chargePointId}) = {is_connected}")
+            # 检查 transport_manager 是否已初始化（有适配器）
+            if hasattr(transport_manager, 'adapters') and transport_manager.adapters:
+                is_connected = transport_manager.is_connected(req.chargePointId)
+                logger.debug(f"[API] transport_manager.is_connected({req.chargePointId}) = {is_connected}, adapters: {list(transport_manager.adapters.keys())}")
+            else:
+                logger.debug(f"[API] transport_manager 尚未初始化（adapters为空），回退到 connection_manager")
+                is_connected = connection_manager.is_connected(req.chargePointId)
         except Exception as e:
             logger.warning(f"[API] transport_manager.is_connected() 检查失败: {e}，回退到 connection_manager")
             is_connected = connection_manager.is_connected(req.chargePointId)
@@ -94,7 +99,7 @@ async def remote_start(req: RemoteStartRequest) -> RemoteResponse:
         is_connected = connection_manager.is_connected(req.chargePointId)
     
     if not is_connected:
-        logger.warning(f"[API] 远程启动失败: 充电桩 {req.chargePointId} 未连接 (transport_manager可用: {TRANSPORT_MANAGER_AVAILABLE}, adapters: {len(transport_manager.adapters) if TRANSPORT_MANAGER_AVAILABLE and transport_manager else 0})")
+        logger.warning(f"[API] 远程启动失败: 充电桩 {req.chargePointId} 未连接 (transport_manager可用: {TRANSPORT_MANAGER_AVAILABLE}, adapters: {len(transport_manager.adapters) if TRANSPORT_MANAGER_AVAILABLE and transport_manager and hasattr(transport_manager, 'adapters') else 0})")
         raise ChargerNotConnectedException(req.chargePointId)
     
     # 使用消息处理器（支持分布式）
@@ -249,15 +254,28 @@ async def get_configuration(req: GetConfigurationRequest) -> RemoteResponse:
     is_connected = False
     if TRANSPORT_MANAGER_AVAILABLE and transport_manager:
         try:
-            is_connected = transport_manager.is_connected(req.chargePointId)
+            # 检查 transport_manager 是否已初始化（adapters不为空）
+            adapters_count = len(transport_manager.adapters) if hasattr(transport_manager, 'adapters') and transport_manager.adapters else 0
+            logger.info(f"[API] get_configuration检查: adapters={adapters_count}, adapters_keys={list(transport_manager.adapters.keys()) if hasattr(transport_manager, 'adapters') and transport_manager.adapters else []}")
+            if adapters_count > 0:
+                is_connected = transport_manager.is_connected(req.chargePointId)
+                logger.info(f"[API] get_configuration检查: is_connected={is_connected}")
+                # 如果是MQTT适配器，检查_connected_chargers
+                from app.ocpp.transport_manager import TransportType
+                mqtt_adapter = transport_manager.adapters.get(TransportType.MQTT)
+                if mqtt_adapter and hasattr(mqtt_adapter, '_connected_chargers'):
+                    logger.info(f"[API] get_configuration MQTT _connected_chargers: {list(mqtt_adapter._connected_chargers)}")
+            else:
+                logger.warning(f"[API] transport_manager.adapters为空，回退到 connection_manager")
+                is_connected = connection_manager.is_connected(req.chargePointId)
         except Exception as e:
-            logger.warning(f"[API] transport_manager.is_connected() 检查失败: {e}，回退到 connection_manager")
+            logger.warning(f"[API] transport_manager.is_connected() 检查失败: {e}，回退到 connection_manager", exc_info=True)
             is_connected = connection_manager.is_connected(req.chargePointId)
     else:
         is_connected = connection_manager.is_connected(req.chargePointId)
     
     if not is_connected:
-        logger.warning(f"[API] 获取配置失败: 充电桩 {req.chargePointId} 未连接")
+        logger.warning(f"[API] 获取配置失败: 充电桩 {req.chargePointId} 未连接 (transport_manager可用: {TRANSPORT_MANAGER_AVAILABLE}, adapters: {len(transport_manager.adapters) if TRANSPORT_MANAGER_AVAILABLE and transport_manager and hasattr(transport_manager, 'adapters') and transport_manager.adapters else 0})")
         raise ChargerNotConnectedException(req.chargePointId)
     
     payload = {"key": req.keys} if req.keys else {}
@@ -371,4 +389,38 @@ async def unlock_connector(req: UnlockConnectorRequest) -> RemoteResponse:
         message="解锁连接器请求已发送" if success else "解锁连接器失败",
         details=result
     )
+
+
+@router.get("/debug/connection-status/{charge_point_id}", summary="调试：检查连接状态")
+async def debug_connection_status(charge_point_id: str):
+    """调试端点：检查充电桩的连接状态"""
+    result = {
+        "charge_point_id": charge_point_id,
+        "transport_manager_available": TRANSPORT_MANAGER_AVAILABLE,
+        "transport_manager_initialized": False,
+        "adapters": {},
+        "connection_status": {}
+    }
+    
+    if TRANSPORT_MANAGER_AVAILABLE and transport_manager:
+        result["transport_manager_initialized"] = hasattr(transport_manager, 'adapters') and len(transport_manager.adapters) > 0
+        result["adapters"] = {
+            str(k): {
+                "type": str(k),
+                "initialized": hasattr(v, 'is_connected'),
+                "connected": v.is_connected(charge_point_id) if hasattr(v, 'is_connected') else False
+            }
+            for k, v in transport_manager.adapters.items()
+        }
+        
+        # 如果是 MQTT 适配器，显示连接的充电桩列表
+        for transport_type, adapter in transport_manager.adapters.items():
+            if transport_type.value == "mqtt" and hasattr(adapter, '_connected_chargers'):
+                result["connection_status"]["mqtt_connected_chargers"] = list(adapter._connected_chargers)
+                result["connection_status"]["mqtt_is_connected"] = charge_point_id in adapter._connected_chargers
+    
+    result["connection_status"]["connection_manager"] = connection_manager.is_connected(charge_point_id)
+    result["connection_status"]["transport_manager"] = transport_manager.is_connected(charge_point_id) if TRANSPORT_MANAGER_AVAILABLE and transport_manager and hasattr(transport_manager, 'adapters') and transport_manager.adapters else False
+    
+    return result
 

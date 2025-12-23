@@ -230,21 +230,31 @@ async def send_ocpp_call(charge_point_id: str, action: str, payload: Dict[str, A
     """
     # 优先使用 MQTT 传输
     if MQTT_AVAILABLE and hasattr(transport_manager, 'adapters'):
-        if transport_manager.is_connected(charge_point_id):
-            try:
-                logger.info(f"[{charge_point_id}] 通过 MQTT 发送 OCPP 调用: {action}")
-                result = await transport_manager.send_message(
-                    charge_point_id,
-                    action,
-                    payload,
-                    preferred_transport=TransportType.MQTT,
-                    timeout=timeout
-                )
-                logger.info(f"[{charge_point_id}] MQTT OCPP 调用完成: {action}, 结果: {result}")
-                return {"success": True, "data": result, "transport": "MQTT"}
-            except Exception as e:
-                logger.error(f"[{charge_point_id}] 通过 MQTT 发送 OCPP 调用失败: {e}", exc_info=True)
-                # 如果 MQTT 失败，尝试 WebSocket（如果有）
+        # 检查 transport_manager 是否已初始化（adapters不为空）
+        adapters_count = len(transport_manager.adapters) if transport_manager.adapters else 0
+        logger.info(f"[{charge_point_id}] send_ocpp_call检查: adapters={adapters_count}, adapters_keys={list(transport_manager.adapters.keys()) if transport_manager.adapters else []}")
+        if adapters_count > 0:
+            is_conn = transport_manager.is_connected(charge_point_id)
+            logger.info(f"[{charge_point_id}] send_ocpp_call检查: is_connected={is_conn}")
+            # 如果是MQTT适配器，检查_connected_chargers
+            mqtt_adapter = transport_manager.adapters.get(TransportType.MQTT)
+            if mqtt_adapter and hasattr(mqtt_adapter, '_connected_chargers'):
+                logger.info(f"[{charge_point_id}] MQTT _connected_chargers: {list(mqtt_adapter._connected_chargers)}")
+            if is_conn:
+                try:
+                    logger.info(f"[{charge_point_id}] 通过 MQTT 发送 OCPP 调用: {action}")
+                    result = await transport_manager.send_message(
+                        charge_point_id,
+                        action,
+                        payload,
+                        preferred_transport=TransportType.MQTT,
+                        timeout=timeout
+                    )
+                    logger.info(f"[{charge_point_id}] MQTT OCPP 调用完成: {action}, 结果: {result}")
+                    return {"success": True, "data": result, "transport": "MQTT"}
+                except Exception as e:
+                    logger.error(f"[{charge_point_id}] 通过 MQTT 发送 OCPP 调用失败: {e}", exc_info=True)
+                    # 如果 MQTT 失败，尝试 WebSocket（如果有）
     
     # Fallback: 使用 WebSocket（如果可用）
     ws = charger_websockets.get(charge_point_id)
@@ -271,6 +281,7 @@ async def send_ocpp_call(charge_point_id: str, action: str, payload: Dict[str, A
             raise HTTPException(status_code=500, detail=f"Failed to send OCPP call: {str(e)}")
     
     # 如果都没有连接，抛出错误
+    logger.warning(f"[{charge_point_id}] 发送OCPP调用失败: 设备未连接 (transport_manager可用: {MQTT_AVAILABLE}, adapters: {len(transport_manager.adapters) if MQTT_AVAILABLE and hasattr(transport_manager, 'adapters') else 0})")
     raise HTTPException(status_code=404, detail=f"Charger {charge_point_id} is not connected (MQTT or WebSocket)")
 
 
