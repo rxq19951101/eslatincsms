@@ -51,6 +51,21 @@ def list_orders(
         invoice = db.query(Invoice).filter(Invoice.order_id == o.id).first()
         total_cost = invoice.total_amount if invoice else None
         
+        # 从ChargingSession获取energy_kwh（如果有关联的session）
+        energy_kwh = None
+        duration_minutes = None
+        if o.session_id:
+            from app.database.models import ChargingSession
+            session = db.query(ChargingSession).filter(ChargingSession.id == o.session_id).first()
+            if session:
+                # 计算电量（从meter_start和meter_stop）
+                if session.meter_start is not None and session.meter_stop is not None:
+                    energy_kwh = float(session.meter_stop - session.meter_start) / 1000.0  # Wh转kWh
+                # 计算时长（分钟）
+                if session.start_time and session.end_time:
+                    duration = session.end_time - session.start_time
+                    duration_minutes = int(duration.total_seconds() / 60)
+        
         result.append({
             "id": o.id,
             "charge_point_id": o.charge_point_id,
@@ -58,9 +73,9 @@ def list_orders(
             "id_tag": o.id_tag,
             "start_time": o.start_time.isoformat() if o.start_time else None,
             "end_time": o.end_time.isoformat() if o.end_time else None,
-            "energy_kwh": o.energy_kwh,
-            "duration_minutes": o.duration_minutes,
-            "total_cost": total_cost,
+            "energy_kwh": energy_kwh,
+            "duration_minutes": duration_minutes,
+            "total_cost": float(total_cost) if total_cost is not None else None,
             "status": o.status,
             "created_at": o.created_at.isoformat() if o.created_at else None,
         })

@@ -55,24 +55,39 @@ class WebSocketAdapter(TransportAdapter):
         payload: Dict[str, Any],
         timeout: float = 5.0
     ) -> Dict[str, Any]:
-        """发送消息到充电桩"""
+        """发送消息到充电桩（使用 OCPP 1.6 标准格式）"""
         ws = self._connections.get(charge_point_id)
         if not ws:
             raise ConnectionError(f"Charger {charge_point_id} is not connected via WebSocket")
         
         try:
-            message = {
-                "action": action,
-                "payload": payload
-            }
+            # 使用 OCPP 1.6 标准格式: [2, UniqueId, Action, Payload]
+            import uuid
+            unique_id = f"csms_{uuid.uuid4().hex[:16]}"
+            message = [2, unique_id, action, payload]
+            
             await ws.send_text(json.dumps(message))
-            logger.info(f"[{charge_point_id}] -> WebSocket OCPP {action}")
+            logger.info(f"[{charge_point_id}] -> WebSocket OCPP {action} (标准格式, UniqueId={unique_id})")
             
             # 等待响应（简化版本，实际应该使用消息ID匹配）
             import asyncio
             try:
                 response_text = await asyncio.wait_for(ws.receive_text(), timeout=timeout)
                 response = json.loads(response_text)
+                
+                # 解析 OCPP 标准格式响应
+                if isinstance(response, list) and len(response) >= 3:
+                    resp_message_type = response[0]
+                    resp_unique_id = response[1]
+                    resp_payload = response[2] if len(response) > 2 else {}
+                    
+                    if resp_message_type == 3:  # CALLRESULT
+                        return {"success": True, "data": resp_payload, "unique_id": resp_unique_id}
+                    elif resp_message_type == 4:  # CALLERROR
+                        error_code = resp_payload if isinstance(resp_payload, str) else response[2] if len(response) > 2 else "UnknownError"
+                        error_desc = response[3] if len(response) > 3 else "Unknown error"
+                        return {"success": False, "error": error_code, "errorDescription": error_desc}
+                
                 return {"success": True, "data": response}
             except asyncio.TimeoutError:
                 logger.warning(f"[{charge_point_id}] WebSocket 响应超时: {action}")

@@ -88,10 +88,37 @@ class HTTPAdapter(TransportAdapter):
             # 充电桩发送消息
             try:
                 body = await request.json()
-                action = body.get("action", "")
-                payload = body.get("payload", {})
                 
-                logger.info(f"[{charge_point_id}] <- HTTP OCPP {action}")
+                # 支持两种格式：
+                # 1. OCPP 1.6 标准格式: [MessageType, UniqueId, Action, Payload]
+                # 2. 简化格式: {"action": "...", "payload": {...}}
+                unique_id = None
+                is_ocpp_standard_format = False
+                
+                if isinstance(body, list) and len(body) >= 4:
+                    # OCPP 1.6 标准格式
+                    message_type = body[0]
+                    if message_type != 2:  # 必须是 CALL
+                        logger.error(f"[{charge_point_id}] 无效的 MessageType: {message_type}, 期望 2 (CALL)")
+                        return {
+                            "error": [4, "", "ProtocolError", "Invalid MessageType"]
+                        }
+                    
+                    unique_id = body[1]
+                    action = body[2]
+                    payload = body[3] if isinstance(body[3], dict) else {}
+                    is_ocpp_standard_format = True
+                    
+                    logger.info(f"[{charge_point_id}] <- HTTP OCPP {action} (标准格式, UniqueId={unique_id})")
+                elif isinstance(body, dict):
+                    # 简化格式
+                    action = body.get("action", "")
+                    payload = body.get("payload", {})
+                    
+                    logger.info(f"[{charge_point_id}] <- HTTP OCPP {action} (简化格式)")
+                else:
+                    logger.error(f"[{charge_point_id}] 无效的消息格式: {type(body)}")
+                    return {"error": "Invalid message format"}
                 
                 # 更新会话
                 self._charger_sessions[charge_point_id] = {
@@ -102,13 +129,32 @@ class HTTPAdapter(TransportAdapter):
                 # 处理消息
                 response = await self.handle_incoming_message(charge_point_id, action, payload)
                 
+                # 根据请求格式决定响应格式
+                if is_ocpp_standard_format and unique_id:
+                    if "errorCode" in response or "error" in response or response.get("status") == "Rejected":
+                        # CALLERROR: [4, UniqueId, ErrorCode, ErrorDescription, ErrorDetails(可选)]
+                        error_code = response.get("errorCode", "InternalError")
+                        error_description = response.get("errorDescription", response.get("error", "Unknown error"))
+                        error_details = response.get("errorDetails")
+                        
+                        if error_details:
+                            ocpp_response = [4, unique_id, error_code, error_description, error_details]
+                        else:
+                            ocpp_response = [4, unique_id, error_code, error_description]
+                    else:
+                        # CALLRESULT: [3, UniqueId, Payload]
+                        ocpp_response = [3, unique_id, response]
+                    
+                    response_data = {"response": ocpp_response}
+                else:
+                    response_data = {"response": response}
+                
                 # 检查是否有待发送的消息
                 pending = self._get_pending_message(charge_point_id)
+                if pending:
+                    response_data["pending"] = pending
                 
-                return {
-                    "response": response,
-                    "pending": pending
-                }
+                return response_data
                 
             except Exception as e:
                 logger.error(f"[{charge_point_id}] HTTP 请求处理错误: {e}", exc_info=True)
@@ -123,16 +169,17 @@ class HTTPAdapter(TransportAdapter):
             raise HTTPException(status_code=405, detail="Method not allowed")
     
     def _get_pending_message(self, charge_point_id: str) -> Optional[Dict[str, Any]]:
-        """获取待发送的消息"""
+        """获取待发送的消息（使用 OCPP 标准格式）"""
         if charge_point_id in self._pending_requests:
             requests = self._pending_requests[charge_point_id]
             if requests:
                 # 返回第一个待处理的消息
                 request_id, message = next(iter(requests.items()))
                 del requests[request_id]
-                return {
-                    "action": message["action"],
-                    "payload": message["payload"]
-                }
+                
+                # 使用 OCPP 1.6 标准格式: [2, UniqueId, Action, Payload]
+                import uuid
+                unique_id = f"csms_{uuid.uuid4().hex[:16]}"
+                return [2, unique_id, message["action"], message["payload"]]
         return None
 

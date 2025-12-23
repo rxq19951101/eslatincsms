@@ -160,7 +160,12 @@ class OCPPMessageHandler:
             logger.error(f"[{charge_point_id}] BootNotification处理错误: {e}", exc_info=True)
             if should_close:
                 db.rollback()
-            return {"status": "Rejected", "error": str(e)}
+            # 返回符合 OCPP 规范的错误格式
+            return {
+                "status": "Rejected",
+                "errorCode": "InternalError",
+                "errorDescription": str(e)
+            }
         finally:
             if should_close:
                 db.close()
@@ -266,6 +271,7 @@ class OCPPMessageHandler:
             logger.error(f"[{charge_point_id}] StatusNotification处理错误: {e}", exc_info=True)
             if should_close:
                 db.rollback()
+            # StatusNotification 即使出错也返回空对象（OCPP 规范）
             return {}
         finally:
             if should_close:
@@ -312,7 +318,15 @@ class OCPPMessageHandler:
             if should_close:
                 db.rollback()
             transaction_id = payload.get("transactionId", 0)
-            return {"transactionId": transaction_id, "idTagInfo": {"status": "Rejected"}}
+            # 返回符合 OCPP 规范的错误格式
+            return {
+                "transactionId": transaction_id,
+                "idTagInfo": {
+                    "status": "Rejected"
+                },
+                "errorCode": "InternalError",
+                "errorDescription": str(e)
+            }
         finally:
             if should_close:
                 db.close()
@@ -422,6 +436,7 @@ class OCPPMessageHandler:
             logger.error(f"[{charge_point_id}] MeterValues处理错误: {e}", exc_info=True)
             if should_close:
                 db.rollback()
+            # MeterValues 即使出错也返回空对象（OCPP 规范）
             return {}
         finally:
             if should_close:

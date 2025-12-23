@@ -182,11 +182,53 @@ class MQTTAdapter(TransportAdapter):
                 charge_point_id = serial_number
             
             # 解析消息payload
-            payload = json.loads(msg.payload.decode())
-            action = payload.get("action", "")
-            payload_data = payload.get("payload", {})
+            # 支持两种格式：
+            # 1. 简化格式: {"action": "BootNotification", "payload": {...}}
+            # 2. OCPP 1.6 标准格式: [MessageType, UniqueId, Action, Payload]
+            raw_payload = json.loads(msg.payload.decode())
             
-            logger.info(f"[{charge_point_id}] <- MQTT OCPP {action} (品牌: {type_code}, SN: {serial_number}) | payload: {payload_data}")
+            unique_id = None  # 用于保存 OCPP 标准格式的 UniqueId
+            is_ocpp_standard_format = False
+            
+            if isinstance(raw_payload, list) and len(raw_payload) >= 4:
+                # OCPP 1.6 标准格式: [MessageType, UniqueId, Action, Payload]
+                # MessageType: 2 = CALL (充电桩发送给服务器的请求)
+                message_type = raw_payload[0]
+                
+                # 验证 MessageType 必须是 2 (CALL)
+                if message_type != 2:
+                    logger.error(f"[{charge_point_id}] 无效的 MessageType: {message_type}, 期望 2 (CALL), 消息: {raw_payload}")
+                    return
+                
+                # 验证 UniqueId 必须是字符串
+                unique_id = raw_payload[1]
+                if not isinstance(unique_id, str):
+                    logger.error(f"[{charge_point_id}] 无效的 UniqueId 类型: {type(unique_id)}, 期望字符串, UniqueId: {unique_id}")
+                    return
+                
+                # 验证 Action 必须是字符串
+                action = raw_payload[2]
+                if not isinstance(action, str):
+                    logger.error(f"[{charge_point_id}] 无效的 Action 类型: {type(action)}, 期望字符串, Action: {action}")
+                    return
+                
+                # 验证 Payload 必须是对象
+                payload_data = raw_payload[3] if isinstance(raw_payload[3], dict) else {}
+                if not isinstance(raw_payload[3], dict):
+                    logger.warning(f"[{charge_point_id}] Payload 不是对象类型，使用空对象")
+                
+                is_ocpp_standard_format = True
+                
+                logger.info(f"[{charge_point_id}] <- MQTT OCPP {action} (标准格式, MessageType={message_type}, UniqueId={unique_id}, 品牌: {type_code}, SN: {serial_number}) | payload: {payload_data}")
+            elif isinstance(raw_payload, dict):
+                # 简化格式: {"action": "...", "payload": {...}}
+                action = raw_payload.get("action", "")
+                payload_data = raw_payload.get("payload", {})
+                
+                logger.info(f"[{charge_point_id}] <- MQTT OCPP {action} (简化格式, 品牌: {type_code}, SN: {serial_number}) | payload: {payload_data}")
+            else:
+                logger.error(f"[{charge_point_id}] 无效的消息格式: {raw_payload}, 期望数组或对象")
+                return
             
             # 检查是否是第一次连接（新设备）
             is_first_connection = charge_point_id not in self._connected_chargers
@@ -228,7 +270,7 @@ class MQTTAdapter(TransportAdapter):
             # 异步处理消息
             if self._loop and self._loop.is_running():
                 asyncio.run_coroutine_threadsafe(
-                    self._handle_message(charge_point_id, action, payload_data, type_code, serial_number),
+                    self._handle_message(charge_point_id, action, payload_data, type_code, serial_number, unique_id, is_ocpp_standard_format),
                     self._loop
                 )
             else:
@@ -261,7 +303,9 @@ class MQTTAdapter(TransportAdapter):
         action: str, 
         payload: Dict[str, Any],
         type_code: str,
-        serial_number: str
+        serial_number: str,
+        unique_id: Optional[str] = None,
+        is_ocpp_standard_format: bool = False
     ):
         """处理接收到的消息"""
         logger.info(f"[{charge_point_id}] MQTT 开始处理消息: {action}")
@@ -277,14 +321,41 @@ class MQTTAdapter(TransportAdapter):
             logger.info(f"[{charge_point_id}] MQTT 消息处理完成: {action}, 响应: {response}")
         except Exception as e:
             logger.error(f"[{charge_point_id}] MQTT 消息处理失败: {action}, 错误: {e}", exc_info=True)
-            response = {"error": str(e)}
+            # 返回符合 OCPP 规范的错误格式
+            response = {
+                "errorCode": "InternalError",
+                "errorDescription": str(e)
+            }
         
         # 发送响应到down主题：{type_code}/{serial_number}/user/down
         response_topic = f"{type_code}/{serial_number}/user/down"
-        response_message = {
-            "action": action,
-            "response": response
-        }
+        
+        # 根据请求格式决定响应格式
+        if is_ocpp_standard_format and unique_id:
+            # OCPP 1.6 标准格式响应
+            # 检查响应是否包含错误
+            if "errorCode" in response or "error" in response or response.get("status") == "Rejected":
+                # CALLERROR: [4, UniqueId, ErrorCode, ErrorDescription, ErrorDetails(可选)]
+                error_code = response.get("errorCode", "InternalError")
+                error_description = response.get("errorDescription", response.get("error", "Unknown error"))
+                error_details = response.get("errorDetails")
+                
+                if error_details:
+                    response_message = [4, unique_id, error_code, error_description, error_details]
+                else:
+                    response_message = [4, unique_id, error_code, error_description]
+                logger.warning(f"[{charge_point_id}] 使用 OCPP 标准格式响应 (CALLERROR): {error_code}")
+            else:
+                # CALLRESULT: [3, UniqueId, Payload]
+                response_message = [3, unique_id, response]
+                logger.info(f"[{charge_point_id}] 使用 OCPP 标准格式响应 (CALLRESULT)")
+        else:
+            # 简化格式响应: {"action": "...", "response": {...}}
+            response_message = {
+                "action": action,
+                "response": response
+            }
+            logger.info(f"[{charge_point_id}] 使用简化格式响应")
         
         if self.client:
             self.client.publish(
@@ -292,7 +363,7 @@ class MQTTAdapter(TransportAdapter):
                 json.dumps(response_message),
                 qos=1
             )
-            logger.info(f"[{charge_point_id}] -> MQTT OCPP {action} Response 已发送到主题: {response_topic}")
+            logger.info(f"[{charge_point_id}] -> MQTT OCPP {action} Response 已发送到主题: {response_topic}, 响应: {response}")
     
     def _on_disconnect(self, client: mqtt.Client, userdata, rc):
         """MQTT 断开连接回调"""
@@ -321,11 +392,12 @@ class MQTTAdapter(TransportAdapter):
         # 构建topic：{type_code}/{serial_number}/user/down
         topic = f"{type_code}/{serial_number}/user/down"
         
-        message = {
-            "action": action,
-            "payload": payload,
-            "from": "csms"
-        }
+        # 使用 OCPP 1.6 标准格式发送服务器请求
+        # CALL: [2, UniqueId, Action, Payload]
+        import uuid
+        unique_id = f"csms_{uuid.uuid4().hex[:16]}"
+        message = [2, unique_id, action, payload]
+        
         logger.debug(f"[{charge_point_id}] MQTT 发送服务器请求到主题: {topic}, 消息: {json.dumps(message)}")
         
         try:

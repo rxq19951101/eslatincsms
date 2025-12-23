@@ -2575,10 +2575,36 @@ async def ocpp_ws(ws: WebSocket, id: str = Query(..., description="Charge Point 
                 await ws.send_text(json.dumps({"error": "Invalid JSON"}))
                 continue
 
-            action = str(msg.get("action", "")).strip()
-            payload = msg.get("payload", {})
+            # 支持两种格式：
+            # 1. OCPP 1.6 标准格式: [MessageType, UniqueId, Action, Payload]
+            # 2. 简化格式: {"action": "...", "payload": {...}}
+            unique_id = None
+            is_ocpp_standard_format = False
             
-            logger.info(f"[{charge_point_id}] <- OCPP {action} | payload={json.dumps(payload)}")
+            if isinstance(msg, list) and len(msg) >= 4:
+                # OCPP 1.6 标准格式
+                message_type = msg[0]
+                if message_type != 2:  # 必须是 CALL
+                    logger.error(f"[{charge_point_id}] 无效的 MessageType: {message_type}, 期望 2 (CALL)")
+                    await ws.send_text(json.dumps([4, "", "ProtocolError", "Invalid MessageType"]))
+                    continue
+                
+                unique_id = msg[1]
+                action = msg[2]
+                payload = msg[3] if isinstance(msg[3], dict) else {}
+                is_ocpp_standard_format = True
+                
+                logger.info(f"[{charge_point_id}] <- WebSocket OCPP {action} (标准格式, UniqueId={unique_id}) | payload={json.dumps(payload)}")
+            elif isinstance(msg, dict):
+                # 简化格式
+                action = str(msg.get("action", "")).strip()
+                payload = msg.get("payload", {})
+                
+                logger.info(f"[{charge_point_id}] <- WebSocket OCPP {action} (简化格式) | payload={json.dumps(payload)}")
+            else:
+                logger.error(f"[{charge_point_id}] 无效的消息格式: {type(msg)}")
+                await ws.send_text(json.dumps({"error": "Invalid message format"}))
+                continue
 
             # 使用新的服务层处理OCPP消息
             try:
@@ -2590,7 +2616,7 @@ async def ocpp_ws(ws: WebSocket, id: str = Query(..., description="Charge Point 
                 # 尝试从payload中提取serial_number（用于BootNotification）
                 device_serial_number = None
                 if action == "BootNotification":
-                    device_serial_number = payload.get("serialNumber")
+                    device_serial_number = payload.get("chargePointSerialNumber") or payload.get("serialNumber")
                 
                 # 调用统一的消息处理函数
                 response = await handle_ocpp_message(
@@ -2599,26 +2625,43 @@ async def ocpp_ws(ws: WebSocket, id: str = Query(..., description="Charge Point 
                     payload=payload,
                     device_serial_number=device_serial_number,
                     evse_id=evse_id
-                        )
+                )
                     
                 # 发送响应
-                if response:
-                    # OCPP响应格式
-                    if action in ["BootNotification", "Heartbeat", "StatusNotification", "Authorize", 
-                                 "StartTransaction", "StopTransaction", "MeterValues"]:
-                        # 这些消息需要返回响应
-                        resp_msg = {
-                            "action": action,
-                            **response
-                        }
-                        logger.info(f"[{charge_point_id}] -> OCPP {action}Response | {json.dumps(response)}")
-                        await ws.send_text(json.dumps(resp_msg))
+                if is_ocpp_standard_format and unique_id:
+                    # OCPP 1.6 标准格式响应
+                    if "errorCode" in response or "error" in response or response.get("status") == "Rejected":
+                        # CALLERROR: [4, UniqueId, ErrorCode, ErrorDescription, ErrorDetails(可选)]
+                        error_code = response.get("errorCode", "InternalError")
+                        error_description = response.get("errorDescription", response.get("error", "Unknown error"))
+                        error_details = response.get("errorDetails")
+                        
+                        if error_details:
+                            resp_msg = [4, unique_id, error_code, error_description, error_details]
+                        else:
+                            resp_msg = [4, unique_id, error_code, error_description]
+                        logger.warning(f"[{charge_point_id}] -> WebSocket OCPP {action} CALLERROR | {error_code}")
                     else:
-                        # 其他消息返回简单确认
-                        await ws.send_text(json.dumps({"action": action, **response}))
+                        # CALLRESULT: [3, UniqueId, Payload]
+                        resp_msg = [3, unique_id, response]
+                        logger.info(f"[{charge_point_id}] -> WebSocket OCPP {action} CALLRESULT | {json.dumps(response)}")
+                    
+                    await ws.send_text(json.dumps(resp_msg))
                 else:
-                    # 无响应消息
-                    await ws.send_text(json.dumps({"action": action}))
+                    # 简化格式响应
+                    if response:
+                        if action in ["BootNotification", "Heartbeat", "StatusNotification", "Authorize", 
+                                     "StartTransaction", "StopTransaction", "MeterValues"]:
+                            resp_msg = {
+                                "action": action,
+                                **response
+                            }
+                            logger.info(f"[{charge_point_id}] -> WebSocket OCPP {action}Response | {json.dumps(response)}")
+                            await ws.send_text(json.dumps(resp_msg))
+                        else:
+                            await ws.send_text(json.dumps({"action": action, **response}))
+                    else:
+                        await ws.send_text(json.dumps({"action": action}))
 
             except Exception as e:
                 logger.error(f"[{charge_point_id}] OCPP消息处理错误: {e}", exc_info=True)
