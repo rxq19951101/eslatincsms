@@ -45,6 +45,7 @@ class MQTTAdapter(TransportAdapter):
         self._pending_responses: Dict[str, Dict[str, Any]] = {}
         self._loop = None
         self._subscribed_types: set[str] = set()  # 已订阅的设备类型
+        self._mqtt_connected: bool = False  # MQTT 连接状态标志
     
     async def start(self) -> None:
         """启动 MQTT 客户端"""
@@ -73,15 +74,16 @@ class MQTTAdapter(TransportAdapter):
             self.client.connect(self.broker_host, self.broker_port, 60)
             self.client.loop_start()
             
-            # 订阅所有设备类型的up主题（使用通配符）
-            # 格式：{type_code}/{serial_number}/user/up 或 /{type_code}/{serial_number}/user/up
-            # 使用通配符：+/+/user/up 和 /+/+/user/up 匹配所有品牌的设备
-            self.client.subscribe("+/+/user/up", qos=1)
-            self.client.subscribe("/+/+/user/up", qos=1)  # 支持带前导斜杠的格式
-            logger.info("已订阅通用topic: +/+/user/up 和 /+/+/user/up (支持所有品牌)")
+            # 等待连接建立（订阅将在 _on_connect 回调中执行）
+            # 最多等待5秒
+            import time
+            for i in range(50):  # 50 * 0.1 = 5秒
+                if self._mqtt_connected:
+                    break
+                await asyncio.sleep(0.1)
             
-            # 动态订阅所有激活的设备类型（可选，用于更精确的订阅）
-            await self._subscribe_all_device_types()
+            if not self._mqtt_connected:
+                logger.warning("MQTT 连接建立超时，但继续执行订阅（可能在后台建立）")
             
             logger.info(f"MQTT 传输适配器已启动，连接到 {self.broker_host}:{self.broker_port}")
         except Exception as e:
@@ -103,10 +105,13 @@ class MQTTAdapter(TransportAdapter):
                         # 订阅特定品牌的topic：{type_code}/+/user/up 和 /{type_code}/+/user/up
                         topic = f"{type_code}/+/user/up"
                         topic_with_slash = f"/{type_code}/+/user/up"
-                        self.client.subscribe(topic, qos=1)
-                        self.client.subscribe(topic_with_slash, qos=1)  # 支持带前导斜杠的格式
+                        result1, mid1 = self.client.subscribe(topic, qos=1)
+                        result2, mid2 = self.client.subscribe(topic_with_slash, qos=1)  # 支持带前导斜杠的格式
+                        if result1 == 0 and result2 == 0:
+                            logger.info(f"已订阅设备类型topic: {topic} (MID: {mid1}) 和 {topic_with_slash} (MID: {mid2}) (类型: {type_code})")
+                        else:
+                            logger.warning(f"订阅设备类型topic失败: {topic} (rc: {result1}), {topic_with_slash} (rc: {result2}) (类型: {type_code})")
                         self._subscribed_types.add(type_code)
-                        logger.info(f"已订阅设备类型topic: {topic} 和 {topic_with_slash} (类型: {type_code})")
             finally:
                 db.close()
         except Exception as e:
@@ -126,6 +131,7 @@ class MQTTAdapter(TransportAdapter):
     def _on_connect(self, client: mqtt.Client, userdata, flags, rc):
         """MQTT 连接回调"""
         if rc == 0:
+            self._mqtt_connected = True
             logger.info("=" * 60)
             logger.info("MQTT 连接成功 - 连接信息详情")
             logger.info("=" * 60)
@@ -138,6 +144,27 @@ class MQTTAdapter(TransportAdapter):
             logger.info(f"Keepalive: {client._keepalive} 秒")
             logger.info(f"返回码 (rc): {rc} (0=成功)")
             logger.info("=" * 60)
+            
+            # 连接成功后立即订阅（必须在连接建立后才能订阅）
+            try:
+                # 订阅所有设备类型的up主题（使用通配符）
+                # 格式：{type_code}/{serial_number}/user/up 或 /{type_code}/{serial_number}/user/up
+                # 使用通配符：+/+/user/up 和 /+/+/user/up 匹配所有品牌的设备
+                result1, mid1 = client.subscribe("+/+/user/up", qos=1)
+                result2, mid2 = client.subscribe("/+/+/user/up", qos=1)  # 支持带前导斜杠的格式
+                if result1 == 0 and result2 == 0:
+                    logger.info("已订阅通用topic: +/+/user/up (MID: {}) 和 /+/+/user/up (MID: {}) (支持所有品牌)".format(mid1, mid2))
+                else:
+                    logger.warning("订阅通用topic失败: +/+/user/up (rc: {}), /+/+/user/up (rc: {})".format(result1, result2))
+                
+                # 动态订阅所有激活的设备类型（异步执行）
+                if self._loop and self._loop.is_running():
+                    asyncio.run_coroutine_threadsafe(
+                        self._subscribe_all_device_types(),
+                        self._loop
+                    )
+            except Exception as e:
+                logger.error(f"订阅topic时出错: {e}", exc_info=True)
         else:
             logger.error("=" * 60)
             logger.error("MQTT 连接失败 - 连接信息详情")
@@ -373,6 +400,7 @@ class MQTTAdapter(TransportAdapter):
     
     def _on_disconnect(self, client: mqtt.Client, userdata, rc):
         """MQTT 断开连接回调"""
+        self._mqtt_connected = False
         logger.warning(f"MQTT 断开连接，返回码: {rc}")
     
     async def send_message(
