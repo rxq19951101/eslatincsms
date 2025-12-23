@@ -21,6 +21,14 @@ else:
     from app.ocpp.message_sender import message_sender as message_handler
     from app.ocpp.connection_manager import connection_manager
 
+# 导入 transport_manager 用于检查 MQTT 连接
+try:
+    from app.ocpp.transport_manager import transport_manager
+    TRANSPORT_MANAGER_AVAILABLE = True
+except ImportError:
+    TRANSPORT_MANAGER_AVAILABLE = False
+    transport_manager = None
+
 router = APIRouter()
 
 
@@ -73,7 +81,14 @@ async def remote_start(req: RemoteStartRequest) -> RemoteResponse:
         f"连接器ID: {req.connectorId}"
     )
     
-    if not connection_manager.is_connected(req.chargePointId):
+    # 检查连接状态（优先使用 transport_manager，支持 MQTT 和 WebSocket）
+    is_connected = False
+    if TRANSPORT_MANAGER_AVAILABLE and transport_manager:
+        is_connected = transport_manager.is_connected(req.chargePointId)
+    else:
+        is_connected = connection_manager.is_connected(req.chargePointId)
+    
+    if not is_connected:
         logger.warning(f"[API] 远程启动失败: 充电桩 {req.chargePointId} 未连接")
         raise ChargerNotConnectedException(req.chargePointId)
     
@@ -121,7 +136,14 @@ async def remote_stop(req: RemoteStopRequest) -> RemoteResponse:
         f"交易ID: {req.transactionId}"
     )
     
-    if not connection_manager.is_connected(req.chargePointId):
+    # 检查连接状态（优先使用 transport_manager，支持 MQTT 和 WebSocket）
+    is_connected = False
+    if TRANSPORT_MANAGER_AVAILABLE and transport_manager:
+        is_connected = transport_manager.is_connected(req.chargePointId)
+    else:
+        is_connected = connection_manager.is_connected(req.chargePointId)
+    
+    if not is_connected:
         logger.warning(f"[API] 远程停止失败: 充电桩 {req.chargePointId} 未连接")
         raise ChargerNotConnectedException(req.chargePointId)
     
@@ -168,7 +190,14 @@ async def change_configuration(req: ChangeConfigurationRequest) -> RemoteRespons
         f"配置值: {req.value}"
     )
     
-    if not connection_manager.is_connected(req.chargePointId):
+    # 检查连接状态（优先使用 transport_manager，支持 MQTT 和 WebSocket）
+    is_connected = False
+    if TRANSPORT_MANAGER_AVAILABLE and transport_manager:
+        is_connected = transport_manager.is_connected(req.chargePointId)
+    else:
+        is_connected = connection_manager.is_connected(req.chargePointId)
+    
+    if not is_connected:
         logger.warning(f"[API] 更改配置失败: 充电桩 {req.chargePointId} 未连接")
         raise ChargerNotConnectedException(req.chargePointId)
     
@@ -203,7 +232,14 @@ async def get_configuration(req: GetConfigurationRequest) -> RemoteResponse:
         f"配置键: {req.keys or '全部'}"
     )
     
-    if not connection_manager.is_connected(req.chargePointId):
+    # 检查连接状态（优先使用 transport_manager，支持 MQTT 和 WebSocket）
+    is_connected = False
+    if TRANSPORT_MANAGER_AVAILABLE and transport_manager:
+        is_connected = transport_manager.is_connected(req.chargePointId)
+    else:
+        is_connected = connection_manager.is_connected(req.chargePointId)
+    
+    if not is_connected:
         logger.warning(f"[API] 获取配置失败: 充电桩 {req.chargePointId} 未连接")
         raise ChargerNotConnectedException(req.chargePointId)
     
@@ -238,7 +274,14 @@ async def reset_charger(req: ResetRequest) -> RemoteResponse:
         f"重置类型: {req.type}"
     )
     
-    if not connection_manager.is_connected(req.chargePointId):
+    # 检查连接状态（优先使用 transport_manager，支持 MQTT 和 WebSocket）
+    is_connected = False
+    if TRANSPORT_MANAGER_AVAILABLE and transport_manager:
+        is_connected = transport_manager.is_connected(req.chargePointId)
+    else:
+        is_connected = connection_manager.is_connected(req.chargePointId)
+    
+    if not is_connected:
         logger.warning(f"[API] 重置失败: 充电桩 {req.chargePointId} 未连接")
         raise ChargerNotConnectedException(req.chargePointId)
     
@@ -273,7 +316,14 @@ async def unlock_connector(req: UnlockConnectorRequest) -> RemoteResponse:
         f"连接器ID: {req.connectorId}"
     )
     
-    if not connection_manager.is_connected(req.chargePointId):
+    # 检查连接状态（优先使用 transport_manager，支持 MQTT 和 WebSocket）
+    is_connected = False
+    if TRANSPORT_MANAGER_AVAILABLE and transport_manager:
+        is_connected = transport_manager.is_connected(req.chargePointId)
+    else:
+        is_connected = connection_manager.is_connected(req.chargePointId)
+    
+    if not is_connected:
         logger.warning(f"[API] 解锁连接器失败: 充电桩 {req.chargePointId} 未连接")
         raise ChargerNotConnectedException(req.chargePointId)
     

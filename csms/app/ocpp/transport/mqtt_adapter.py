@@ -102,15 +102,22 @@ class MQTTAdapter(TransportAdapter):
                 for device_type in device_types:
                     type_code = device_type.get("type_code") if isinstance(device_type, dict) else device_type.type_code
                     if type_code and type_code not in self._subscribed_types:
-                        # 订阅特定品牌的topic：{type_code}/+/user/up 和 /{type_code}/+/user/up
+                        # 订阅特定品牌的topic：{type_code}/+/user/up
                         topic = f"{type_code}/+/user/up"
-                        topic_with_slash = f"/{type_code}/+/user/up"
-                        result1, mid1 = self.client.subscribe(topic, qos=1)
-                        result2, mid2 = self.client.subscribe(topic_with_slash, qos=1)  # 支持带前导斜杠的格式
-                        if result1 == 0 and result2 == 0:
-                            logger.info(f"已订阅设备类型topic: {topic} (MID: {mid1}) 和 {topic_with_slash} (MID: {mid2}) (类型: {type_code})")
+                        
+                        logger.info(f"正在订阅设备类型 {type_code} 的topic...")
+                        result, mid = self.client.subscribe(topic, qos=1)
+                        logger.info(f"订阅 {topic}: rc={result}, mid={mid}")
+                        
+                        if result == 0:
+                            logger.info("=" * 60)
+                            logger.info(f"✓ 已订阅设备类型topic: {topic} (MID: {mid}) (类型: {type_code})")
+                            logger.info(f"  说明: 通配符 + 会匹配该类型的所有设备，例如: {type_code}/861076087029615/user/up")
+                            logger.info("=" * 60)
                         else:
-                            logger.warning(f"订阅设备类型topic失败: {topic} (rc: {result1}), {topic_with_slash} (rc: {result2}) (类型: {type_code})")
+                            logger.warning("=" * 60)
+                            logger.warning(f"✗ 订阅设备类型topic失败: {topic} (rc: {result}) (类型: {type_code})")
+                            logger.warning("=" * 60)
                         self._subscribed_types.add(type_code)
             finally:
                 db.close()
@@ -148,23 +155,35 @@ class MQTTAdapter(TransportAdapter):
             # 连接成功后立即订阅（必须在连接建立后才能订阅）
             try:
                 # 订阅所有设备类型的up主题（使用通配符）
-                # 格式：{type_code}/{serial_number}/user/up 或 /{type_code}/{serial_number}/user/up
-                # 使用通配符：+/+/user/up 和 /+/+/user/up 匹配所有品牌的设备
-                result1, mid1 = client.subscribe("+/+/user/up", qos=1)
-                result2, mid2 = client.subscribe("/+/+/user/up", qos=1)  # 支持带前导斜杠的格式
-                if result1 == 0 and result2 == 0:
-                    logger.info("已订阅通用topic: +/+/user/up (MID: {}) 和 /+/+/user/up (MID: {}) (支持所有品牌)".format(mid1, mid2))
+                # 格式：{type_code}/{serial_number}/user/up
+                # 使用通配符：+/+/user/up 匹配所有品牌的设备
+                logger.info("开始订阅通用topic...")
+                result, mid = client.subscribe("+/+/user/up", qos=1)
+                logger.info(f"订阅 +/+/user/up: rc={result}, mid={mid}")
+                
+                if result == 0:
+                    logger.info("=" * 60)
+                    logger.info("✓ 已订阅通用topic: +/+/user/up (MID: {}) (支持所有品牌)".format(mid))
+                    logger.info("  说明: 通配符 + 会匹配所有设备，例如: zcf/861076087029615/user/up")
+                    logger.info("=" * 60)
                 else:
-                    logger.warning("订阅通用topic失败: +/+/user/up (rc: {}), /+/+/user/up (rc: {})".format(result1, result2))
+                    logger.warning("=" * 60)
+                    logger.warning("✗ 订阅通用topic失败: +/+/user/up (rc: {})".format(result))
+                    logger.warning("=" * 60)
                 
                 # 动态订阅所有激活的设备类型（异步执行）
                 if self._loop and self._loop.is_running():
+                    logger.info("开始动态订阅设备类型...")
                     asyncio.run_coroutine_threadsafe(
                         self._subscribe_all_device_types(),
                         self._loop
                     )
+                else:
+                    logger.warning("事件循环不可用，无法执行动态订阅")
             except Exception as e:
                 logger.error(f"订阅topic时出错: {e}", exc_info=True)
+                import traceback
+                traceback.print_exc()
         else:
             logger.error("=" * 60)
             logger.error("MQTT 连接失败 - 连接信息详情")
@@ -252,13 +271,13 @@ class MQTTAdapter(TransportAdapter):
                 
                 is_ocpp_standard_format = True
                 
-                logger.info(f"[{charge_point_id}] <- MQTT OCPP {action} (标准格式, MessageType={message_type}, UniqueId={unique_id}, 品牌: {type_code}, SN: {serial_number}) | payload: {payload_data}")
+                logger.info(f"[{charge_point_id}] <- MQTT OCPP {action} (标准格式, MessageType={message_type}, UniqueId={unique_id}, 品牌: {type_code}, SN: {serial_number}, Topic: {topic}) | payload: {payload_data}")
             elif isinstance(raw_payload, dict):
                 # 简化格式: {"action": "...", "payload": {...}}
                 action = raw_payload.get("action", "")
                 payload_data = raw_payload.get("payload", {})
                 
-                logger.info(f"[{charge_point_id}] <- MQTT OCPP {action} (简化格式, 品牌: {type_code}, SN: {serial_number}) | payload: {payload_data}")
+                logger.info(f"[{charge_point_id}] <- MQTT OCPP {action} (简化格式, 品牌: {type_code}, SN: {serial_number}, Topic: {topic}) | payload: {payload_data}")
             else:
                 logger.error(f"[{charge_point_id}] 无效的消息格式: {raw_payload}, 期望数组或对象")
                 return
