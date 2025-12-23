@@ -74,10 +74,11 @@ class MQTTAdapter(TransportAdapter):
             self.client.loop_start()
             
             # 订阅所有设备类型的up主题（使用通配符）
-            # 格式：{type_code}/{serial_number}/user/up
-            # 使用通配符：+/+/user/up 匹配所有品牌的设备
+            # 格式：{type_code}/{serial_number}/user/up 或 /{type_code}/{serial_number}/user/up
+            # 使用通配符：+/+/user/up 和 /+/+/user/up 匹配所有品牌的设备
             self.client.subscribe("+/+/user/up", qos=1)
-            logger.info("已订阅通用topic: +/+/user/up (支持所有品牌)")
+            self.client.subscribe("/+/+/user/up", qos=1)  # 支持带前导斜杠的格式
+            logger.info("已订阅通用topic: +/+/user/up 和 /+/+/user/up (支持所有品牌)")
             
             # 动态订阅所有激活的设备类型（可选，用于更精确的订阅）
             await self._subscribe_all_device_types()
@@ -99,11 +100,13 @@ class MQTTAdapter(TransportAdapter):
                 for device_type in device_types:
                     type_code = device_type.get("type_code") if isinstance(device_type, dict) else device_type.type_code
                     if type_code and type_code not in self._subscribed_types:
-                        # 订阅特定品牌的topic：{type_code}/+/user/up
+                        # 订阅特定品牌的topic：{type_code}/+/user/up 和 /{type_code}/+/user/up
                         topic = f"{type_code}/+/user/up"
+                        topic_with_slash = f"/{type_code}/+/user/up"
                         self.client.subscribe(topic, qos=1)
+                        self.client.subscribe(topic_with_slash, qos=1)  # 支持带前导斜杠的格式
                         self._subscribed_types.add(type_code)
-                        logger.info(f"已订阅设备类型topic: {topic} (类型: {type_code})")
+                        logger.info(f"已订阅设备类型topic: {topic} 和 {topic_with_slash} (类型: {type_code})")
             finally:
                 db.close()
         except Exception as e:
@@ -156,11 +159,14 @@ class MQTTAdapter(TransportAdapter):
         """MQTT 消息接收回调"""
         try:
             topic = msg.topic
-            topic_parts = topic.split("/")
+            # 处理前导斜杠：去除前导斜杠以便统一处理
+            topic_normalized = topic.lstrip("/")
+            topic_parts = topic_normalized.split("/")
             
             # 解析新格式：{type_code}/{serial_number}/user/up
+            # 支持格式：zcf/861076087029615/user/up 或 /zcf/861076087029615/user/up
             if len(topic_parts) != 4:
-                logger.warning(f"无效的 MQTT 主题格式: {topic}，期望格式: {{type_code}}/{{serial_number}}/user/up")
+                logger.warning(f"无效的 MQTT 主题格式: {topic}，期望格式: {{type_code}}/{{serial_number}}/user/up 或 /{{type_code}}/{{serial_number}}/user/up")
                 logger.warning(f"消息详情: QoS={msg.qos}, MID={msg.mid}, Retain={msg.retain}, Payload长度={len(msg.payload)}")
                 return
             

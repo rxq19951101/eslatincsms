@@ -17,8 +17,8 @@ logger = logging.getLogger("ocpp_csms")
 
 
 def now_iso() -> str:
-    """获取当前ISO格式时间"""
-    return datetime.now(timezone.utc).isoformat()
+    """获取当前ISO格式时间（使用Z后缀）"""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
 
 class OCPPMessageHandler:

@@ -275,7 +275,8 @@ async def send_ocpp_call(charge_point_id: str, action: str, payload: Dict[str, A
 
 
 def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    """获取当前ISO格式时间（使用Z后缀）"""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
 
 def get_default_charger(charger_id: str) -> Dict[str, Any]:
