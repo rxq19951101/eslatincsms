@@ -237,7 +237,26 @@ class MQTTAdapter(TransportAdapter):
             # 支持两种格式：
             # 1. 简化格式: {"action": "BootNotification", "payload": {...}}
             # 2. OCPP 1.6 标准格式: [MessageType, UniqueId, Action, Payload]
-            raw_payload = json.loads(msg.payload.decode())
+            try:
+                raw_payload = json.loads(msg.payload.decode())
+            except json.JSONDecodeError as e:
+                logger.error(
+                    f"MQTT 消息JSON解析错误: {e}, "
+                    f"topic: {topic}, "
+                    f"payload: {msg.payload}, "
+                    f"payload长度: {len(msg.payload)}, "
+                    f"错误位置: 第 {e.lineno} 行，第 {e.colno} 列 (字符 {e.pos})"
+                )
+                # 尝试显示错误位置附近的内容
+                try:
+                    payload_str = msg.payload.decode()
+                    start = max(0, e.pos - 100)
+                    end = min(len(payload_str), e.pos + 100)
+                    logger.error(f"错误位置附近的内容: {payload_str[start:end]}")
+                    logger.error(f"错误位置标记: {' ' * (e.pos - start)}^")
+                except:
+                    pass
+                return
             
             unique_id = None  # 用于保存 OCPP 标准格式的 UniqueId
             is_ocpp_standard_format = False

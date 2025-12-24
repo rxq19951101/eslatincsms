@@ -153,7 +153,8 @@ class ChargePointService:
             if not evse:
                 evse = EVSE(
                     charge_point_id=charge_point_id,
-                    evse_id=1
+                    evse_id=1,
+                    connector_type="Type2"  # 默认连接器类型
                 )
                 db.add(evse)
                 db.flush()
@@ -252,7 +253,8 @@ class ChargePointService:
             # 创建EVSE
             evse = EVSE(
                 charge_point_id=charge_point_id,
-                evse_id=evse_id
+                evse_id=evse_id,
+                connector_type="Type2"  # 默认连接器类型
             )
             db.add(evse)
             db.flush()

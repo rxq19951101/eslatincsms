@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.database.models import (
     ChargingSession, EVSE, EVSEStatus, Order, Invoice, PricingSnapshot
 )
+from app.core.id_generator import generate_order_id
 
 logger = logging.getLogger("ocpp_csms")
 
@@ -49,7 +50,20 @@ class SessionService:
             status="ongoing"
         )
         db.add(session)
-        db.flush()
+        db.flush()  # 先 flush 以获取 session.id
+        
+        # 创建订单（关联到会话）
+        order_id = generate_order_id(charge_point_id=charge_point_id, transaction_id=transaction_id)
+        order = Order(
+            id=order_id,
+            session_id=session.id,
+            charge_point_id=charge_point_id,
+            user_id=user_id or id_tag,  # 如果没有 user_id，使用 id_tag
+            id_tag=id_tag,
+            start_time=datetime.now(timezone.utc),
+            status="ongoing"
+        )
+        db.add(order)
         
         # 更新EVSE状态
         evse_status = db.query(EVSEStatus).filter(
@@ -62,7 +76,7 @@ class SessionService:
             evse_status.last_seen = datetime.now(timezone.utc)
         
         db.commit()
-        logger.info(f"充电会话开始: session_id={session.id}, transaction_id={transaction_id}")
+        logger.info(f"充电会话开始: session_id={session.id}, transaction_id={transaction_id}, order_id={order_id}")
         return session
     
     @staticmethod
@@ -88,6 +102,14 @@ class SessionService:
         session.meter_stop = meter_stop
         session.status = "completed"
         session.updated_at = datetime.now(timezone.utc)
+        
+        # 更新关联的订单状态
+        order = db.query(Order).filter(Order.session_id == session.id).first()
+        if order:
+            order.end_time = datetime.now(timezone.utc)
+            order.status = "completed"
+            order.updated_at = datetime.now(timezone.utc)
+            logger.info(f"订单状态已更新: order_id={order.id}, status=completed")
         
         # 更新EVSE状态
         evse_status = db.query(EVSEStatus).filter(

@@ -131,16 +131,22 @@ def get_charger(charge_point_id: str, db: Session = Depends(get_db)) -> dict:
     status = evse_status.status if evse_status else "Unknown"
     last_seen = evse_status.last_seen if evse_status else None
     
-    # 获取EVSE列表
+    # 获取EVSE列表（包含 connector_type）
     evses = db.query(EVSE).filter(EVSE.charge_point_id == charge_point.id).all()
     evse_list = []
+    default_connector_type = "Type2"  # 默认值
     for evse in evses:
         evse_status_item = db.query(EVSEStatus).filter(EVSEStatus.evse_id == evse.id).first()
         evse_list.append({
             "evse_id": evse.evse_id,
+            "connector_type": evse.connector_type,  # 从 EVSE 获取 connector_type
+            "max_power_kw": evse.max_power_kw,
             "status": evse_status_item.status if evse_status_item else "Unknown",
             "last_seen": evse_status_item.last_seen.isoformat() if evse_status_item and evse_status_item.last_seen else None,
         })
+        # 使用第一个 EVSE 的 connector_type 作为默认值（向后兼容）
+        if evse.evse_id == 1:
+            default_connector_type = evse.connector_type
     
     return {
         "id": charge_point.id,
@@ -148,6 +154,7 @@ def get_charger(charge_point_id: str, db: Session = Depends(get_db)) -> dict:
         "model": charge_point.model,
         "serial_number": charge_point.serial_number,
         "firmware_version": charge_point.firmware_version,
+        "connector_type": default_connector_type,  # 从默认 EVSE (evse_id=1) 获取，用于向后兼容
         "status": status,
         "last_seen": last_seen.isoformat() if last_seen else None,
         "location": {
@@ -156,7 +163,7 @@ def get_charger(charge_point_id: str, db: Session = Depends(get_db)) -> dict:
             "address": site.address if site else None,
         },
         "price_per_kwh": tariff.base_price_per_kwh if tariff else None,
-        "evses": evse_list,
+        "evses": evse_list,  # 每个 EVSE 都有自己的 connector_type
         "created_at": charge_point.created_at.isoformat() if charge_point.created_at else None,
         "updated_at": charge_point.updated_at.isoformat() if charge_point.updated_at else None,
     }

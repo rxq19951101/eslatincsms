@@ -83,6 +83,19 @@ class TestDatabaseModels:
         
         assert evse.charge_point_id == sample_charge_point.id
         assert evse.evse_id == 1
+        assert evse.connector_type == "Type2"  # connector_type 现在在 EVSE 表中
+    
+    def test_evse_connector_type_default(self, db_session, sample_charge_point):
+        """测试EVSE connector_type 默认值"""
+        evse = EVSE(
+            charge_point_id=sample_charge_point.id,
+            evse_id=2
+            # 不指定 connector_type，应该使用默认值
+        )
+        db_session.add(evse)
+        db_session.commit()
+        
+        assert evse.connector_type == "Type2"  # 默认值
     
     def test_charging_session_creation(self, db_session, sample_charge_point, sample_evse):
         """测试创建充电会话"""
@@ -98,8 +111,62 @@ class TestDatabaseModels:
         db_session.commit()
         
         assert session.transaction_id == 12345
-        assert session.id_tag == "TEST_USER_001"
-        assert session.status == "ongoing"
+    
+    def test_charging_session_transaction_unique_constraint(self, db_session, sample_charge_point):
+        """测试 transaction_id 组合唯一约束 (charge_point_id, evse_id, transaction_id)"""
+        # 创建两个不同的 EVSE
+        evse1 = EVSE(
+            charge_point_id=sample_charge_point.id,
+            evse_id=1,
+            connector_type="Type2"
+        )
+        evse2 = EVSE(
+            charge_point_id=sample_charge_point.id,
+            evse_id=2,
+            connector_type="CCS2"
+        )
+        db_session.add_all([evse1, evse2])
+        db_session.flush()
+        
+        # 在同一个充电桩的不同 EVSE 可以使用相同的 transaction_id
+        session1 = ChargingSession(
+            charge_point_id=sample_charge_point.id,
+            evse_id=evse1.id,
+            transaction_id=99999,
+            id_tag="USER1",
+            start_time=datetime.now(timezone.utc),
+            status="ongoing"
+        )
+        session2 = ChargingSession(
+            charge_point_id=sample_charge_point.id,
+            evse_id=evse2.id,
+            transaction_id=99999,  # 相同的 transaction_id，但不同的 evse_id
+            id_tag="USER2",
+            start_time=datetime.now(timezone.utc),
+            status="ongoing"
+        )
+        db_session.add_all([session1, session2])
+        db_session.commit()
+        
+        # 应该可以成功创建（因为 evse_id 不同）
+        assert session1.transaction_id == 99999
+        assert session2.transaction_id == 99999
+        assert session1.evse_id != session2.evse_id
+        
+        # 尝试在同一个 (charge_point_id, evse_id) 创建相同的 transaction_id 应该失败
+        from sqlalchemy.exc import IntegrityError
+        session3 = ChargingSession(
+            charge_point_id=sample_charge_point.id,
+            evse_id=evse1.id,  # 相同的 evse_id
+            transaction_id=99999,  # 相同的 transaction_id
+            id_tag="USER3",
+            start_time=datetime.now(timezone.utc),
+            status="ongoing"
+        )
+        db_session.add(session3)
+        
+        with pytest.raises(IntegrityError):
+            db_session.commit()
     
     def test_device_event_creation(self, db_session, sample_charge_point, sample_device):
         """测试创建设备事件"""

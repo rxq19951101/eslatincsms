@@ -8,7 +8,7 @@ import logging
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 from app.core.id_generator import generate_order_id, generate_invoice_id, generate_site_id
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, Body, HTTPException, Request
@@ -336,9 +336,29 @@ def migrate_charger_data(charger: Dict[str, Any]) -> Dict[str, Any]:
     if "operational_status" not in charger:
         charger["operational_status"] = "ENABLED"
     
-    # 如果缺少其他新字段，使用默认值
-    if "connector_type" not in charger:
-        charger["connector_type"] = "Type2"
+    # 如果缺少 connector_type，尝试从数据库获取（从 EVSE 表）
+    if "connector_type" not in charger or not charger.get("connector_type"):
+        charger_id = charger.get("id")
+        if charger_id and DATABASE_AVAILABLE:
+            try:
+                from app.database.models import EVSE
+                db = SessionLocal()
+                try:
+                    default_evse = db.query(EVSE).filter(
+                        EVSE.charge_point_id == charger_id,
+                        EVSE.evse_id == 1
+                    ).first()
+                    if default_evse:
+                        charger["connector_type"] = default_evse.connector_type
+                    else:
+                        charger["connector_type"] = "Type2"  # 默认值
+                finally:
+                    db.close()
+            except Exception as e:
+                logger.warning(f"从数据库获取 connector_type 失败: {e}，使用默认值")
+                charger["connector_type"] = "Type2"
+        else:
+            charger["connector_type"] = "Type2"  # 默认值
     if "charging_rate" not in charger:
         charger["charging_rate"] = 7.0
     if "price_per_kwh" not in charger:
@@ -564,7 +584,7 @@ def update_order(
     logger.info(f"Order updated: {order_id}, energy: {energy_kwh} kWh, duration: {duration_minutes} min")
 
 
-def get_order(order_id: str) -> Dict[str, Any] | None:
+def get_order(order_id: str) -> Optional[Dict[str, Any]]:
     """获取单个订单"""
     order_data = redis_client.hget(ORDERS_HASH_KEY, order_id)
     if not order_data:
@@ -774,10 +794,10 @@ async def listen_charger_offline_events() -> None:
 def update_active(
     charger_id: str,
     *,
-    vendor: str | None = None,
-    model: str | None = None,
-    status: str | None = None,
-    txn_id: int | None | str | None = None,
+    vendor: Optional[str] = None,
+    model: Optional[str] = None,
+    status: Optional[str] = None,
+    txn_id: Optional[Union[int, str]] = None,
 ) -> None:
     rec = active_chargers.get(charger_id)
     if rec is None:
@@ -833,7 +853,7 @@ class RemoteStopRequest(BaseModel):
 class RemoteResponse(BaseModel):
     success: bool
     message: str
-    details: Dict[str, Any] | None = None
+    details: Optional[Dict[str, Any]] = None
 
 
 class UpdateLocationRequest(BaseModel):
@@ -860,12 +880,12 @@ class ReplyMessageRequest(BaseModel):
 
 
 class GetOrdersRequest(BaseModel):
-    userId: str | None = None  # 如果提供，只返回该用户的订单；否则返回所有订单
+    userId: Optional[str] = None  # 如果提供，只返回该用户的订单；否则返回所有订单
 
 
 class GetConfigurationRequest(BaseModel):
     chargePointId: str
-    keys: List[str] | None = None  # 如果为空，获取所有配置
+    keys: Optional[List[str]] = None  # 如果为空，获取所有配置
 
 
 class ChangeConfigurationRequest(BaseModel):
@@ -902,37 +922,37 @@ class SetChargingProfileRequest(BaseModel):
 
 class ClearChargingProfileRequest(BaseModel):
     chargePointId: str
-    id: int | None = None
-    connectorId: int | None = None
-    chargingProfilePurpose: str | None = None
-    stackLevel: int | None = None
+    id: Optional[int] = None
+    connectorId: Optional[int] = None
+    chargingProfilePurpose: Optional[str] = None
+    stackLevel: Optional[int] = None
 
 
 class GetDiagnosticsRequest(BaseModel):
     chargePointId: str
     location: str
-    retries: int | None = None
-    retryInterval: int | None = None
-    startTime: str | None = None
-    stopTime: str | None = None
+    retries: Optional[int] = None
+    retryInterval: Optional[int] = None
+    startTime: Optional[str] = None
+    stopTime: Optional[str] = None
 
 
 class ExportLogsRequest(BaseModel):
     chargePointId: str
     location: str = ""  # 可选，用于GetDiagnostics
-    retries: int | None = None
-    retryInterval: int | None = None
-    startTime: str | None = None
-    stopTime: str | None = None
-    userRole: str | None = None  # 用户角色，用于权限验证
+    retries: Optional[int] = None
+    retryInterval: Optional[int] = None
+    startTime: Optional[str] = None
+    stopTime: Optional[str] = None
+    userRole: Optional[str] = None  # 用户角色，用于权限验证
 
 
 class UpdateFirmwareRequest(BaseModel):
     chargePointId: str
     location: str
     retrieveDate: str
-    retryInterval: int | None = None
-    retries: int | None = None
+    retryInterval: Optional[int] = None
+    retries: Optional[int] = None
 
 
 class ReserveNowRequest(BaseModel):
@@ -941,7 +961,7 @@ class ReserveNowRequest(BaseModel):
     expiryDate: str
     idTag: str
     reservationId: int
-    parentIdTag: str | None = None
+    parentIdTag: Optional[str] = None
 
 
 class CancelReservationRequest(BaseModel):
@@ -1070,10 +1090,19 @@ def chargers_list() -> List[Dict[str, Any]]:
                     Tariff.is_active == True
                 ).first() if cp.site_id else None
                 
+                # 获取默认 EVSE 的 connector_type
+                from app.database.models import EVSE
+                default_evse = db.query(EVSE).filter(
+                    EVSE.charge_point_id == cp.id,
+                    EVSE.evse_id == 1
+                ).first()
+                connector_type = default_evse.connector_type if default_evse else "Type2"
+                
                 result.append({
                     "id": cp.id,
                     "vendor": cp.vendor,
                     "model": cp.model,
+                    "connector_type": connector_type,  # 从 EVSE 获取
                     "status": status,
                     "last_seen": last_seen.isoformat() if last_seen else None,
                     "location": {
@@ -2285,7 +2314,7 @@ async def reply_message(req: ReplyMessageRequest) -> RemoteResponse:
 
 
 @app.get("/api/orders", tags=["REST"])
-def get_orders(userId: str | None = None) -> List[Dict[str, Any]]:
+def get_orders(userId: Optional[str] = None) -> List[Dict[str, Any]]:
     """
     Get charging orders - 使用新表结构
     If userId is provided, returns only orders for that user.
@@ -2349,7 +2378,7 @@ def get_orders(userId: str | None = None) -> List[Dict[str, Any]]:
 
 
 @app.get("/api/orders/current", tags=["REST"])
-def get_current_order(chargePointId: str = Query(...), transactionId: int | None = Query(None)) -> Dict[str, Any]:
+def get_current_order(chargePointId: str = Query(...), transactionId: Optional[int] = Query(None)) -> Dict[str, Any]:
     """
     Get current ongoing order for a charger - 使用新表结构
     If transactionId is provided, find order by transaction ID.
@@ -2450,7 +2479,7 @@ def get_current_order(chargePointId: str = Query(...), transactionId: int | None
 @app.get("/api/orders/current/meter", tags=["REST"])
 def get_current_order_meter(
     chargePointId: str = Query(...), 
-    transactionId: int | None = Query(None)
+    transactionId: Optional[int] = Query(None)
 ) -> Dict[str, Any]:
     """
     获取当前充电订单的实时电量数据

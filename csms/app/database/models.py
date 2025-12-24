@@ -60,7 +60,6 @@ class ChargePoint(Base):
     
     # 技术规格
     max_power_kw = Column(Float, nullable=True)  # 最大功率
-    connector_type = Column(String(50), default="Type2")
     
     # 关联设备（MQTT设备）
     device_serial_number = Column(String(15), ForeignKey("devices.serial_number"), nullable=True, index=True)
@@ -95,7 +94,7 @@ class EVSE(Base):
     evse_id = Column(Integer, nullable=False)  # OCPP中的evse_id
     
     # EVSE信息
-    connector_type = Column(String(50), nullable=True)  # 连接器类型
+    connector_type = Column(String(50), default="Type2")  # 连接器类型（从 charge_points 下放）
     max_power_kw = Column(Float, nullable=True)  # 该EVSE的最大功率
     
     # 元数据
@@ -230,6 +229,7 @@ class ChargingSession(Base):
         Index('idx_sessions_id_tag', 'id_tag'),
         Index('idx_sessions_start_time', 'start_time'),
         Index('idx_sessions_charge_point', 'charge_point_id'),
+        Index('idx_sessions_transaction_unique', 'charge_point_id', 'evse_id', 'transaction_id', unique=True),
     )
 
 

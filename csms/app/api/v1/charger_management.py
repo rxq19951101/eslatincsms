@@ -229,6 +229,60 @@ def create_charger(req: CreateChargerRequest, db: Session = Depends(get_db)) -> 
         if req.firmware_version:
             charge_point.firmware_version = req.firmware_version
         
+        # 更新EVSE的connector_type（如果提供）
+        if req.connector_type:
+            evse = db.query(EVSE).filter(
+                EVSE.charge_point_id == req.charger_id,
+                EVSE.evse_id == 1
+            ).first()
+            if evse:
+                evse.connector_type = req.connector_type
+            else:
+                # 如果EVSE不存在，创建它
+                evse = EVSE(
+                    charge_point_id=req.charger_id,
+                    evse_id=1,
+                    connector_type=req.connector_type
+                )
+                db.add(evse)
+                db.flush()
+                
+                # 创建EVSE状态
+                evse_status = EVSEStatus(
+                    evse_id=evse.id,
+                    charge_point_id=req.charger_id,
+                    status="Unknown",
+                    last_seen=datetime.now(timezone.utc)
+                )
+                db.add(evse_status)
+        
+        # 更新EVSE的connector_type（如果提供）
+        if req.connector_type:
+            evse = db.query(EVSE).filter(
+                EVSE.charge_point_id == req.charger_id,
+                EVSE.evse_id == 1
+            ).first()
+            if evse:
+                evse.connector_type = req.connector_type
+            else:
+                # 如果EVSE不存在，创建它
+                evse = EVSE(
+                    charge_point_id=req.charger_id,
+                    evse_id=1,
+                    connector_type=req.connector_type
+                )
+                db.add(evse)
+                db.flush()
+                
+                # 创建EVSE状态
+                evse_status = EVSEStatus(
+                    evse_id=evse.id,
+                    charge_point_id=req.charger_id,
+                    status="Unknown",
+                    last_seen=datetime.now(timezone.utc)
+                )
+                db.add(evse_status)
+        
         # 更新站点位置
         if req.latitude is not None and req.longitude is not None:
             site = charge_point.site if charge_point.site_id else None
@@ -308,13 +362,48 @@ def create_charger(req: CreateChargerRequest, db: Session = Depends(get_db)) -> 
                 base_price_per_kwh=req.price_per_kwh,
                 service_fee=0,
                 valid_from=datetime.now(timezone.utc),
-            is_active=True
-        )
+                is_active=True
+            )
             db.add(tariff)
+        
+        # 创建或更新默认EVSE（evse_id=1）
+        evse = db.query(EVSE).filter(
+            EVSE.charge_point_id == req.charger_id,
+            EVSE.evse_id == 1
+        ).first()
+        
+        if not evse:
+            evse = EVSE(
+                charge_point_id=req.charger_id,
+                evse_id=1,
+                connector_type=req.connector_type or "Type2"
+            )
+            db.add(evse)
+            db.flush()
+            
+            # 创建EVSE状态
+            evse_status = EVSEStatus(
+                evse_id=evse.id,
+                charge_point_id=req.charger_id,
+                status="Unknown",
+                last_seen=datetime.now(timezone.utc)
+            )
+            db.add(evse_status)
+        else:
+            # 更新EVSE的connector_type
+            if req.connector_type:
+                evse.connector_type = req.connector_type
     
     try:
         db.commit()
-        db.refresh(charger)
+        db.refresh(charge_point)
+        
+        # 获取默认 EVSE 的 connector_type（用于 Redis 同步）
+        default_evse = db.query(EVSE).filter(
+            EVSE.charge_point_id == req.charger_id,
+            EVSE.evse_id == 1
+        ).first()
+        connector_type_for_redis = default_evse.connector_type if default_evse else (req.connector_type or "Type2")
         
         # 同步更新Redis
         try:
@@ -330,7 +419,7 @@ def create_charger(req: CreateChargerRequest, db: Session = Depends(get_db)) -> 
                 "id": req.charger_id,
                 "vendor": req.vendor,
                 "model": req.model,
-                "connector_type": req.connector_type,
+                "connector_type": connector_type_for_redis,  # 从 EVSE 获取，用于向后兼容
                 "charging_rate": req.charging_rate,
                 "price_per_kwh": req.price_per_kwh,
                 "location": {
@@ -364,6 +453,13 @@ def create_charger(req: CreateChargerRequest, db: Session = Depends(get_db)) -> 
         ).first()
         status = evse_status.status if evse_status else "Unknown"
         
+        # 获取默认 EVSE 的 connector_type
+        default_evse = db.query(EVSE).filter(
+            EVSE.charge_point_id == charge_point.id,
+            EVSE.evse_id == 1
+        ).first()
+        connector_type = default_evse.connector_type if default_evse else "Type2"
+        
         return {
             "success": True,
             "message": "充电桩已创建/更新",
@@ -371,6 +467,7 @@ def create_charger(req: CreateChargerRequest, db: Session = Depends(get_db)) -> 
                 "id": charge_point.id,
                 "vendor": charge_point.vendor,
                 "model": charge_point.model,
+                "connector_type": connector_type,  # 从 EVSE 获取
                 "status": status,
                 "location": {
                     "latitude": site.latitude if site else None,

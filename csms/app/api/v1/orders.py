@@ -18,6 +18,7 @@ router = APIRouter()
 def list_orders(
     user_id: Optional[str] = Query(None, description="用户ID"),
     charge_point_id: Optional[str] = Query(None, description="充电桩ID"),
+    session_id: Optional[int] = Query(None, description="会话ID"),
     status: Optional[str] = Query(None, description="状态过滤"),
     limit: int = Query(100, le=1000),
     offset: int = Query(0, ge=0),
@@ -28,6 +29,7 @@ def list_orders(
         f"[API] GET /api/v1/orders | "
         f"用户ID: {user_id or '全部'} | "
         f"充电桩ID: {charge_point_id or '全部'} | "
+        f"会话ID: {session_id or '全部'} | "
         f"状态: {status or '全部'} | "
         f"限制: {limit} | 偏移: {offset}"
     )
@@ -38,6 +40,8 @@ def list_orders(
         query = query.filter(Order.user_id == user_id)
     if charge_point_id:
         query = query.filter(Order.charge_point_id == charge_point_id)
+    if session_id:
+        query = query.filter(Order.session_id == session_id)
     if status:
         query = query.filter(Order.status == status)
     
@@ -68,6 +72,7 @@ def list_orders(
         
         result.append({
             "id": o.id,
+            "session_id": o.session_id,  # 添加 session_id 字段
             "charge_point_id": o.charge_point_id,
             "user_id": o.user_id,
             "id_tag": o.id_tag,

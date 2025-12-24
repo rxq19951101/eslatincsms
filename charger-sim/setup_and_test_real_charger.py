@@ -33,6 +33,7 @@ class RealChargerSetup:
         self.serial_number = serial_number
         self.type_code = type_code
         self.base_url = f"{self.server_url}/api/v1"
+        self.mqtt_process: Optional[subprocess.Popen] = None
         
     def print_header(self, title: str):
         """打印标题"""
@@ -136,14 +137,12 @@ class RealChargerSetup:
         return mqtt_config
     
     def step3_connect_mqtt(self, mqtt_config: dict, mqtt_broker: str = "47.236.134.99", mqtt_port: int = 1883):
-        """步骤3: 连接MQTT并运行"""
-        self.print_header("步骤 3: 连接MQTT并运行")
+        """步骤3: 连接MQTT并运行（后台启动）"""
+        self.print_header("步骤 3: 启动MQTT模拟器")
         
         print(f"MQTT Broker: {mqtt_broker}:{mqtt_port}")
         print(f"设备序列号: {self.serial_number}")
-        print("\n正在启动MQTT连接...")
-        print("提示: 按 Ctrl+C 停止连接")
-        print("=" * 80)
+        print("\n正在后台启动MQTT连接...")
         
         # 使用持续运行的模拟器脚本
         import os
@@ -164,12 +163,30 @@ class RealChargerSetup:
         ]
         
         try:
-            # 运行MQTT连接脚本
-            subprocess.run(cmd)
-        except KeyboardInterrupt:
-            print("\n连接已停止")
+            # 在后台启动MQTT连接脚本（不捕获输出，避免阻塞）
+            self.mqtt_process = subprocess.Popen(
+                cmd,
+                stdout=None,  # 直接输出到终端，不捕获
+                stderr=None
+            )
+            print(f"✓ MQTT模拟器已启动（PID: {self.mqtt_process.pid}）")
+            print("等待设备连接并发送 BootNotification...")
+            
+            # 简单等待一下，让模拟器启动
+            print("等待模拟器启动...")
+            time.sleep(3)
+            
+            # 检查进程是否还在运行
+            if self.mqtt_process.poll() is not None:
+                print(f"✗ 模拟器进程已退出，返回码: {self.mqtt_process.returncode}")
+                return False
+            
+            print("✓ 模拟器进程正在运行")
+            
+            return True
         except Exception as e:
-            print(f"\n✗ 连接失败: {e}")
+            print(f"\n✗ 启动失败: {e}")
+            return False
     
     def step4_test_functions(self, charge_point_id: Optional[str] = None):
         """步骤4: 使用测试脚本测试功能"""
@@ -184,17 +201,37 @@ class RealChargerSetup:
         print("=" * 80)
         
         # 构建命令
+        import os
+        script_dir = os.path.dirname(os.path.abspath(__file__))
         cmd = [
             "python3",
-            "test_charge_point_functions.py",
+            os.path.join(script_dir, "test_charge_point_functions.py"),
             "--server", self.server_url,
             "--charge-point-id", charge_point_id
         ]
         
         try:
-            subprocess.run(cmd, cwd="charger-sim")
+            print(f"执行命令: {' '.join(cmd)}")
+            print("开始运行测试脚本...")
+            # 直接运行，让输出实时显示
+            result = subprocess.run(
+                cmd,
+                check=False,  # 不抛出异常，手动检查返回码
+                timeout=120  # 设置超时时间（2分钟）
+            )
+            print(f"\n测试脚本执行完成，返回码: {result.returncode}")
+            success = result.returncode == 0
+            if not success:
+                print(f"\n✗ 测试失败，返回码: {result.returncode}")
+            return success
+        except subprocess.TimeoutExpired:
+            print(f"\n✗ 测试超时（超过2分钟）")
+            return False
         except Exception as e:
             print(f"\n✗ 测试失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
     
     def run_full_setup(self, mqtt_broker: str = "47.236.134.99", mqtt_port: int = 1883, 
                        skip_connection: bool = False, skip_test: bool = False):
@@ -225,15 +262,34 @@ class RealChargerSetup:
         
         # 步骤3: 连接MQTT（如果不需要跳过）
         if not skip_connection:
-            print("\n提示: 正在启动MQTT连接...")
-            print("请等待设备连接成功并发送 BootNotification 后，再运行测试")
-            print("按 Ctrl+C 停止连接")
-            time.sleep(2)  # 给用户2秒时间看到提示
-            self.step3_connect_mqtt(mqtt_config, mqtt_broker, mqtt_port)
+            if not self.step3_connect_mqtt(mqtt_config, mqtt_broker, mqtt_port):
+                print("\n✗ MQTT连接启动失败，无法继续")
+                return False
+            
+            # 等待设备连接并发送 BootNotification
+            print("\n等待设备连接并发送 BootNotification...")
+            max_wait = 30  # 最多等待30秒
+            for i in range(max_wait):
+                try:
+                    response = requests.get(
+                        f"{self.base_url}/chargers/{self.serial_number}",
+                        timeout=5
+                    )
+                    if response.status_code == 200:
+                        charger_status = response.json().get("status")
+                        print(f"✓ 充电桩已创建: {self.serial_number}, 状态: {charger_status}")
+                        break
+                except requests.exceptions.RequestException:
+                    pass
+                if i < max_wait - 1:
+                    print(f"等待中... ({i+1}/{max_wait})")
+                    time.sleep(1)
+            else:
+                print(f"⚠ 等待超时，但继续测试...")
         else:
             print("\n跳过MQTT连接步骤")
             print(f"\n手动连接命令:")
-            print(f"python3 charger-sim/test_remote_mqtt_ocpp.py \\")
+            print(f"python3 charger-sim/run_real_charger_simulator.py \\")
             print(f"  --broker {mqtt_broker} \\")
             print(f"  --port {mqtt_port} \\")
             print(f"  --client-id {mqtt_config['client_id']} \\")
@@ -246,17 +302,25 @@ class RealChargerSetup:
         
         # 步骤4: 测试功能（如果不需要跳过）
         if not skip_test:
-            print("\n提示: 功能测试步骤已跳过（需要在设备连接后手动运行）")
-            print(f"\n手动测试命令:")
-            print(f"python3 charger-sim/test_charge_point_functions.py \\")
-            print(f"  --server {self.server_url} \\")
-            print(f"  --charge-point-id {self.serial_number}")
+            time.sleep(3)  # 再等待3秒，确保设备完全连接
+            self.step4_test_functions(self.serial_number)
         else:
             print("\n跳过功能测试步骤")
             print(f"\n手动测试命令:")
             print(f"python3 charger-sim/test_charge_point_functions.py \\")
             print(f"  --server {self.server_url} \\")
             print(f"  --charge-point-id {self.serial_number}")
+        
+        # 清理：停止MQTT模拟器
+        if self.mqtt_process:
+            print("\n正在停止MQTT模拟器...")
+            self.mqtt_process.terminate()
+            try:
+                self.mqtt_process.wait(timeout=5)
+                print("✓ MQTT模拟器已停止")
+            except subprocess.TimeoutExpired:
+                self.mqtt_process.kill()
+                print("✓ MQTT模拟器已强制停止")
         
         print("\n" + "=" * 80)
         print("设置完成！")
@@ -329,6 +393,16 @@ def main():
         action="store_true",
         help="跳过功能测试步骤"
     )
+    parser.add_argument(
+        "--setup-only",
+        action="store_true",
+        help="仅执行设置步骤（添加设备），不启动MQTT和测试"
+    )
+    parser.add_argument(
+        "--test-only",
+        action="store_true",
+        help="仅执行测试步骤（需要先运行setup-only）"
+    )
     
     args = parser.parse_args()
     
@@ -343,12 +417,139 @@ def main():
         type_code=args.type_code
     )
     
-    setup.run_full_setup(
-        mqtt_broker=args.mqtt_broker,
-        mqtt_port=args.mqtt_port,
-        skip_connection=args.skip_connection,
-        skip_test=args.skip_test
-    )
+    if args.setup_only:
+        # 仅执行设置步骤
+        print("\n" + "=" * 80)
+        print("仅执行设备设置步骤")
+        print("=" * 80)
+        device_info = setup.step1_add_device()
+        if device_info:
+            mqtt_config = setup.step2_get_mqtt_config(device_info)
+            print("\n" + "=" * 80)
+            print("✓ 设备设置完成！")
+            print("=" * 80)
+            print(f"\n设备序列号: {setup.serial_number}")
+            print(f"\n下一步：运行测试命令：")
+            print(f"python3 setup_and_test_real_charger.py \\")
+            print(f"  --server {args.server} \\")
+            print(f"  --serial {setup.serial_number} \\")
+            print(f"  --mqtt-broker {args.mqtt_broker} \\")
+            print(f"  --mqtt-port {args.mqtt_port} \\")
+            print(f"  --type-code {args.type_code} \\")
+            print(f"  --test-only")
+        else:
+            print("\n✗ 设备设置失败")
+            sys.exit(1)
+    elif args.test_only:
+        # 仅执行测试步骤
+        print("\n" + "=" * 80)
+        print("仅执行测试步骤")
+        print("=" * 80)
+        print(f"设备序列号: {setup.serial_number}")
+        
+        # 获取设备信息
+        try:
+            response = requests.get(
+                f"{setup.base_url}/devices/{setup.serial_number}",
+                timeout=10
+            )
+            if response.status_code != 200:
+                print(f"✗ 设备 {setup.serial_number} 不存在，请先运行 --setup-only")
+                sys.exit(1)
+            device_info = response.json()
+            print(f"✓ 设备信息获取成功")
+        except Exception as e:
+            print(f"✗ 获取设备信息失败: {e}")
+            sys.exit(1)
+        
+        mqtt_config = setup.step2_get_mqtt_config(device_info)
+        
+        # 启动MQTT连接（模拟充电桩）
+        if not args.skip_connection:
+            print("\n" + "=" * 80)
+            print("步骤 1: 启动充电桩模拟器")
+            print("=" * 80)
+            if not setup.step3_connect_mqtt(mqtt_config, args.mqtt_broker, args.mqtt_port):
+                print("\n✗ MQTT连接启动失败")
+                sys.exit(1)
+            
+            # 等待设备连接
+            print("\n" + "=" * 80)
+            print("步骤 2: 等待设备连接并发送 BootNotification")
+            print("=" * 80)
+            max_wait = 30
+            connected = False
+            for i in range(max_wait):
+                try:
+                    response = requests.get(
+                        f"{setup.base_url}/chargers/{setup.serial_number}",
+                        timeout=5
+                    )
+                    if response.status_code == 200:
+                        charger_status = response.json().get("status")
+                        print(f"✓ 充电桩已创建: {setup.serial_number}, 状态: {charger_status}")
+                        connected = True
+                        break
+                except requests.exceptions.RequestException:
+                    pass
+                if i < max_wait - 1:
+                    print(f"等待中... ({i+1}/{max_wait})")
+                    time.sleep(1)
+            
+            if not connected:
+                print(f"⚠ 等待超时，但继续测试...")
+            else:
+                print("✓ 设备已连接，准备开始测试")
+                time.sleep(2)  # 再等待2秒，确保连接稳定
+        else:
+            print("\n跳过MQTT连接步骤（假设设备已连接）")
+        
+        # 运行测试（第三方角度测试）
+        print("\n" + "=" * 80)
+        print("步骤 3: 运行第三方功能测试")
+        print("=" * 80)
+        print("使用 test_charge_point_functions.py 脚本进行测试...")
+        print("=" * 80)
+        
+        if not args.skip_test:
+            success = setup.step4_test_functions(setup.serial_number)
+            if not success:
+                print("\n✗ 测试失败")
+                if setup.mqtt_process:
+                    setup.mqtt_process.terminate()
+                sys.exit(1)
+            print("\n✓ 所有测试完成！")
+        else:
+            print("\n跳过功能测试步骤")
+            print(f"\n手动测试命令:")
+            print(f"python3 charger-sim/test_charge_point_functions.py \\")
+            print(f"  --server {setup.server_url} \\")
+            print(f"  --charge-point-id {setup.serial_number}")
+        
+        # 清理：停止MQTT模拟器
+        if setup.mqtt_process:
+            print("\n" + "=" * 80)
+            print("清理: 停止MQTT模拟器")
+            print("=" * 80)
+            setup.mqtt_process.terminate()
+            try:
+                setup.mqtt_process.wait(timeout=5)
+                print("✓ MQTT模拟器已停止")
+            except subprocess.TimeoutExpired:
+                setup.mqtt_process.kill()
+                print("✓ MQTT模拟器已强制停止")
+        
+        print("\n" + "=" * 80)
+        print("测试流程完成！")
+        print("=" * 80)
+    else:
+        # 完整流程
+        setup.run_full_setup(
+            mqtt_broker=args.mqtt_broker,
+            mqtt_port=args.mqtt_port,
+            skip_connection=args.skip_connection,
+            skip_test=args.skip_test
+        )
 
 
 if __name__ == "__main__":
