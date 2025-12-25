@@ -32,6 +32,37 @@ except ImportError:
 router = APIRouter()
 
 
+def check_charger_connection(charge_point_id: str) -> bool:
+    """
+    检查充电桩连接状态
+    同时检查 WebSocket (connection_manager) 和 MQTT (transport_manager) 连接
+    只要有一个连接就返回 True
+    """
+    is_connected_ws = False
+    is_connected_mqtt = False
+    
+    # 检查 WebSocket 连接（connection_manager）
+    try:
+        is_connected_ws = connection_manager.is_connected(charge_point_id)
+        logger.debug(f"[API] connection_manager.is_connected({charge_point_id}) = {is_connected_ws}")
+    except Exception as e:
+        logger.warning(f"[API] connection_manager.is_connected() 检查失败: {e}")
+    
+    # 检查 MQTT 连接（transport_manager）
+    if TRANSPORT_MANAGER_AVAILABLE and transport_manager:
+        try:
+            if hasattr(transport_manager, 'adapters') and transport_manager.adapters:
+                is_connected_mqtt = transport_manager.is_connected(charge_point_id)
+                logger.debug(f"[API] transport_manager.is_connected({charge_point_id}) = {is_connected_mqtt}, adapters: {list(transport_manager.adapters.keys())}")
+        except Exception as e:
+            logger.warning(f"[API] transport_manager.is_connected() 检查失败: {e}")
+    
+    # 只要有一个连接就认为已连接
+    is_connected = is_connected_ws or is_connected_mqtt
+    logger.debug(f"[API] 充电桩 {charge_point_id} 连接状态: WebSocket={is_connected_ws}, MQTT={is_connected_mqtt}, 最终={is_connected}")
+    return is_connected
+
+
 class RemoteStartRequest(BaseModel):
     chargePointId: str
     idTag: str
@@ -81,22 +112,8 @@ async def remote_start(req: RemoteStartRequest) -> RemoteResponse:
         f"连接器ID: {req.connectorId}"
     )
     
-    # 检查连接状态（优先使用 transport_manager，支持 MQTT 和 WebSocket）
-    is_connected = False
-    if TRANSPORT_MANAGER_AVAILABLE and transport_manager:
-        try:
-            # 检查 transport_manager 是否已初始化（有适配器）
-            if hasattr(transport_manager, 'adapters') and transport_manager.adapters:
-                is_connected = transport_manager.is_connected(req.chargePointId)
-                logger.debug(f"[API] transport_manager.is_connected({req.chargePointId}) = {is_connected}, adapters: {list(transport_manager.adapters.keys())}")
-            else:
-                logger.debug(f"[API] transport_manager 尚未初始化（adapters为空），回退到 connection_manager")
-                is_connected = connection_manager.is_connected(req.chargePointId)
-        except Exception as e:
-            logger.warning(f"[API] transport_manager.is_connected() 检查失败: {e}，回退到 connection_manager")
-            is_connected = connection_manager.is_connected(req.chargePointId)
-    else:
-        is_connected = connection_manager.is_connected(req.chargePointId)
+    # 检查连接状态（同时检查 WebSocket 和 MQTT）
+    is_connected = check_charger_connection(req.chargePointId)
     
     if not is_connected:
         logger.warning(f"[API] 远程启动失败: 充电桩 {req.chargePointId} 未连接 (transport_manager可用: {TRANSPORT_MANAGER_AVAILABLE}, adapters: {len(transport_manager.adapters) if TRANSPORT_MANAGER_AVAILABLE and transport_manager and hasattr(transport_manager, 'adapters') else 0})")
@@ -146,16 +163,8 @@ async def remote_stop(req: RemoteStopRequest) -> RemoteResponse:
         f"交易ID: {req.transactionId}"
     )
     
-    # 检查连接状态（优先使用 transport_manager，支持 MQTT 和 WebSocket）
-    is_connected = False
-    if TRANSPORT_MANAGER_AVAILABLE and transport_manager:
-        try:
-            is_connected = transport_manager.is_connected(req.chargePointId)
-        except Exception as e:
-            logger.warning(f"[API] transport_manager.is_connected() 检查失败: {e}，回退到 connection_manager")
-            is_connected = connection_manager.is_connected(req.chargePointId)
-    else:
-        is_connected = connection_manager.is_connected(req.chargePointId)
+    # 检查连接状态（同时检查 WebSocket 和 MQTT）
+    is_connected = check_charger_connection(req.chargePointId)
     
     if not is_connected:
         logger.warning(f"[API] 远程停止失败: 充电桩 {req.chargePointId} 未连接")
@@ -204,16 +213,8 @@ async def change_configuration(req: ChangeConfigurationRequest) -> RemoteRespons
         f"配置值: {req.value}"
     )
     
-    # 检查连接状态（优先使用 transport_manager，支持 MQTT 和 WebSocket）
-    is_connected = False
-    if TRANSPORT_MANAGER_AVAILABLE and transport_manager:
-        try:
-            is_connected = transport_manager.is_connected(req.chargePointId)
-        except Exception as e:
-            logger.warning(f"[API] transport_manager.is_connected() 检查失败: {e}，回退到 connection_manager")
-            is_connected = connection_manager.is_connected(req.chargePointId)
-    else:
-        is_connected = connection_manager.is_connected(req.chargePointId)
+    # 检查连接状态（同时检查 WebSocket 和 MQTT）
+    is_connected = check_charger_connection(req.chargePointId)
     
     if not is_connected:
         logger.warning(f"[API] 更改配置失败: 充电桩 {req.chargePointId} 未连接")
@@ -250,32 +251,11 @@ async def get_configuration(req: GetConfigurationRequest) -> RemoteResponse:
         f"配置键: {req.keys or '全部'}"
     )
     
-    # 检查连接状态（优先使用 transport_manager，支持 MQTT 和 WebSocket）
-    is_connected = False
-    if TRANSPORT_MANAGER_AVAILABLE and transport_manager:
-        try:
-            # 检查 transport_manager 是否已初始化（adapters不为空）
-            adapters_count = len(transport_manager.adapters) if hasattr(transport_manager, 'adapters') and transport_manager.adapters else 0
-            logger.info(f"[API] get_configuration检查: adapters={adapters_count}, adapters_keys={list(transport_manager.adapters.keys()) if hasattr(transport_manager, 'adapters') and transport_manager.adapters else []}")
-            if adapters_count > 0:
-                is_connected = transport_manager.is_connected(req.chargePointId)
-                logger.info(f"[API] get_configuration检查: is_connected={is_connected}")
-                # 如果是MQTT适配器，检查_connected_chargers
-                from app.ocpp.transport_manager import TransportType
-                mqtt_adapter = transport_manager.adapters.get(TransportType.MQTT)
-                if mqtt_adapter and hasattr(mqtt_adapter, '_connected_chargers'):
-                    logger.info(f"[API] get_configuration MQTT _connected_chargers: {list(mqtt_adapter._connected_chargers)}")
-            else:
-                logger.warning(f"[API] transport_manager.adapters为空，回退到 connection_manager")
-                is_connected = connection_manager.is_connected(req.chargePointId)
-        except Exception as e:
-            logger.warning(f"[API] transport_manager.is_connected() 检查失败: {e}，回退到 connection_manager", exc_info=True)
-            is_connected = connection_manager.is_connected(req.chargePointId)
-    else:
-        is_connected = connection_manager.is_connected(req.chargePointId)
+    # 检查连接状态（同时检查 WebSocket 和 MQTT）
+    is_connected = check_charger_connection(req.chargePointId)
     
     if not is_connected:
-        logger.warning(f"[API] 获取配置失败: 充电桩 {req.chargePointId} 未连接 (transport_manager可用: {TRANSPORT_MANAGER_AVAILABLE}, adapters: {len(transport_manager.adapters) if TRANSPORT_MANAGER_AVAILABLE and transport_manager and hasattr(transport_manager, 'adapters') and transport_manager.adapters else 0})")
+        logger.warning(f"[API] 获取配置失败: 充电桩 {req.chargePointId} 未连接")
         raise ChargerNotConnectedException(req.chargePointId)
     
     payload = {"key": req.keys} if req.keys else {}
@@ -309,16 +289,8 @@ async def reset_charger(req: ResetRequest) -> RemoteResponse:
         f"重置类型: {req.type}"
     )
     
-    # 检查连接状态（优先使用 transport_manager，支持 MQTT 和 WebSocket）
-    is_connected = False
-    if TRANSPORT_MANAGER_AVAILABLE and transport_manager:
-        try:
-            is_connected = transport_manager.is_connected(req.chargePointId)
-        except Exception as e:
-            logger.warning(f"[API] transport_manager.is_connected() 检查失败: {e}，回退到 connection_manager")
-            is_connected = connection_manager.is_connected(req.chargePointId)
-    else:
-        is_connected = connection_manager.is_connected(req.chargePointId)
+    # 检查连接状态（同时检查 WebSocket 和 MQTT）
+    is_connected = check_charger_connection(req.chargePointId)
     
     if not is_connected:
         logger.warning(f"[API] 重置失败: 充电桩 {req.chargePointId} 未连接")
@@ -355,16 +327,8 @@ async def unlock_connector(req: UnlockConnectorRequest) -> RemoteResponse:
         f"连接器ID: {req.connectorId}"
     )
     
-    # 检查连接状态（优先使用 transport_manager，支持 MQTT 和 WebSocket）
-    is_connected = False
-    if TRANSPORT_MANAGER_AVAILABLE and transport_manager:
-        try:
-            is_connected = transport_manager.is_connected(req.chargePointId)
-        except Exception as e:
-            logger.warning(f"[API] transport_manager.is_connected() 检查失败: {e}，回退到 connection_manager")
-            is_connected = connection_manager.is_connected(req.chargePointId)
-    else:
-        is_connected = connection_manager.is_connected(req.chargePointId)
+    # 检查连接状态（同时检查 WebSocket 和 MQTT）
+    is_connected = check_charger_connection(req.chargePointId)
     
     if not is_connected:
         logger.warning(f"[API] 解锁连接器失败: 充电桩 {req.chargePointId} 未连接")

@@ -414,13 +414,19 @@ class MQTTAdapter(TransportAdapter):
         """处理接收到的消息"""
         logger.info(f"[{charge_point_id}] MQTT 开始处理消息: {action}")
         try:
+            # 从payload中提取evse_id（connectorId）
+            # 对于 StatusNotification、StartTransaction 等消息，应该从 payload 中提取 connectorId
+            evse_id = payload.get("connectorId", 1)
+            if evse_id == 0:
+                evse_id = 1  # OCPP中0表示整个充电桩，我们映射为evse_id=1
+            
             # 传递device_serial_number参数
             response = await self.handle_incoming_message(
                 charge_point_id=charge_point_id,
                 action=action,
                 payload=payload,
                 device_serial_number=serial_number,
-                evse_id=1  # 默认EVSE ID为1
+                evse_id=evse_id
             )
             logger.info(f"[{charge_point_id}] MQTT 消息处理完成: {action}, 响应: {response}")
         except Exception as e:

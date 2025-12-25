@@ -45,37 +45,29 @@ class OCPPMessageSender:
         except Exception as e:
             logger.warning(f"[{charger_id}] transport_manager 发送失败: {e}，回退到 WebSocket")
         
-        # Fallback: 使用 WebSocket（如果可用）
-        ws = connection_manager.get_connection(charger_id)
-        if not ws:
-            raise HTTPException(
-                status_code=404, 
-                detail=f"Charger {charger_id} is not connected"
-            )
-        
+        # Fallback: 使用 transport_manager 的 WebSocket 适配器
         try:
-            message = {
-                "action": action,
-                "payload": payload
-            }
-            await ws.send_text(json.dumps(message))
-            logger.info(f"[{charger_id}] -> CSMS发送OCPP调用: {action}")
-            
-            # 等待响应（简化版本，实际应该使用消息ID匹配）
-            try:
-                response = await asyncio.wait_for(ws.receive_text(), timeout=timeout)
-                response_data = json.loads(response)
-                logger.info(f"[{charger_id}] <- 收到响应: {action}")
-                return {"success": True, "data": response_data}
-            except asyncio.TimeoutError:
-                logger.warning(f"[{charger_id}] OCPP调用超时: {action}")
-                return {"success": False, "error": "Timeout waiting for response"}
+            from app.ocpp.transport_manager import TransportType
+            if transport_manager and hasattr(transport_manager, 'adapters'):
+                ws_adapter = transport_manager.adapters.get(TransportType.WEBSOCKET)
+                if ws_adapter and transport_manager.is_connected(charger_id):
+                    logger.info(f"[{charger_id}] message_sender.send_call 通过 transport_manager WebSocket 发送: {action}")
+                    result = await transport_manager.send_message(
+                        charger_id,
+                        action,
+                        payload,
+                        preferred_transport=TransportType.WEBSOCKET,
+                        timeout=timeout
+                    )
+                    return {"success": True, "data": result, "transport": "WebSocket"}
         except Exception as e:
-            logger.error(f"[{charger_id}] 发送OCPP调用失败: {e}", exc_info=True)
-            raise HTTPException(
-                status_code=500, 
-                detail=f"Failed to send OCPP call: {str(e)}"
-            )
+            logger.warning(f"[{charger_id}] transport_manager WebSocket 发送失败: {e}")
+        
+        # 如果 transport_manager 不可用，抛出错误（不再直接使用 ws.receive_text()）
+        raise HTTPException(
+            status_code=404, 
+            detail=f"Charger {charger_id} is not connected via any available transport"
+        )
 
 
 # 全局消息发送器实例

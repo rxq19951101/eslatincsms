@@ -477,6 +477,9 @@ class OCPPMessageHandler:
                 return await handler(charge_point_id, payload, device_serial_number)
             elif action == "StatusNotification":
                 return await handler(charge_point_id, payload, evse_id)
+            elif action == "StartTransaction":
+                # StartTransaction 需要 evse_id 来关联正确的 EVSE
+                return await handler(charge_point_id, payload, evse_id)
             else:
                 return await handler(charge_point_id, payload)
         else:

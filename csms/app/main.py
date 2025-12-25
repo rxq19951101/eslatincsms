@@ -119,8 +119,9 @@ async def lifespan(app: FastAPI):
             
             # 检查并配置 WebSocket（可通过环境变量 ENABLE_WEBSOCKET_TRANSPORT 启用）
             # 环境变量优先级高于配置文件
-            enable_ws = os.getenv("ENABLE_WEBSOCKET_TRANSPORT", "").lower() in ("true", "1", "yes")
-            if enable_ws or settings.enable_websocket_transport:
+            # 默认启用 WebSocket（因为 /ocpp 端点需要它）
+            enable_ws = os.getenv("ENABLE_WEBSOCKET_TRANSPORT", "true").lower() in ("true", "1", "yes")
+            if enable_ws or getattr(settings, 'enable_websocket_transport', True):
                 enabled_transports.append(TransportType.WEBSOCKET)
                 logger.info("WebSocket 传输已启用（通过环境变量或配置）")
             
@@ -256,29 +257,23 @@ async def send_ocpp_call(charge_point_id: str, action: str, payload: Dict[str, A
                     logger.error(f"[{charge_point_id}] 通过 MQTT 发送 OCPP 调用失败: {e}", exc_info=True)
                     # 如果 MQTT 失败，尝试 WebSocket（如果有）
     
-    # Fallback: 使用 WebSocket（如果可用）
-    ws = charger_websockets.get(charge_point_id)
-    if ws:
+        # Fallback: 使用 transport_manager 的 WebSocket 适配器
         try:
-            message = {
-                "action": action,
-                "payload": payload
-            }
-            await ws.send_text(json.dumps(message))
-            logger.info(f"[{charge_point_id}] -> CSMS发送OCPP调用 (WebSocket): {action}")
-            
-            # 等待响应（简化版本，实际应该使用消息ID匹配）
-            try:
-                response = await asyncio.wait_for(ws.receive_text(), timeout=timeout)
-                response_data = json.loads(response)
-                logger.info(f"[{charge_point_id}] <- 收到响应 (WebSocket): {action}")
-                return {"success": True, "data": response_data, "transport": "WebSocket"}
-            except asyncio.TimeoutError:
-                logger.warning(f"[{charge_point_id}] OCPP调用超时 (WebSocket): {action}")
-                return {"success": False, "error": "Timeout waiting for response"}
+            if transport_manager and hasattr(transport_manager, 'adapters'):
+                ws_adapter = transport_manager.adapters.get(TransportType.WEBSOCKET)
+                if ws_adapter and transport_manager.is_connected(charge_point_id):
+                    logger.info(f"[{charge_point_id}] send_ocpp_call 通过 transport_manager WebSocket 发送: {action}")
+                    result = await transport_manager.send_message(
+                        charge_point_id,
+                        action,
+                        payload,
+                        preferred_transport=TransportType.WEBSOCKET,
+                        timeout=timeout
+                    )
+                    logger.info(f"[{charge_point_id}] WebSocket OCPP 调用完成: {action}, 结果: {result}")
+                    return {"success": True, "data": result, "transport": "WebSocket"}
         except Exception as e:
-            logger.error(f"[{charge_point_id}] 发送OCPP调用失败 (WebSocket): {e}", exc_info=True)
-            raise HTTPException(status_code=500, detail=f"Failed to send OCPP call: {str(e)}")
+            logger.error(f"[{charge_point_id}] transport_manager WebSocket 发送失败: {e}", exc_info=True)
     
     # 如果都没有连接，抛出错误
     logger.warning(f"[{charge_point_id}] 发送OCPP调用失败: 设备未连接 (transport_manager可用: {MQTT_AVAILABLE}, adapters: {len(transport_manager.adapters) if MQTT_AVAILABLE and hasattr(transport_manager, 'adapters') else 0})")
@@ -2604,6 +2599,14 @@ async def ocpp_ws(ws: WebSocket, id: str = Query(..., description="Charge Point 
         if ws_adapter:
             await ws_adapter.register_connection(charge_point_id, ws)
     
+    # 同时注册到旧的 connection_manager（用于兼容旧的 API 检查）
+    try:
+        from app.ocpp.connection_manager import connection_manager
+        connection_manager.connect(charge_point_id, ws)
+        logger.info(f"[{charge_point_id}] WebSocket连接已注册到 connection_manager")
+    except Exception as e:
+        logger.warning(f"[{charge_point_id}] 注册到 connection_manager 失败: {e}")
+    
     logger.info(f"[{charge_point_id}] WebSocket connected, subprotocol=ocpp1.6")
     
     try:
@@ -2623,20 +2626,48 @@ async def ocpp_ws(ws: WebSocket, id: str = Query(..., description="Charge Point 
             unique_id = None
             is_ocpp_standard_format = False
             
-            if isinstance(msg, list) and len(msg) >= 4:
+            if isinstance(msg, list) and len(msg) >= 3:
                 # OCPP 1.6 标准格式
                 message_type = msg[0]
-                if message_type != 2:  # 必须是 CALL
-                    logger.error(f"[{charge_point_id}] 无效的 MessageType: {message_type}, 期望 2 (CALL)")
-                    await ws.send_text(json.dumps([4, "", "ProtocolError", "Invalid MessageType"]))
-                    continue
-                
                 unique_id = msg[1]
-                action = msg[2]
-                payload = msg[3] if isinstance(msg[3], dict) else {}
-                is_ocpp_standard_format = True
                 
-                logger.info(f"[{charge_point_id}] <- WebSocket OCPP {action} (标准格式, UniqueId={unique_id}) | payload={json.dumps(payload)}")
+                # 处理响应消息（CALLRESULT/CALLERROR）- 由 CSMS 发送的请求的响应
+                if message_type == 3:  # CALLRESULT
+                    # 这是充电桩对 CSMS 请求的响应，需要路由到适配器
+                    if MQTT_AVAILABLE and hasattr(transport_manager, 'adapters'):
+                        ws_adapter = transport_manager.adapters.get(TransportType.WEBSOCKET)
+                        if ws_adapter and hasattr(ws_adapter, 'handle_response'):
+                            response_payload = msg[2] if len(msg) > 2 else {}
+                            ws_adapter.handle_response(unique_id, {"success": True, "data": response_payload})
+                            continue
+                    logger.warning(f"[{charge_point_id}] 收到 CALLRESULT 但找不到适配器处理 (UniqueId: {unique_id})")
+                    continue
+                elif message_type == 4:  # CALLERROR
+                    # 这是充电桩对 CSMS 请求的错误响应，需要路由到适配器
+                    if MQTT_AVAILABLE and hasattr(transport_manager, 'adapters'):
+                        ws_adapter = transport_manager.adapters.get(TransportType.WEBSOCKET)
+                        if ws_adapter and hasattr(ws_adapter, 'handle_response'):
+                            error_code = msg[2] if len(msg) > 2 else "UnknownError"
+                            error_description = msg[3] if len(msg) > 3 else "Unknown error"
+                            ws_adapter.handle_response(unique_id, {"success": False, "error": error_code, "errorDescription": error_description})
+                            continue
+                    logger.warning(f"[{charge_point_id}] 收到 CALLERROR 但找不到适配器处理 (UniqueId: {unique_id})")
+                    continue
+                elif message_type == 2:  # CALL - 充电桩发送的请求
+                    if len(msg) < 4:
+                        logger.error(f"[{charge_point_id}] 无效的 CALL 消息格式，长度不足: {msg}")
+                        await ws.send_text(json.dumps([4, unique_id if unique_id else "", "ProtocolError", "Invalid message format"]))
+                        continue
+                    
+                    action = msg[2]
+                    payload = msg[3] if isinstance(msg[3], dict) else {}
+                    is_ocpp_standard_format = True
+                    
+                    logger.info(f"[{charge_point_id}] <- WebSocket OCPP {action} (标准格式, UniqueId={unique_id}) | payload={json.dumps(payload)}")
+                else:
+                    logger.error(f"[{charge_point_id}] 无效的 MessageType: {message_type}, 期望 2 (CALL), 3 (CALLRESULT), 或 4 (CALLERROR)")
+                    await ws.send_text(json.dumps([4, unique_id if unique_id else "", "ProtocolError", "Invalid MessageType"]))
+                    continue
             elif isinstance(msg, dict):
                 # 简化格式
                 action = str(msg.get("action", "")).strip()
@@ -2739,6 +2770,14 @@ async def ocpp_ws(ws: WebSocket, id: str = Query(..., description="Charge Point 
             ws_adapter = transport_manager.get_adapter(TransportType.WEBSOCKET)
             if ws_adapter:
                 await ws_adapter.unregister_connection(charge_point_id)
+        
+        # 同时从旧的 connection_manager 注销
+        try:
+            from app.ocpp.connection_manager import connection_manager
+            connection_manager.disconnect(charge_point_id)
+            logger.info(f"[{charge_point_id}] WebSocket连接已从 connection_manager 注销")
+        except Exception as e:
+            logger.warning(f"[{charge_point_id}] 从 connection_manager 注销失败: {e}")
         
         logger.info(f"[{charge_point_id}] WebSocket unregistered")
         try:
