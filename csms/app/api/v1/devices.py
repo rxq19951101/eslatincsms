@@ -25,7 +25,7 @@ router = APIRouter()
 
 class CreateDeviceRequest(BaseModel):
     """创建设备请求"""
-    serial_number: str = Field(..., description="设备序列号（必须是15位）", min_length=15, max_length=15)
+    serial_number: str = Field(..., description="设备序列号", min_length=1, max_length=100)
     vendor: Optional[str] = Field(None, description="设备厂商（用于推断设备类型）")
     device_type_code: Optional[str] = Field(None, description="设备类型代码（如：zcf, tesla, abb）")
 
@@ -74,11 +74,11 @@ def create_device(
     - 否则根据 `vendor` 自动推断（如：Schneider Electric → schneider）
     - 如果都无法推断，使用默认类型
     """
-    # 验证序列号长度
-    if len(req.serial_number) != 15:
+    # 验证序列号不为空
+    if not req.serial_number or len(req.serial_number.strip()) == 0:
         raise HTTPException(
             status_code=400,
-            detail=f"设备序列号必须是15位，当前为{len(req.serial_number)}位"
+            detail="设备序列号不能为空"
         )
     
     # 检查设备是否已存在

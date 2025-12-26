@@ -15,8 +15,8 @@ from app.services.charge_point_service import ChargePointService
 
 def create_device(serial_number: str, vendor: str = None):
     """创建设备"""
-    if len(serial_number) != 15:
-        print(f"❌ 错误: 设备序列号必须是15位，当前为{len(serial_number)}位")
+    if not serial_number or len(serial_number.strip()) == 0:
+        print(f"❌ 错误: 设备序列号不能为空")
         return False
     
     db = SessionLocal()
@@ -52,7 +52,7 @@ if __name__ == "__main__":
         print("用法: python create_device.py <serial_number> [vendor]")
         print("")
         print("参数:")
-        print("  serial_number  - 设备序列号（必须是15位）")
+        print("  serial_number  - 设备序列号")
         print("  vendor        - 设备厂商（可选，用于推断设备类型）")
         print("")
         print("示例:")

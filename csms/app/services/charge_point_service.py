@@ -372,12 +372,11 @@ class ChargePointService:
         type_code: Optional[str] = None
     ) -> Optional[Device]:
         """获取或创建设备
-        如果device_serial_number无效（长度不是15位），返回None
         
         注意：如果设备序列号已存在，会检查是否已被其他充电桩使用
         """
-        if not device_serial_number or len(device_serial_number) != 15:
-            logger.warning(f"设备序列号无效: {device_serial_number}（必须是15位）")
+        if not device_serial_number or len(device_serial_number.strip()) == 0:
+            logger.warning(f"设备序列号无效: {device_serial_number}（不能为空）")
             return None
         
         # 查找设备

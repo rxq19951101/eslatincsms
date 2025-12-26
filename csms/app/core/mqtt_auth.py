@@ -51,9 +51,9 @@ class MQTTAuthService:
             if username != serial_number:
                 return False, "Username does not match serial_number in client_id"
             
-            # 验证serial_number长度（15位）
-            if len(serial_number) != 15:
-                return False, "Serial number must be 15 characters"
+            # 验证serial_number不为空
+            if not serial_number or len(serial_number.strip()) == 0:
+                return False, "Serial number cannot be empty"
             
             # 验证password长度（12位）
             if len(password) != 12:

@@ -62,7 +62,7 @@ class ChargePoint(Base):
     max_power_kw = Column(Float, nullable=True)  # 最大功率
     
     # 关联设备（MQTT设备）
-    device_serial_number = Column(String(15), ForeignKey("devices.serial_number"), nullable=True, index=True)
+    device_serial_number = Column(String(100), ForeignKey("devices.serial_number"), nullable=True, index=True)
     
     # 运营状态
     is_active = Column(Boolean, default=True)
@@ -153,15 +153,15 @@ class Device(Base):
     """
     __tablename__ = "devices"
     
-    # 设备SN号（15位字符串，主键）
-    serial_number = Column(String(15), primary_key=True, index=True)
+    # 设备SN号（主键）
+    serial_number = Column(String(100), primary_key=True, index=True)
     
     # 设备类型代码（用于MQTT topic和client_id，如 "zcf", "tesla", "abb"）
     type_code = Column(String(50), nullable=False, index=True, default="default")  # 设备类型代码
     
     # MQTT认证信息
     mqtt_client_id = Column(String(200), nullable=False, unique=True, index=True)  # {type_code}&{serial_number}
-    mqtt_username = Column(String(15), nullable=False, unique=True, index=True)  # {serial_number}
+    mqtt_username = Column(String(100), nullable=False, unique=True, index=True)  # {serial_number}
     
     # 安全：每个设备独立存储加密的master secret
     master_secret_encrypted = Column(Text, nullable=False)  # 加密存储的master secret
@@ -467,7 +467,7 @@ class DeviceEvent(Base):
     __tablename__ = "device_events"
     
     id = Column(Integer, primary_key=True, index=True)
-    device_serial_number = Column(String(15), ForeignKey("devices.serial_number"), nullable=True, index=True)
+    device_serial_number = Column(String(100), ForeignKey("devices.serial_number"), nullable=True, index=True)
     charge_point_id = Column(String(100), ForeignKey("charge_points.id"), nullable=True, index=True)
     evse_id = Column(Integer, ForeignKey("evses.id"), nullable=True, index=True)
     
@@ -514,7 +514,7 @@ class DeviceConfig(Base):
     __tablename__ = "device_configs"
     
     id = Column(Integer, primary_key=True, index=True)
-    device_serial_number = Column(String(15), ForeignKey("devices.serial_number"), nullable=False, index=True)
+    device_serial_number = Column(String(100), ForeignKey("devices.serial_number"), nullable=False, index=True)
     
     config_key = Column(String(100), nullable=False)  # 配置键
     config_value = Column(Text, nullable=True)  # 配置值

@@ -28,7 +28,7 @@ def derive_password(master_secret: str, serial_number: str) -> str:
     
     Args:
         master_secret: 设备类型的master secret（明文或解密后的）
-        serial_number: 设备序列号（15位）
+        serial_number: 设备序列号
     
     Returns:
         12位派生密码
