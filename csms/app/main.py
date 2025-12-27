@@ -950,10 +950,10 @@ async def ocpp_http(charge_point_id: str, request: Request):
 
 
 @app.websocket("/ocpp")
-async def ocpp_ws(ws: WebSocket, id: str = Query(..., description="Charge Point ID")):
+async def ocpp_ws(ws: WebSocket, id: Optional[str] = Query(None, description="Charge Point ID (可选，如果未提供将从BootNotification中提取)")):
     """
     WebSocket OCPP端点（使用新服务层）
-    id参数现在表示charge_point_id
+    id参数是可选的，如果未提供，将从第一个BootNotification消息的payload中的serialNumber提取
     """
     # Enforce subprotocol negotiation for OCPP 1.6J
     requested_proto = (ws.headers.get("sec-websocket-protocol") or "").strip()
@@ -965,27 +965,35 @@ async def ocpp_ws(ws: WebSocket, id: str = Query(..., description="Charge Point 
     await ws.accept(subprotocol="ocpp1.6")
     
     # 注册WebSocket连接（用于传输管理器）
-    charge_point_id = id
+    # 如果提供了id，使用它；否则使用临时ID，等待BootNotification来确定
+    charge_point_id = id if id else f"temp_{id(ws)}"
     charger_websockets[charge_point_id] = ws
     
-    # 如果启用了WebSocket适配器，也注册到适配器
-    if MQTT_AVAILABLE and hasattr(transport_manager, 'adapters'):
+    # 如果启用了WebSocket适配器，也注册到适配器（只有提供了id时才注册，临时ID等BootNotification后再注册）
+    if id and MQTT_AVAILABLE and hasattr(transport_manager, 'adapters'):
         ws_adapter = transport_manager.get_adapter(TransportType.WEBSOCKET)
         if ws_adapter:
             await ws_adapter.register_connection(charge_point_id, ws)
     
-    # 同时注册到旧的 connection_manager（用于兼容旧的 API 检查）
-    try:
-        from app.ocpp.connection_manager import connection_manager
-        connection_manager.connect(charge_point_id, ws)
-        logger.info(f"[{charge_point_id}] WebSocket连接已注册到 connection_manager")
-    except Exception as e:
-        logger.warning(f"[{charge_point_id}] 注册到 connection_manager 失败: {e}")
+    # 同时注册到旧的 connection_manager（只有提供了id时才注册）
+    if id:
+        try:
+            from app.ocpp.connection_manager import connection_manager
+            connection_manager.connect(charge_point_id, ws)
+            logger.info(f"[{charge_point_id}] WebSocket连接已注册到 connection_manager")
+        except Exception as e:
+            logger.warning(f"[{charge_point_id}] 注册到 connection_manager 失败: {e}")
     
-    logger.info(f"[{charge_point_id}] WebSocket connected, subprotocol=ocpp1.6")
+    if id:
+        logger.info(f"[{charge_point_id}] WebSocket connected, subprotocol=ocpp1.6")
+    else:
+        logger.info(f"[{charge_point_id}] WebSocket connected (临时ID，等待BootNotification), subprotocol=ocpp1.6")
     
     try:
-        await ws.send_text(json.dumps({"result": "Connected", "id": charge_point_id}))
+        if id:
+            await ws.send_text(json.dumps({"result": "Connected", "id": charge_point_id}))
+        else:
+            await ws.send_text(json.dumps({"result": "Connected", "id": charge_point_id, "note": "Temporary ID, will be updated after BootNotification"}))
 
         while True:
             raw = await ws.receive_text()
@@ -1065,6 +1073,22 @@ async def ocpp_ws(ws: WebSocket, id: str = Query(..., description="Charge Point 
                 device_serial_number = None
                 if action == "BootNotification":
                     device_serial_number = payload.get("chargePointSerialNumber") or payload.get("serialNumber")
+                    
+                    # 如果没有提供id且是BootNotification，从payload中提取charge_point_id
+                    if not id:
+                        serial_number = payload.get("serialNumber") or payload.get("chargePointSerialNumber")
+                        if serial_number:
+                            old_id = charge_point_id
+                            charge_point_id = str(serial_number).strip()
+                            logger.info(
+                                f"[{old_id}] 未提供id参数，从BootNotification的serialNumber提取charge_point_id: '{charge_point_id}'"
+                            )
+                            # 更新charger_websockets字典
+                            if old_id in charger_websockets:
+                                charger_websockets[charge_point_id] = charger_websockets.pop(old_id)
+                            # 如果临时ID格式，从字典中移除
+                            if old_id.startswith("temp_"):
+                                charger_websockets.pop(old_id, None)
                 
                 # 调用统一的消息处理函数
                 response = await handle_ocpp_message(
@@ -1092,12 +1116,16 @@ async def ocpp_ws(ws: WebSocket, id: str = Query(..., description="Charge Point 
                         if old_id in charger_websockets:
                             charger_websockets[charge_point_id] = charger_websockets.pop(old_id)
                         
+                        # 如果旧ID是临时ID，确保移除
+                        if old_id.startswith("temp_"):
+                            charger_websockets.pop(old_id, None)
+                        
                         # 重新注册到WebSocket适配器
                         if MQTT_AVAILABLE and hasattr(transport_manager, 'adapters'):
                             ws_adapter = transport_manager.get_adapter(TransportType.WEBSOCKET)
                             if ws_adapter:
                                 try:
-                                    # 先注销旧ID
+                                    # 先注销旧ID（如果已注册）
                                     await ws_adapter.unregister_connection(old_id)
                                     # 注册新ID
                                     await ws_adapter.register_connection(charge_point_id, ws)
@@ -1108,13 +1136,30 @@ async def ocpp_ws(ws: WebSocket, id: str = Query(..., description="Charge Point 
                         # 重新注册到connection_manager
                         try:
                             from app.ocpp.connection_manager import connection_manager
-                            # 先断开旧连接
+                            # 先断开旧连接（如果已连接）
                             connection_manager.disconnect(old_id)
                             # 连接新ID
                             connection_manager.connect(charge_point_id, ws)
                             logger.info(f"[{charge_point_id}] WebSocket连接已重新注册到connection_manager（从{old_id}）")
                         except Exception as e:
                             logger.warning(f"[{charge_point_id}] 重新注册connection_manager失败: {e}")
+                elif action == "BootNotification" and not id:
+                    # 如果之前没有id，现在有了charge_point_id，注册到适配器和connection_manager
+                    if MQTT_AVAILABLE and hasattr(transport_manager, 'adapters'):
+                        ws_adapter = transport_manager.get_adapter(TransportType.WEBSOCKET)
+                        if ws_adapter:
+                            try:
+                                await ws_adapter.register_connection(charge_point_id, ws)
+                                logger.info(f"[{charge_point_id}] WebSocket连接已注册到适配器（从临时ID）")
+                            except Exception as e:
+                                logger.warning(f"[{charge_point_id}] 注册WebSocket适配器失败: {e}")
+                    
+                    try:
+                        from app.ocpp.connection_manager import connection_manager
+                        connection_manager.connect(charge_point_id, ws)
+                        logger.info(f"[{charge_point_id}] WebSocket连接已注册到connection_manager（从临时ID）")
+                    except Exception as e:
+                        logger.warning(f"[{charge_point_id}] 注册connection_manager失败: {e}")
                     
                 # 发送响应
                 if is_ocpp_standard_format and unique_id:
