@@ -2,14 +2,18 @@
 #
 # 脚本2：测试服务器API
 # - 选择IP地址测试服务器
+# - 查询已连接的充电桩列表
 # - 测试指定charge_id的GetConfiguration
+# - 测试指定charge_id的ChangeConfiguration（修改配置，如心跳间隔）
 # - 测试指定charge_id的RemoteStartTransaction
+# - 测试指定charge_id的RemoteStopTransaction
+# - 测试指定charge_id的Reset（软重启/硬重启）
 #
 
 import requests
 import json
 import sys
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 
 class ServerTester:
@@ -99,6 +103,165 @@ class ServerTester:
             print()
             return {"success": False, "error": str(e)}
     
+    def test_remote_stop_transaction(self, charge_point_id: str, transaction_id: int) -> Dict[str, Any]:
+        """测试RemoteStopTransaction"""
+        url = f"{self.api_base}/remoteStop"
+        payload = {
+            "chargePointId": charge_point_id,
+            "transactionId": transaction_id
+        }
+        
+        print(f"测试 RemoteStopTransaction")
+        print(f"  URL: {url}")
+        print(f"  Charge Point ID: {charge_point_id}")
+        print(f"  Transaction ID: {transaction_id}")
+        print()
+        
+        try:
+            response = requests.post(url, json=payload, timeout=10)
+            print(f"  状态码: {response.status_code}")
+            
+            if response.status_code == 200:
+                result = response.json()
+                print(f"  响应:")
+                print(json.dumps(result, indent=2, ensure_ascii=False))
+                print()
+                return {"success": True, "data": result}
+            else:
+                print(f"  错误响应:")
+                try:
+                    error_data = response.json()
+                    print(json.dumps(error_data, indent=2, ensure_ascii=False))
+                except:
+                    print(response.text)
+                print()
+                return {"success": False, "status_code": response.status_code, "error": response.text}
+        except requests.exceptions.RequestException as e:
+            print(f"  ✗ 请求失败: {e}")
+            print()
+            return {"success": False, "error": str(e)}
+    
+    def test_reset(self, charge_point_id: str, reset_type: str = "Soft") -> Dict[str, Any]:
+        """测试Reset（软重启或硬重启）"""
+        url = f"{self.api_base}/reset"
+        payload = {
+            "chargePointId": charge_point_id,
+            "type": reset_type
+        }
+        
+        print(f"测试 Reset")
+        print(f"  URL: {url}")
+        print(f"  Charge Point ID: {charge_point_id}")
+        print(f"  Reset Type: {reset_type} ({'软重启' if reset_type == 'Soft' else '硬重启' if reset_type == 'Hard' else reset_type})")
+        print()
+        
+        try:
+            response = requests.post(url, json=payload, timeout=10)
+            print(f"  状态码: {response.status_code}")
+            
+            if response.status_code == 200:
+                result = response.json()
+                print(f"  响应:")
+                print(json.dumps(result, indent=2, ensure_ascii=False))
+                print()
+                return {"success": True, "data": result}
+            else:
+                print(f"  错误响应:")
+                try:
+                    error_data = response.json()
+                    print(json.dumps(error_data, indent=2, ensure_ascii=False))
+                except:
+                    print(response.text)
+                print()
+                return {"success": False, "status_code": response.status_code, "error": response.text}
+        except requests.exceptions.RequestException as e:
+            print(f"  ✗ 请求失败: {e}")
+            print()
+            return {"success": False, "error": str(e)}
+    
+    def test_change_configuration(self, charge_point_id: str, key: str, value: str) -> Dict[str, Any]:
+        """测试ChangeConfiguration（修改配置）"""
+        url = f"{self.api_base}/changeConfiguration"
+        payload = {
+            "chargePointId": charge_point_id,
+            "key": key,
+            "value": value
+        }
+        
+        print(f"测试 ChangeConfiguration")
+        print(f"  URL: {url}")
+        print(f"  Charge Point ID: {charge_point_id}")
+        print(f"  Configuration Key: {key}")
+        print(f"  Configuration Value: {value}")
+        print()
+        
+        try:
+            response = requests.post(url, json=payload, timeout=10)
+            print(f"  状态码: {response.status_code}")
+            
+            if response.status_code == 200:
+                result = response.json()
+                print(f"  响应:")
+                print(json.dumps(result, indent=2, ensure_ascii=False))
+                print()
+                return {"success": True, "data": result}
+            else:
+                print(f"  错误响应:")
+                try:
+                    error_data = response.json()
+                    print(json.dumps(error_data, indent=2, ensure_ascii=False))
+                except:
+                    print(response.text)
+                print()
+                return {"success": False, "status_code": response.status_code, "error": response.text}
+        except requests.exceptions.RequestException as e:
+            print(f"  ✗ 请求失败: {e}")
+            print()
+            return {"success": False, "error": str(e)}
+    
+    def get_connected_chargers(self) -> List[str]:
+        """获取所有已连接的充电桩ID列表"""
+        url = f"{self.api_base}/connected"
+        
+        print(f"获取已连接的充电桩列表")
+        print(f"  URL: {url}")
+        print()
+        
+        try:
+            response = requests.get(url, timeout=10)
+            print(f"  状态码: {response.status_code}")
+            
+            if response.status_code == 200:
+                result = response.json()
+                connected_chargers = result.get("connected_chargers", [])
+                count = result.get("count", 0)
+                sources = result.get("sources", {})
+                
+                print(f"  响应:")
+                print(json.dumps(result, indent=2, ensure_ascii=False))
+                print()
+                print(f"  已连接充电桩数量: {count}")
+                if sources.get("websocket"):
+                    print(f"  WebSocket连接: {len(sources['websocket'])} 个")
+                if sources.get("mqtt"):
+                    print(f"  MQTT连接: {len(sources['mqtt'])} 个")
+                print()
+                
+                return connected_chargers
+            else:
+                print(f"  错误响应:")
+                try:
+                    error_data = response.json()
+                    print(json.dumps(error_data, indent=2, ensure_ascii=False))
+                except:
+                    print(response.text)
+                print()
+                return []
+        except requests.exceptions.RequestException as e:
+            print(f"  ✗ 请求失败: {e}")
+            print()
+            return []
+    
     def test_health(self) -> bool:
         """测试服务器健康状态"""
         url = f"{self.base_url}/health"
@@ -149,8 +312,9 @@ def main():
     parser = argparse.ArgumentParser(description="服务器API测试工具")
     parser.add_argument("--server", type=str, help="服务器地址 (例如: http://localhost:9000)")
     parser.add_argument("--charge-id", type=str, help="Charge Point ID")
-    parser.add_argument("--test", type=str, choices=["getconf", "remotestart", "both"], default="both",
-                        help="测试类型: getconf, remotestart, both (默认: both)")
+    parser.add_argument("--test", type=str, choices=["getconf", "changeconf", "remotestart", "remotestop", "reset", "connected", "both", "all"], default="both",
+                        help="测试类型: getconf, changeconf, remotestart, remotestop, reset, connected(查询已连接充电桩), both(包含getconf和remotestart), all(包含所有) (默认: both)")
+    parser.add_argument("--list-connected", action="store_true", help="查询已连接的充电桩列表（不执行其他测试）")
     
     args = parser.parse_args()
     
@@ -176,6 +340,29 @@ def main():
         sys.exit(1)
     print()
     
+    # 如果只是查询已连接充电桩，直接执行并退出
+    if args.list_connected or args.test == "connected":
+        print("=" * 60)
+        print("查询已连接的充电桩")
+        print("=" * 60)
+        print()
+        
+        connected_chargers = tester.get_connected_chargers()
+        
+        if connected_chargers:
+            print("=" * 60)
+            print(f"找到 {len(connected_chargers)} 个已连接的充电桩:")
+            print("=" * 60)
+            for i, charger_id in enumerate(connected_chargers, 1):
+                print(f"  {i}. {charger_id}")
+            print("=" * 60)
+        else:
+            print("=" * 60)
+            print("没有找到已连接的充电桩")
+            print("=" * 60)
+        
+        return
+    
     # 获取Charge Point ID
     if args.charge_id:
         charge_point_id = args.charge_id
@@ -194,7 +381,7 @@ def main():
     # 执行测试
     results = {}
     
-    if args.test in ["getconf", "both"]:
+    if args.test in ["getconf", "both", "all"]:
         print("=" * 60)
         print("测试 1: GetConfiguration")
         print("=" * 60)
@@ -211,7 +398,48 @@ def main():
         results["get_configuration"] = tester.test_get_configuration(charge_point_id, keys)
         print()
     
-    if args.test in ["remotestart", "both"]:
+    if args.test in ["changeconf", "all"]:
+        print("=" * 60)
+        print("测试 1.5: ChangeConfiguration")
+        print("=" * 60)
+        print()
+        
+        # 默认修改心跳间隔
+        print("常用配置项:")
+        print("  1. HeartbeatInterval (心跳间隔，单位：秒)")
+        print("  2. MeterValueSampleInterval (计量值采样间隔，单位：秒)")
+        print("  3. WebSocketPingInterval (WebSocket Ping间隔，单位：秒)")
+        print("  4. 自定义")
+        print()
+        
+        choice = input("请选择配置项 (1/2/3/4，默认1): ").strip() or "1"
+        
+        if choice == "1":
+            key = "HeartbeatInterval"
+            default_value = "30"
+        elif choice == "2":
+            key = "MeterValueSampleInterval"
+            default_value = "60"
+        elif choice == "3":
+            key = "WebSocketPingInterval"
+            default_value = "60"
+        else:
+            key = input("请输入配置项Key: ").strip()
+            default_value = ""
+        
+        if not key:
+            print("配置项Key不能为空，跳过ChangeConfiguration测试")
+        else:
+            value_input = input(f"请输入配置项Value (默认: {default_value}): ").strip()
+            value = value_input if value_input else default_value
+            
+            if value:
+                results["change_configuration"] = tester.test_change_configuration(charge_point_id, key, value)
+            else:
+                print("配置项Value不能为空，跳过ChangeConfiguration测试")
+        print()
+    
+    if args.test in ["remotestart", "both", "all"]:
         print("=" * 60)
         print("测试 2: RemoteStartTransaction")
         print("=" * 60)
@@ -228,6 +456,37 @@ def main():
         results["remote_start"] = tester.test_remote_start_transaction(charge_point_id, id_tag, connector_id)
         print()
     
+    if args.test in ["remotestop", "all"]:
+        print("=" * 60)
+        print("测试 3: RemoteStopTransaction")
+        print("=" * 60)
+        print()
+        
+        # 询问参数
+        transaction_id_input = input("请输入Transaction ID (必填): ").strip()
+        if not transaction_id_input:
+            print("Transaction ID不能为空，跳过RemoteStop测试")
+        else:
+            try:
+                transaction_id = int(transaction_id_input)
+                results["remote_stop"] = tester.test_remote_stop_transaction(charge_point_id, transaction_id)
+            except ValueError:
+                print("Transaction ID必须是整数，跳过RemoteStop测试")
+        print()
+    
+    if args.test in ["reset", "all"]:
+        print("=" * 60)
+        print("测试 4: Reset")
+        print("=" * 60)
+        print()
+        
+        # 询问参数
+        reset_type_input = input("请输入Reset类型 (Soft/Hard，默认: Soft): ").strip()
+        reset_type = reset_type_input if reset_type_input in ["Soft", "Hard"] else "Soft"
+        
+        results["reset"] = tester.test_reset(charge_point_id, reset_type)
+        print()
+    
     # 总结
     print("=" * 60)
     print("测试总结")
@@ -238,10 +497,25 @@ def main():
         status = "✓ 成功" if result.get("success") else "✗ 失败"
         print(f"GetConfiguration: {status}")
     
+    if "change_configuration" in results:
+        result = results["change_configuration"]
+        status = "✓ 成功" if result.get("success") else "✗ 失败"
+        print(f"ChangeConfiguration: {status}")
+    
     if "remote_start" in results:
         result = results["remote_start"]
         status = "✓ 成功" if result.get("success") else "✗ 失败"
         print(f"RemoteStartTransaction: {status}")
+    
+    if "remote_stop" in results:
+        result = results["remote_stop"]
+        status = "✓ 成功" if result.get("success") else "✗ 失败"
+        print(f"RemoteStopTransaction: {status}")
+    
+    if "reset" in results:
+        result = results["reset"]
+        status = "✓ 成功" if result.get("success") else "✗ 失败"
+        print(f"Reset: {status}")
     
     print("=" * 60)
 

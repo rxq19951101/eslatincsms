@@ -23,11 +23,12 @@ else:
 
 # 导入 transport_manager 用于检查 MQTT 连接
 try:
-    from app.ocpp.transport_manager import transport_manager
+    from app.ocpp.transport_manager import transport_manager, TransportType
     TRANSPORT_MANAGER_AVAILABLE = True
 except ImportError:
     TRANSPORT_MANAGER_AVAILABLE = False
     transport_manager = None
+    TransportType = None
 
 router = APIRouter()
 
@@ -35,31 +36,82 @@ router = APIRouter()
 def check_charger_connection(charge_point_id: str) -> bool:
     """
     检查充电桩连接状态
-    同时检查 WebSocket (connection_manager) 和 MQTT (transport_manager) 连接
+    同时检查 WebSocket (charger_websockets, connection_manager, transport_manager) 和 MQTT (transport_manager) 连接
     只要有一个连接就返回 True
     """
     is_connected_ws = False
     is_connected_mqtt = False
     
-    # 检查 WebSocket 连接（connection_manager）
+    # 首先检查 charger_websockets 字典（WebSocket连接的主要存储位置）
     try:
-        is_connected_ws = connection_manager.is_connected(charge_point_id)
-        logger.debug(f"[API] connection_manager.is_connected({charge_point_id}) = {is_connected_ws}")
+        # 动态导入 charger_websockets（避免循环导入）
+        import sys
+        main_module = sys.modules.get('app.main')
+        if main_module and hasattr(main_module, 'charger_websockets'):
+            charger_websockets = getattr(main_module, 'charger_websockets')
+            if charge_point_id in charger_websockets:
+                ws = charger_websockets[charge_point_id]
+                # 简单检查WebSocket对象是否存在（FastAPI WebSocket对象）
+                if ws is not None:
+                    # 尝试检查连接状态（FastAPI WebSocket使用client_state）
+                    try:
+                        # FastAPI WebSocket 使用 client_state 属性
+                        if hasattr(ws, 'client_state'):
+                            # 0 = CONNECTING, 1 = CONNECTED, 2 = DISCONNECTED
+                            if ws.client_state == 1:  # CONNECTED
+                                is_connected_ws = True
+                                logger.debug(f"[API] charger_websockets中找到有效连接: {charge_point_id}")
+                            else:
+                                logger.debug(f"[API] charger_websockets中的连接状态异常: {charge_point_id}, state={ws.client_state}")
+                        else:
+                            # 如果没有client_state属性，假设连接有效（向后兼容）
+                            is_connected_ws = True
+                            logger.debug(f"[API] charger_websockets中找到连接（无法验证状态）: {charge_point_id}")
+                    except Exception as e:
+                        # 如果检查状态失败，假设连接有效（向后兼容）
+                        is_connected_ws = True
+                        logger.debug(f"[API] charger_websockets中找到连接（状态检查失败，假设有效）: {charge_point_id}, 错误: {e}")
     except Exception as e:
-        logger.warning(f"[API] connection_manager.is_connected() 检查失败: {e}")
+        logger.debug(f"[API] 检查charger_websockets失败: {e}")
     
-    # 检查 MQTT 连接（transport_manager）
-    if TRANSPORT_MANAGER_AVAILABLE and transport_manager:
+    # 检查 WebSocket 连接（connection_manager）
+    if not is_connected_ws:
+        try:
+            is_connected_ws = connection_manager.is_connected(charge_point_id)
+            logger.debug(f"[API] connection_manager.is_connected({charge_point_id}) = {is_connected_ws}")
+        except Exception as e:
+            logger.warning(f"[API] connection_manager.is_connected() 检查失败: {e}")
+    
+    # 检查 transport_manager 的 WebSocket 适配器
+    if not is_connected_ws and TRANSPORT_MANAGER_AVAILABLE and transport_manager and TransportType:
         try:
             if hasattr(transport_manager, 'adapters') and transport_manager.adapters:
-                is_connected_mqtt = transport_manager.is_connected(charge_point_id)
-                logger.debug(f"[API] transport_manager.is_connected({charge_point_id}) = {is_connected_mqtt}, adapters: {list(transport_manager.adapters.keys())}")
+                ws_adapter = transport_manager.adapters.get(TransportType.WEBSOCKET)
+                if ws_adapter and hasattr(ws_adapter, 'is_connected'):
+                    is_connected_ws = ws_adapter.is_connected(charge_point_id)
+                    logger.debug(f"[API] transport_manager WebSocket适配器.is_connected({charge_point_id}) = {is_connected_ws}")
+        except Exception as e:
+            logger.debug(f"[API] 检查transport_manager WebSocket适配器失败: {e}")
+    
+    # 检查 MQTT 连接（transport_manager）
+    if TRANSPORT_MANAGER_AVAILABLE and transport_manager and TransportType:
+        try:
+            if hasattr(transport_manager, 'adapters') and transport_manager.adapters:
+                # 只检查MQTT适配器，不包括WebSocket
+                mqtt_adapter = transport_manager.adapters.get(TransportType.MQTT)
+                if mqtt_adapter and hasattr(mqtt_adapter, 'is_connected'):
+                    is_connected_mqtt = mqtt_adapter.is_connected(charge_point_id)
+                    logger.debug(f"[API] transport_manager MQTT适配器.is_connected({charge_point_id}) = {is_connected_mqtt}")
+                else:
+                    # 如果没有MQTT适配器，使用transport_manager.is_connected（它会检查所有适配器）
+                    is_connected_mqtt = transport_manager.is_connected(charge_point_id)
+                    logger.debug(f"[API] transport_manager.is_connected({charge_point_id}) = {is_connected_mqtt}, adapters: {list(transport_manager.adapters.keys())}")
         except Exception as e:
             logger.warning(f"[API] transport_manager.is_connected() 检查失败: {e}")
     
     # 只要有一个连接就认为已连接
     is_connected = is_connected_ws or is_connected_mqtt
-    logger.debug(f"[API] 充电桩 {charge_point_id} 连接状态: WebSocket={is_connected_ws}, MQTT={is_connected_mqtt}, 最终={is_connected}")
+    logger.info(f"[API] 充电桩 {charge_point_id} 连接状态: WebSocket={is_connected_ws}, MQTT={is_connected_mqtt}, 最终={is_connected}")
     return is_connected
 
 
@@ -355,6 +407,92 @@ async def unlock_connector(req: UnlockConnectorRequest) -> RemoteResponse:
     )
 
 
+@router.get("/connected", summary="获取所有已连接的充电桩列表")
+async def get_connected_chargers() -> dict:
+    """获取所有已连接的充电桩ID列表"""
+    logger.info("[API] GET /api/v1/ocpp/connected | 获取已连接充电桩列表")
+    
+    connected_ids = []
+    
+    try:
+        # 从connection_manager获取已连接的充电桩
+        if hasattr(connection_manager, 'get_all_charger_ids'):
+            connected_ids = connection_manager.get_all_charger_ids()
+            logger.info(f"[API] 从connection_manager获取到 {len(connected_ids)} 个已连接充电桩")
+    except Exception as e:
+        logger.warning(f"[API] 从connection_manager获取连接列表失败: {e}")
+    
+    # 从transport_manager获取MQTT连接的充电桩
+    mqtt_connected = []
+    if TRANSPORT_MANAGER_AVAILABLE and transport_manager:
+        try:
+            if hasattr(transport_manager, 'adapters'):
+                for transport_type, adapter in transport_manager.adapters.items():
+                    if transport_type.value == "mqtt" and hasattr(adapter, '_connected_chargers'):
+                        mqtt_connected = list(adapter._connected_chargers)
+                        logger.info(f"[API] 从MQTT适配器获取到 {len(mqtt_connected)} 个已连接充电桩")
+                        break
+        except Exception as e:
+            logger.warning(f"[API] 从transport_manager获取连接列表失败: {e}")
+    
+    # 合并连接列表（去重）
+    all_connected = list(set(connected_ids + mqtt_connected))
+    
+    logger.info(f"[API] GET /api/v1/ocpp/connected 成功 | 总共 {len(all_connected)} 个已连接充电桩")
+    
+    return {
+        "connected_chargers": all_connected,
+        "count": len(all_connected),
+        "sources": {
+            "websocket": connected_ids,
+            "mqtt": mqtt_connected
+        }
+    }
+
+
+@router.get("/connected", summary="获取所有已连接的充电桩列表")
+async def get_connected_chargers() -> dict:
+    """获取所有已连接的充电桩ID列表"""
+    logger.info("[API] GET /api/v1/ocpp/connected | 获取已连接充电桩列表")
+    
+    connected_ids = []
+    
+    try:
+        # 从connection_manager获取已连接的充电桩
+        if hasattr(connection_manager, 'get_all_charger_ids'):
+            connected_ids = connection_manager.get_all_charger_ids()
+            logger.info(f"[API] 从connection_manager获取到 {len(connected_ids)} 个已连接充电桩")
+    except Exception as e:
+        logger.warning(f"[API] 从connection_manager获取连接列表失败: {e}")
+    
+    # 从transport_manager获取MQTT连接的充电桩
+    mqtt_connected = []
+    if TRANSPORT_MANAGER_AVAILABLE and transport_manager:
+        try:
+            if hasattr(transport_manager, 'adapters'):
+                for transport_type, adapter in transport_manager.adapters.items():
+                    if transport_type.value == "mqtt" and hasattr(adapter, '_connected_chargers'):
+                        mqtt_connected = list(adapter._connected_chargers)
+                        logger.info(f"[API] 从MQTT适配器获取到 {len(mqtt_connected)} 个已连接充电桩")
+                        break
+        except Exception as e:
+            logger.warning(f"[API] 从transport_manager获取连接列表失败: {e}")
+    
+    # 合并连接列表（去重）
+    all_connected = list(set(connected_ids + mqtt_connected))
+    
+    logger.info(f"[API] GET /api/v1/ocpp/connected 成功 | 总共 {len(all_connected)} 个已连接充电桩")
+    
+    return {
+        "connected_chargers": all_connected,
+        "count": len(all_connected),
+        "sources": {
+            "websocket": connected_ids,
+            "mqtt": mqtt_connected
+        }
+    }
+
+
 @router.get("/debug/connection-status/{charge_point_id}", summary="调试：检查连接状态")
 async def debug_connection_status(charge_point_id: str):
     """调试端点：检查充电桩的连接状态"""
@@ -387,4 +525,3 @@ async def debug_connection_status(charge_point_id: str):
     result["connection_status"]["transport_manager"] = transport_manager.is_connected(charge_point_id) if TRANSPORT_MANAGER_AVAILABLE and transport_manager and hasattr(transport_manager, 'adapters') and transport_manager.adapters else False
     
     return result
-
