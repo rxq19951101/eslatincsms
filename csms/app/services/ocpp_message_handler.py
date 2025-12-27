@@ -4,12 +4,13 @@
 #
 
 import logging
+import re
 from typing import Dict, Any, Optional, Tuple
 from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 from typing import Optional
 from app.database.base import SessionLocal
-from app.database.models import DeviceEvent, Device
+from app.database.models import DeviceEvent, Device, ChargePoint
 from app.services.charge_point_service import ChargePointService
 from app.services.session_service import SessionService
 
@@ -19,6 +20,32 @@ logger = logging.getLogger("ocpp_csms")
 def now_iso() -> str:
     """获取当前ISO格式时间（使用Z后缀）"""
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+
+def sanitize_charge_point_id(charge_point_id: str) -> str:
+    """
+    清理充电桩ID，只保留字母和数字
+    移除所有特殊字符（如斜杠、星号等）
+    
+    Args:
+        charge_point_id: 原始充电桩ID
+        
+    Returns:
+        清理后的充电桩ID（只包含字母和数字）
+    """
+    # 只保留字母（包括中文）和数字，移除其他所有字符
+    sanitized = re.sub(r'[^a-zA-Z0-9\u4e00-\u9fa5]', '', charge_point_id)
+    
+    # 如果清理后为空，返回一个默认值
+    if not sanitized:
+        sanitized = "CP_INVALID"
+        logger.warning(f"充电桩ID清理后为空，使用默认值: {sanitized}")
+    elif sanitized != charge_point_id:
+        logger.warning(
+            f"充电桩ID包含特殊字符，已清理: '{charge_point_id}' -> '{sanitized}'"
+        )
+    
+    return sanitized
 
 
 class OCPPMessageHandler:
@@ -67,6 +94,9 @@ class OCPPMessageHandler:
         
         注意：对于MQTT传输，设备认证在broker层完成，能到达这里的消息说明设备已通过认证。
         对于WebSocket传输，可能没有device_serial_number，需要特殊处理。
+        
+        对于第一次发送BootNotification的充电桩，会清理charge_point_id中的特殊字符，
+        只保留字母和数字，以防止注入攻击。
         """
         if db is None:
             db = SessionLocal()
@@ -74,6 +104,37 @@ class OCPPMessageHandler:
         else:
             should_close = False
         try:
+            # 检查是否为第一次BootNotification（充电桩是否已存在）
+            original_id = charge_point_id
+            existing_charge_point = db.query(ChargePoint).filter(
+                ChargePoint.id == charge_point_id
+            ).first()
+            
+            # 如果是第一次BootNotification（充电桩不存在），清理charge_point_id
+            if not existing_charge_point:
+                # 清理charge_point_id，移除特殊字符（斜杠、星号等），只保留字母和数字
+                sanitized_id = sanitize_charge_point_id(charge_point_id)
+                
+                # 如果清理后的ID与原ID不同，检查清理后的ID是否已存在
+                if sanitized_id != charge_point_id:
+                    existing_sanitized = db.query(ChargePoint).filter(
+                        ChargePoint.id == sanitized_id
+                    ).first()
+                    
+                    if existing_sanitized:
+                        # 如果清理后的ID已存在，记录警告但继续使用清理后的ID
+                        # get_or_create_charge_point会处理ID冲突（会创建新的唯一ID）
+                        logger.warning(
+                            f"首次BootNotification：清理后的充电桩ID '{sanitized_id}' 已存在，"
+                            f"原始ID: '{original_id}'，系统将生成新的唯一ID"
+                        )
+                    else:
+                        logger.info(
+                            f"首次BootNotification：充电桩ID已清理 "
+                            f"'{original_id}' -> '{sanitized_id}'"
+                        )
+                    
+                    charge_point_id = sanitized_id
             vendor = str(payload.get("vendor", "")).strip() or str(payload.get("chargePointVendor", "")).strip()
             model = str(payload.get("model", "")).strip() or str(payload.get("chargePointModel", "")).strip()
             firmware_version = str(payload.get("firmwareVersion", "")).strip()
@@ -461,6 +522,19 @@ class OCPPMessageHandler:
         evse_id: int = 1
     ) -> Dict[str, Any]:
         """处理OCPP消息路由"""
+        # 对于BootNotification，优先使用payload中的serialNumber作为charge_point_id
+        if action == "BootNotification":
+            serial_number = payload.get("serialNumber") or payload.get("chargePointSerialNumber")
+            if serial_number:
+                serial_number = str(serial_number).strip()
+                if serial_number:
+                    original_id = charge_point_id
+                    charge_point_id = serial_number
+                    logger.info(
+                        f"BootNotification使用payload中的serialNumber作为charge_point_id: "
+                        f"'{original_id}' -> '{charge_point_id}'"
+                    )
+        
         handler_map = {
             "BootNotification": self.handle_boot_notification,
             "Heartbeat": self.handle_heartbeat,
