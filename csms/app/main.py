@@ -1074,6 +1074,47 @@ async def ocpp_ws(ws: WebSocket, id: str = Query(..., description="Charge Point 
                     device_serial_number=device_serial_number,
                     evse_id=evse_id
                 )
+                
+                # 检查是否需要更新charge_point_id（BootNotification时使用payload中的serialNumber）
+                if "_new_charge_point_id" in response:
+                    new_charge_point_id = response.pop("_new_charge_point_id")
+                    if new_charge_point_id != charge_point_id:
+                        logger.info(
+                            f"[{charge_point_id}] BootNotification检测到charge_point_id需要更新: "
+                            f"'{charge_point_id}' -> '{new_charge_point_id}'，重新注册WebSocket连接"
+                        )
+                        
+                        # 重新注册WebSocket连接
+                        old_id = charge_point_id
+                        charge_point_id = new_charge_point_id
+                        
+                        # 更新charger_websockets字典
+                        if old_id in charger_websockets:
+                            charger_websockets[charge_point_id] = charger_websockets.pop(old_id)
+                        
+                        # 重新注册到WebSocket适配器
+                        if MQTT_AVAILABLE and hasattr(transport_manager, 'adapters'):
+                            ws_adapter = transport_manager.get_adapter(TransportType.WEBSOCKET)
+                            if ws_adapter:
+                                try:
+                                    # 先注销旧ID
+                                    await ws_adapter.unregister_connection(old_id)
+                                    # 注册新ID
+                                    await ws_adapter.register_connection(charge_point_id, ws)
+                                    logger.info(f"[{charge_point_id}] WebSocket连接已重新注册到适配器（从{old_id}）")
+                                except Exception as e:
+                                    logger.warning(f"[{charge_point_id}] 重新注册WebSocket适配器失败: {e}")
+                        
+                        # 重新注册到connection_manager
+                        try:
+                            from app.ocpp.connection_manager import connection_manager
+                            # 先断开旧连接
+                            connection_manager.disconnect(old_id)
+                            # 连接新ID
+                            connection_manager.connect(charge_point_id, ws)
+                            logger.info(f"[{charge_point_id}] WebSocket连接已重新注册到connection_manager（从{old_id}）")
+                        except Exception as e:
+                            logger.warning(f"[{charge_point_id}] 重新注册connection_manager失败: {e}")
                     
                 # 发送响应
                 if is_ocpp_standard_format and unique_id:
@@ -1091,21 +1132,26 @@ async def ocpp_ws(ws: WebSocket, id: str = Query(..., description="Charge Point 
                         logger.warning(f"[{charge_point_id}] -> WebSocket OCPP {action} CALLERROR | {error_code}")
                     else:
                         # CALLRESULT: [3, UniqueId, Payload]
-                        resp_msg = [3, unique_id, response]
-                        logger.info(f"[{charge_point_id}] -> WebSocket OCPP {action} CALLRESULT | {json.dumps(response)}")
+                        # 移除内部标记（如_new_charge_point_id）
+                        clean_response = {k: v for k, v in response.items() if not k.startswith("_")}
+                        resp_msg = [3, unique_id, clean_response]
+                        logger.info(f"[{charge_point_id}] -> WebSocket OCPP {action} CALLRESULT | {json.dumps(clean_response)}")
                     
                     await ws.send_text(json.dumps(resp_msg))
                 else:
                     # 简化格式响应
                     if response:
-                        if action in ["BootNotification", "Heartbeat", "StatusNotification", "Authorize", 
-                                     "StartTransaction", "StopTransaction", "MeterValues"]:
-                            resp_msg = {
-                                "action": action,
-                                **response
-                            }
-                            logger.info(f"[{charge_point_id}] -> WebSocket OCPP {action}Response | {json.dumps(response)}")
-                            await ws.send_text(json.dumps(resp_msg))
+                        # 确保移除内部标记（虽然已经pop了，但为了保险再清理一次）
+                        clean_response = {k: v for k, v in response.items() if not k.startswith("_")}
+                        if clean_response:
+                            if action in ["BootNotification", "Heartbeat", "StatusNotification", "Authorize", 
+                                         "StartTransaction", "StopTransaction", "MeterValues"]:
+                                resp_msg = {
+                                    "action": action,
+                                    **clean_response
+                                }
+                                logger.info(f"[{charge_point_id}] -> WebSocket OCPP {action}Response | {json.dumps(clean_response)}")
+                                await ws.send_text(json.dumps(resp_msg))
                         else:
                             await ws.send_text(json.dumps({"action": action, **response}))
                     else:
@@ -1137,19 +1183,29 @@ async def ocpp_ws(ws: WebSocket, id: str = Query(..., description="Charge Point 
             # 连接可能已关闭，忽略
             pass
     finally:
-        # 注销WebSocket连接
-        charger_websockets.pop(charge_point_id, None)
+        # 注销WebSocket连接（需要检查所有可能的ID）
+        # 注意：由于BootNotification可能改变了charge_point_id，需要清理所有可能的ID
+        ids_to_remove = [charge_point_id]
+        # 查找所有指向这个WebSocket的连接ID
+        for cp_id, ws_conn in list(charger_websockets.items()):
+            if ws_conn == ws:
+                ids_to_remove.append(cp_id)
+        
+        for cp_id in set(ids_to_remove):
+            charger_websockets.pop(cp_id, None)
         
         # 从适配器注销
         if MQTT_AVAILABLE and hasattr(transport_manager, 'adapters'):
             ws_adapter = transport_manager.get_adapter(TransportType.WEBSOCKET)
             if ws_adapter:
-                await ws_adapter.unregister_connection(charge_point_id)
+                for cp_id in set(ids_to_remove):
+                    await ws_adapter.unregister_connection(cp_id)
         
         # 同时从旧的 connection_manager 注销
         try:
             from app.ocpp.connection_manager import connection_manager
-            connection_manager.disconnect(charge_point_id)
+            for cp_id in set(ids_to_remove):
+                connection_manager.disconnect(cp_id)
             logger.info(f"[{charge_point_id}] WebSocket连接已从 connection_manager 注销")
         except Exception as e:
             logger.warning(f"[{charge_point_id}] 从 connection_manager 注销失败: {e}")

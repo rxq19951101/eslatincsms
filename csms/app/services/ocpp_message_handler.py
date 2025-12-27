@@ -143,6 +143,7 @@ class OCPPMessageHandler:
             # 如果提供了device_serial_number，验证设备是否存在
             # 对于MQTT传输，设备应该已经存在（因为已通过认证）
             # 如果设备不存在，说明可能是WebSocket连接或数据不一致，记录警告但不拒绝
+            # 注意：如果设备不存在，将device_serial_number设为None，避免外键约束错误
             if device_serial_number:
                 from app.database.models import Device
                 device = db.query(Device).filter(
@@ -154,8 +155,16 @@ class OCPPMessageHandler:
                         f"设备 {device_serial_number} 不存在于devices表中，"
                         f"但消息已到达应用层（charge_point_id={charge_point_id}）。"
                         f"可能是WebSocket连接或数据不一致。"
+                        f"将device_serial_number设为None，避免外键约束错误。"
                     )
-                    # 不拒绝请求，允许继续处理（可能是WebSocket连接）
+                    # 将device_serial_number设为None，避免外键约束错误
+                    device_serial_number = None
+                elif not device.is_active:
+                    logger.warning(
+                        f"设备 {device_serial_number} 未激活，"
+                        f"将device_serial_number设为None（charge_point_id={charge_point_id}）"
+                    )
+                    device_serial_number = None
             
             # 获取或创建充电桩
             # 注意：如果device_serial_number存在但设备不存在，get_or_create_charge_point不会创建设备
@@ -521,7 +530,13 @@ class OCPPMessageHandler:
         device_serial_number: Optional[str] = None,
         evse_id: int = 1
     ) -> Dict[str, Any]:
-        """处理OCPP消息路由"""
+        """处理OCPP消息路由
+        
+        Returns:
+            Dict[str, Any]: 消息处理结果，可能包含 '_new_charge_point_id' 键来指示需要更新连接ID
+        """
+        new_charge_point_id = None
+        
         # 对于BootNotification，优先使用payload中的serialNumber作为charge_point_id
         if action == "BootNotification":
             serial_number = payload.get("serialNumber") or payload.get("chargePointSerialNumber")
@@ -530,6 +545,7 @@ class OCPPMessageHandler:
                 if serial_number:
                     original_id = charge_point_id
                     charge_point_id = serial_number
+                    new_charge_point_id = serial_number  # 标记需要更新连接ID
                     logger.info(
                         f"BootNotification使用payload中的serialNumber作为charge_point_id: "
                         f"'{original_id}' -> '{charge_point_id}'"
@@ -548,14 +564,20 @@ class OCPPMessageHandler:
         handler = handler_map.get(action)
         if handler:
             if action in ["BootNotification", "Heartbeat"]:
-                return await handler(charge_point_id, payload, device_serial_number)
+                result = await handler(charge_point_id, payload, device_serial_number)
             elif action == "StatusNotification":
-                return await handler(charge_point_id, payload, evse_id)
+                result = await handler(charge_point_id, payload, evse_id)
             elif action == "StartTransaction":
                 # StartTransaction 需要 evse_id 来关联正确的 EVSE
-                return await handler(charge_point_id, payload, evse_id)
+                result = await handler(charge_point_id, payload, evse_id)
             else:
-                return await handler(charge_point_id, payload)
+                result = await handler(charge_point_id, payload)
+            
+            # 如果charge_point_id改变了，在结果中标记需要更新连接
+            if new_charge_point_id:
+                result["_new_charge_point_id"] = new_charge_point_id
+            
+            return result
         else:
             logger.warning(f"[{charge_point_id}] 未知的OCPP动作: {action}")
             return {}

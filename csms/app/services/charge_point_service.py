@@ -180,7 +180,20 @@ class ChargePointService:
             if firmware_version:
                 charge_point.firmware_version = firmware_version
             if device_serial_number:
-                charge_point.device_serial_number = device_serial_number
+                # 验证设备是否存在（更新时也要验证外键约束）
+                device = db.query(Device).filter(
+                    Device.serial_number == device_serial_number
+                ).first()
+                if device and device.is_active:
+                    charge_point.device_serial_number = device_serial_number
+                else:
+                    # 设备不存在或未激活，不设置device_serial_number（保持原值或设为None）
+                    if device_serial_number:
+                        logger.warning(
+                            f"更新充电桩 {charge_point_id} 时，设备 {device_serial_number} 不存在或未激活，"
+                            f"不更新device_serial_number字段"
+                        )
+                    charge_point.device_serial_number = None
         
         db.commit()
         return charge_point
