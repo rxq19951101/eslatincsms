@@ -179,6 +179,14 @@ try:
 except ImportError:
     logger.warning("无法导入日志中间件，跳过")
 
+# 添加多租户中间件
+try:
+    from app.core.tenant_middleware import TenantMiddleware
+    app.add_middleware(TenantMiddleware)
+    logger.info("多租户中间件已启用")
+except ImportError:
+    logger.warning("无法导入多租户中间件，跳过")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],

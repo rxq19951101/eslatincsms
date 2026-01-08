@@ -75,6 +75,26 @@ class AuthorizationException(OCPPException):
         )
 
 
+class PermissionDenied(OCPPException):
+    """权限不足异常"""
+    def __init__(self, detail: str = "权限不足"):
+        super().__init__(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=detail,
+            error_code="PERMISSION_DENIED"
+        )
+
+
+class TenantAccessDenied(OCPPException):
+    """租户访问被拒绝异常"""
+    def __init__(self, detail: str = "租户访问被拒绝"):
+        super().__init__(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=detail,
+            error_code="TENANT_ACCESS_DENIED"
+        )
+
+
 # 异常处理器
 async def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
     """HTTP异常处理器"""

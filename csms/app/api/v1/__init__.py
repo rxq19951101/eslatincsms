@@ -26,9 +26,19 @@ def register_routes():
     import importlib
     
     routes_config = [
+        ("auth", "/auth", "认证"),  # 认证路由（登录、登出、Token刷新）
+        ("rbac", "/rbac", "权限管理"),  # RBAC权限管理
+        ("admin_users", "/admin-users", "运营后台用户管理"),  # 管理员用户管理
+        ("tenants", "/tenants", "多租户管理"),  # 多租户管理
+        ("dashboard", "/dashboard", "仪表板"),  # 仪表板数据
+        ("sites", "/sites", "充电站管理"),  # 充电站管理
         ("chargers", "/chargers", "充电桩管理"),
         ("transactions", "/transactions", "事务管理"),
-        ("orders", "/orders", "订单管理"),
+        ("orders", "/orders", "订单管理"),  # 订单管理（已增强）
+        ("finance", "/finance", "财务管理"),  # 财务管理
+        ("pricing", "/pricing", "定价管理"),  # 定价管理
+        ("users", "/users", "充电用户管理"),  # 充电用户管理
+        ("alerts", "/alerts", "告警管理"),  # 告警管理
         ("ocpp_control", "/ocpp", "OCPP控制"),
         ("admin", "/admin", "管理功能"),
         ("charger_management", "/charger-management", "新充电桩管理"),

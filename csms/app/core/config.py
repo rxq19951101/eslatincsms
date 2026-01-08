@@ -40,6 +40,7 @@ class Settings(BaseSettings):
     secret_key: str = "your-secret-key-change-in-production"
     algorithm: str = "HS256"
     access_token_expire_minutes: int = 30
+    refresh_token_expire_days: int = 7
     
     # CORS配置
     cors_origins: List[str] = ["*"]  # 生产环境应限制具体域名

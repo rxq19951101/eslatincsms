@@ -21,6 +21,7 @@ class Site(Base):
     __tablename__ = "sites"
     
     id = Column(String(100), primary_key=True, index=True)
+    tenant_id = Column(String(100), ForeignKey("tenants.id"), nullable=True, index=True)  # 多租户支持
     name = Column(String(200), nullable=False)  # 站点名称
     address = Column(Text, nullable=False)  # 详细地址
     latitude = Column(Float, nullable=False, index=True)
@@ -39,6 +40,7 @@ class Site(Base):
     
     __table_args__ = (
         Index('idx_sites_location', 'latitude', 'longitude'),
+        Index('idx_sites_tenant', 'tenant_id'),
     )
 
 
@@ -50,6 +52,7 @@ class ChargePoint(Base):
     __tablename__ = "charge_points"
     
     id = Column(String(100), primary_key=True, index=True)
+    tenant_id = Column(String(100), ForeignKey("tenants.id"), nullable=True, index=True)  # 多租户支持
     site_id = Column(String(100), ForeignKey("sites.id"), nullable=False, index=True)
     
     # 资产信息
@@ -80,6 +83,8 @@ class ChargePoint(Base):
     __table_args__ = (
         Index('idx_charge_points_site', 'site_id'),
         Index('idx_charge_points_device', 'device_serial_number'),
+        Index('idx_charge_points_tenant', 'tenant_id'),
+        Index('idx_charge_points_tenant_status', 'tenant_id', 'is_active'),
     )
 
 
@@ -195,6 +200,7 @@ class ChargingSession(Base):
     __tablename__ = "charging_sessions"
     
     id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(String(100), ForeignKey("tenants.id"), nullable=True, index=True)  # 多租户支持
     evse_id = Column(Integer, ForeignKey("evses.id"), nullable=False, index=True)
     charge_point_id = Column(String(100), ForeignKey("charge_points.id"), nullable=False, index=True)
     
@@ -229,6 +235,7 @@ class ChargingSession(Base):
         Index('idx_sessions_id_tag', 'id_tag'),
         Index('idx_sessions_start_time', 'start_time'),
         Index('idx_sessions_charge_point', 'charge_point_id'),
+        Index('idx_sessions_tenant', 'tenant_id'),
         Index('idx_sessions_transaction_unique', 'charge_point_id', 'evse_id', 'transaction_id', unique=True),
     )
 
@@ -268,6 +275,7 @@ class Order(Base):
     __tablename__ = "orders"
     
     id = Column(String(100), primary_key=True, index=True)
+    tenant_id = Column(String(100), ForeignKey("tenants.id"), nullable=True, index=True)  # 多租户支持
     session_id = Column(Integer, ForeignKey("charging_sessions.id"), nullable=True, index=True)
     charge_point_id = Column(String(100), ForeignKey("charge_points.id"), nullable=False, index=True)
     
@@ -299,6 +307,8 @@ class Order(Base):
         Index('idx_orders_status', 'status'),
         Index('idx_orders_user_id', 'user_id'),
         Index('idx_orders_created_at', 'created_at'),
+        Index('idx_orders_tenant', 'tenant_id'),
+        Index('idx_orders_tenant_created_at', 'tenant_id', 'created_at'),
     )
 
 
@@ -311,6 +321,7 @@ class Tariff(Base):
     __tablename__ = "tariffs"
     
     id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(String(100), ForeignKey("tenants.id"), nullable=True, index=True)  # 多租户支持
     site_id = Column(String(100), ForeignKey("sites.id"), nullable=True, index=True)  # 站点级别定价
     charge_point_id = Column(String(100), ForeignKey("charge_points.id"), nullable=True, index=True)  # 桩级别定价
     
@@ -341,6 +352,7 @@ class Tariff(Base):
     __table_args__ = (
         Index('idx_tariffs_site', 'site_id'),
         Index('idx_tariffs_charge_point', 'charge_point_id'),
+        Index('idx_tariffs_tenant', 'tenant_id'),
         Index('idx_tariffs_valid', 'valid_from', 'valid_until'),
     )
 
@@ -383,6 +395,7 @@ class Invoice(Base):
     __tablename__ = "invoices"
     
     id = Column(String(100), primary_key=True, index=True)
+    tenant_id = Column(String(100), ForeignKey("tenants.id"), nullable=True, index=True)  # 多租户支持
     session_id = Column(Integer, ForeignKey("charging_sessions.id"), nullable=False, index=True)
     order_id = Column(String(100), ForeignKey("orders.id"), nullable=True, index=True)
     pricing_snapshot_id = Column(Integer, ForeignKey("pricing_snapshots.id"), nullable=False, index=True)
@@ -418,6 +431,7 @@ class Invoice(Base):
         Index('idx_invoices_status', 'status'),
         Index('idx_invoices_session', 'session_id'),
         Index('idx_invoices_order', 'order_id'),
+        Index('idx_invoices_tenant', 'tenant_id'),
         Index('idx_invoices_issued_at', 'issued_at'),
     )
 
@@ -572,6 +586,7 @@ class SupportMessage(Base):
     __tablename__ = "support_messages"
     
     id = Column(String(100), primary_key=True, index=True)
+    tenant_id = Column(String(100), nullable=True, index=True)  # 多租户支持
     user_id = Column(String(100), nullable=False, index=True)
     username = Column(String(100), nullable=False)
     
@@ -587,4 +602,329 @@ class SupportMessage(Base):
         Index('idx_messages_status', 'status'),
         Index('idx_messages_user_id', 'user_id'),
         Index('idx_messages_created_at', 'created_at'),
+        Index('idx_messages_tenant', 'tenant_id'),
+    )
+
+
+# ==================== 多租户和权限管理 ====================
+
+class Tenant(Base):
+    """租户表"""
+    __tablename__ = "tenants"
+    
+    id = Column(String(100), primary_key=True, index=True)
+    name = Column(String(200), nullable=False)
+    code = Column(String(100), unique=True, nullable=False, index=True)
+    contact_name = Column(String(100), nullable=True)
+    contact_phone = Column(String(20), nullable=True)
+    contact_email = Column(String(100), nullable=True)
+    logo_url = Column(String(500), nullable=True)
+    theme_color = Column(String(50), nullable=True)
+    domain = Column(String(200), nullable=True)
+    status = Column(String(50), default="active")  # active, suspended, disabled
+    expires_at = Column(DateTime(timezone=True), nullable=True)
+    
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    
+    __table_args__ = (
+        Index('idx_tenants_code', 'code'),
+        Index('idx_tenants_status', 'status'),
+    )
+
+
+class EndUser(Base):
+    """充电用户表（C端用户）"""
+    __tablename__ = "end_users"
+    
+    id = Column(String(100), primary_key=True, index=True)
+    tenant_id = Column(String(100), ForeignKey("tenants.id"), nullable=False, index=True)
+    username = Column(String(100), nullable=True)
+    phone = Column(String(20), nullable=True)
+    email = Column(String(100), nullable=True)
+    id_tag = Column(String(100), nullable=False, index=True)
+    balance = Column(Numeric(10, 2), default=0)
+    total_spent = Column(Numeric(10, 2), default=0)
+    status = Column(String(50), default="active")  # active, frozen, deleted
+    
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    last_login_at = Column(DateTime(timezone=True), nullable=True)
+    
+    __table_args__ = (
+        Index('idx_end_users_tenant', 'tenant_id'),
+        Index('idx_end_users_id_tag', 'id_tag'),
+        Index('idx_end_users_status', 'status'),
+    )
+
+
+class AdminUser(Base):
+    """运营后台管理员用户表（B端用户）"""
+    __tablename__ = "admin_users"
+    
+    id = Column(String(100), primary_key=True, index=True)
+    tenant_id = Column(String(100), ForeignKey("tenants.id"), nullable=False, index=True)
+    username = Column(String(100), nullable=False)
+    email = Column(String(100), nullable=False, unique=True, index=True)
+    phone = Column(String(20), nullable=True)
+    password_hash = Column(String(255), nullable=False)
+    salt = Column(String(255), nullable=True)
+    status = Column(String(50), default="active")  # active, disabled, locked
+    is_super_admin = Column(Boolean, default=False)
+    last_login_at = Column(DateTime(timezone=True), nullable=True)
+    last_login_ip = Column(String(50), nullable=True)
+    login_failed_count = Column(Integer, default=0)
+    locked_until = Column(DateTime(timezone=True), nullable=True)
+    
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    created_by = Column(String(100), nullable=True)
+    
+    # 关系
+    roles = relationship("AdminUserRole", back_populates="admin_user", cascade="all, delete-orphan")
+    login_history = relationship("LoginHistory", back_populates="admin_user", cascade="all, delete-orphan")
+    
+    __table_args__ = (
+        Index('idx_admin_users_tenant', 'tenant_id'),
+        Index('idx_admin_users_email', 'email'),
+        Index('idx_admin_users_status', 'status'),
+    )
+
+
+class Role(Base):
+    """角色表"""
+    __tablename__ = "roles"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(String(100), ForeignKey("tenants.id"), nullable=True, index=True)  # NULL表示系统角色
+    name = Column(String(100), nullable=False)
+    code = Column(String(100), nullable=False)
+    description = Column(Text, nullable=True)
+    role_type = Column(String(50), default="custom")  # system, custom
+    status = Column(String(50), default="active")  # active, disabled
+    
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    
+    # 关系
+    permissions = relationship("RolePermission", back_populates="role", cascade="all, delete-orphan")
+    admin_users = relationship("AdminUserRole", back_populates="role", cascade="all, delete-orphan")
+    
+    __table_args__ = (
+        Index('idx_roles_tenant', 'tenant_id'),
+        Index('idx_roles_code', 'code'),
+        Index('idx_roles_status', 'status'),
+    )
+
+
+class Permission(Base):
+    """权限表"""
+    __tablename__ = "permissions"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    code = Column(String(100), unique=True, nullable=False, index=True)
+    name = Column(String(200), nullable=False)
+    description = Column(Text, nullable=True)
+    module = Column(String(100), nullable=True)  # dashboard, chargers, orders, etc.
+    permission_type = Column(String(50), default="function")  # function, data
+    
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    
+    # 关系
+    roles = relationship("RolePermission", back_populates="permission", cascade="all, delete-orphan")
+    
+    __table_args__ = (
+        Index('idx_permissions_code', 'code'),
+        Index('idx_permissions_module', 'module'),
+    )
+
+
+class RolePermission(Base):
+    """角色权限关联表"""
+    __tablename__ = "role_permissions"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    role_id = Column(Integer, ForeignKey("roles.id", ondelete="CASCADE"), nullable=False, index=True)
+    permission_id = Column(Integer, ForeignKey("permissions.id", ondelete="CASCADE"), nullable=False, index=True)
+    
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    
+    # 关系
+    role = relationship("Role", back_populates="permissions")
+    permission = relationship("Permission", back_populates="roles")
+    
+    __table_args__ = (
+        Index('idx_role_permissions_role', 'role_id'),
+        Index('idx_role_permissions_permission', 'permission_id'),
+        Index('idx_role_permissions_unique', 'role_id', 'permission_id', unique=True),
+    )
+
+
+class AdminUserRole(Base):
+    """管理员用户角色关联表"""
+    __tablename__ = "admin_user_roles"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    admin_user_id = Column(String(100), ForeignKey("admin_users.id", ondelete="CASCADE"), nullable=False, index=True)
+    role_id = Column(Integer, ForeignKey("roles.id", ondelete="CASCADE"), nullable=False, index=True)
+    
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    
+    # 关系
+    admin_user = relationship("AdminUser", back_populates="roles")
+    role = relationship("Role", back_populates="admin_users")
+    
+    __table_args__ = (
+        Index('idx_admin_user_roles_user', 'admin_user_id'),
+        Index('idx_admin_user_roles_role', 'role_id'),
+        Index('idx_admin_user_roles_unique', 'admin_user_id', 'role_id', unique=True),
+    )
+
+
+class ResourcePermission(Base):
+    """资源权限表（站点/充电桩范围权限）"""
+    __tablename__ = "resource_permissions"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    admin_user_id = Column(String(100), ForeignKey("admin_users.id", ondelete="CASCADE"), nullable=False, index=True)
+    resource_type = Column(String(50), nullable=False)  # site, charge_point
+    resource_id = Column(String(100), nullable=False)
+    permission_type = Column(String(50), default="read")  # read, write, admin
+    
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    
+    __table_args__ = (
+        Index('idx_resource_permissions_user', 'admin_user_id'),
+        Index('idx_resource_permissions_resource', 'resource_type', 'resource_id'),
+        Index('idx_resource_permissions_unique', 'admin_user_id', 'resource_type', 'resource_id', unique=True),
+    )
+
+
+class LoginHistory(Base):
+    """登录历史记录表"""
+    __tablename__ = "login_history"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    admin_user_id = Column(String(100), ForeignKey("admin_users.id"), nullable=False, index=True)
+    login_ip = Column(String(50), nullable=True)
+    user_agent = Column(Text, nullable=True)
+    login_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False, index=True)
+    logout_at = Column(DateTime(timezone=True), nullable=True)
+    session_duration = Column(Integer, nullable=True)  # 秒数
+    
+    # 关系
+    admin_user = relationship("AdminUser", back_populates="login_history")
+    
+    __table_args__ = (
+        Index('idx_login_history_user', 'admin_user_id'),
+        Index('idx_login_history_login_at', 'login_at'),
+    )
+
+
+class AuditLog(Base):
+    """操作审计日志表"""
+    __tablename__ = "audit_logs"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(String(100), ForeignKey("tenants.id"), nullable=True, index=True)
+    admin_user_id = Column(String(100), ForeignKey("admin_users.id"), nullable=True, index=True)
+    action = Column(String(100), nullable=False, index=True)  # create, update, delete, etc.
+    resource_type = Column(String(100), nullable=True)  # charge_point, order, user, etc.
+    resource_id = Column(String(100), nullable=True)
+    details = Column(JSON, nullable=True)  # 操作详情（JSON格式）
+    ip_address = Column(String(50), nullable=True)
+    user_agent = Column(Text, nullable=True)
+    
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False, index=True)
+    
+    __table_args__ = (
+        Index('idx_audit_logs_tenant', 'tenant_id'),
+        Index('idx_audit_logs_user', 'admin_user_id'),
+        Index('idx_audit_logs_action', 'action'),
+        Index('idx_audit_logs_created_at', 'created_at'),
+    )
+
+
+class TenantSubscription(Base):
+    """租户订阅表（功能模块订阅）"""
+    __tablename__ = "tenant_subscriptions"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(String(100), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    module_code = Column(String(100), nullable=False)  # dashboard, analytics, etc.
+    is_enabled = Column(Boolean, default=True)
+    expires_at = Column(DateTime(timezone=True), nullable=True)
+    
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    
+    __table_args__ = (
+        Index('idx_tenant_subscriptions_tenant', 'tenant_id'),
+        Index('idx_tenant_subscriptions_unique', 'tenant_id', 'module_code', unique=True),
+    )
+
+
+class TenantLimit(Base):
+    """租户限制表（使用量限制）"""
+    __tablename__ = "tenant_limits"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(String(100), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    limit_type = Column(String(100), nullable=False)  # max_sites, max_charge_points, max_admin_users, etc.
+    limit_value = Column(Integer, nullable=False)
+    current_value = Column(Integer, default=0)
+    
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    
+    __table_args__ = (
+        Index('idx_tenant_limits_tenant', 'tenant_id'),
+        Index('idx_tenant_limits_unique', 'tenant_id', 'limit_type', unique=True),
+    )
+
+
+class Alert(Base):
+    """告警表"""
+    __tablename__ = "alerts"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(String(100), ForeignKey("tenants.id"), nullable=True, index=True)
+    alert_type = Column(String(50), nullable=False, index=True)  # device_offline, fault, abnormal_order, etc.
+    severity = Column(String(20), nullable=False, index=True)  # critical, warning, info
+    charge_point_id = Column(String(100), nullable=True, index=True)
+    message = Column(Text, nullable=False)
+    status = Column(String(50), default="pending")  # pending, acknowledged, resolved
+    acknowledged_at = Column(DateTime(timezone=True), nullable=True)
+    acknowledged_by = Column(String(100), nullable=True)
+    
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False, index=True)
+    
+    __table_args__ = (
+        Index('idx_alerts_tenant', 'tenant_id'),
+        Index('idx_alerts_type', 'alert_type'),
+        Index('idx_alerts_severity', 'severity'),
+        Index('idx_alerts_status', 'status'),
+        Index('idx_alerts_created_at', 'created_at'),
+    )
+
+
+class MaintenanceTicket(Base):
+    """维护工单表"""
+    __tablename__ = "maintenance_tickets"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(String(100), ForeignKey("tenants.id"), nullable=True, index=True)
+    ticket_number = Column(String(100), unique=True, nullable=False, index=True)
+    charge_point_id = Column(String(100), nullable=True, index=True)
+    issue_type = Column(String(50), nullable=True)  # fault_repair, scheduled_maintenance, etc.
+    description = Column(Text, nullable=True)
+    status = Column(String(50), default="open")  # open, assigned, in_progress, resolved, closed
+    assigned_to = Column(String(100), nullable=True, index=True)
+    
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    resolved_at = Column(DateTime(timezone=True), nullable=True)
+    
+    __table_args__ = (
+        Index('idx_maintenance_tickets_tenant', 'tenant_id'),
+        Index('idx_maintenance_tickets_status', 'status'),
+        Index('idx_maintenance_tickets_assigned', 'assigned_to'),
     )
