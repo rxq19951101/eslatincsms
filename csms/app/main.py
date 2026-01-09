@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import os
+import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Union
@@ -142,21 +143,40 @@ async def lifespan(app: FastAPI):
             logger.error(f"传输管理器初始化失败: {e}", exc_info=True)
             # 不阻止应用启动，只是某些传输方式不可用
     
-    # 初始化 Redis 离线检测
-    try:
-        # 配置 Redis keyspace notifications
-        await setup_redis_keyspace_notifications()
-        
-        # 启动后台任务监听离线事件
-        offline_listener_task = asyncio.create_task(listen_charger_offline_events())
-        logger.info("充电桩离线检测监听器已启动（基于 Redis 过期键事件）")
-    except Exception as e:
-        logger.error(f"初始化 Redis 离线检测失败: {e}", exc_info=True)
-        # 不阻止应用启动，但离线检测功能不可用
+    # 初始化 Redis 离线检测（测试环境禁用）
+    is_test_env = os.getenv("ENVIRONMENT") == "test" or os.getenv("TESTING") == "true"
+    if not is_test_env:
+        try:
+            # 配置 Redis keyspace notifications
+            await setup_redis_keyspace_notifications()
+            
+            # 启动后台任务监听离线事件
+            offline_listener_task = asyncio.create_task(listen_charger_offline_events())
+            logger.info("充电桩离线检测监听器已启动（基于 Redis 过期键事件）")
+        except Exception as e:
+            logger.error(f"初始化 Redis 离线检测失败: {e}", exc_info=True)
+            # 不阻止应用启动，但离线检测功能不可用
+    else:
+        logger.info("测试环境：已跳过 Redis 离线检测监听器初始化")
+    
+    # 保存后台任务引用以便清理
+    background_tasks = []
+    if not is_test_env and 'offline_listener_task' in locals():
+        background_tasks.append(offline_listener_task)
     
     yield
     
-    # 关闭时
+    # 关闭时：取消所有后台任务
+    logger.info("开始清理后台任务...")
+    for task in background_tasks:
+        if not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                logger.info("后台任务已取消")
+    
+    # 关闭传输管理器
     if MQTT_AVAILABLE:
         try:
             await transport_manager.shutdown()
@@ -178,6 +198,42 @@ try:
     logger.info("请求日志中间件已启用")
 except ImportError:
     logger.warning("无法导入日志中间件，跳过")
+
+# 添加认证中间件（从token中提取用户信息）
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    """认证中间件：从JWT token中提取用户信息"""
+    # 跳过非业务路径
+    if request.url.path.startswith(("/health", "/docs", "/redoc", "/openapi.json")):
+        return await call_next(request)
+    
+    # 从请求中提取token
+    from app.core.auth import get_token_from_request
+    token_payload = get_token_from_request(request)
+    
+    if token_payload:
+        # 创建用户对象（简化版，实际应该从数据库查询）
+        class CurrentUser:
+            def __init__(self, payload):
+                self.id = uuid.UUID(payload["user_id"])
+                self.user_type = payload.get("user_type", "admin")
+                self.is_super_admin = payload.get("global_role") == "super_admin" or payload.get("is_super_admin", False)
+        
+        request.state.current_user = CurrentUser(token_payload)
+    else:
+        request.state.current_user = None
+    
+    return await call_next(request)
+
+# 添加租户中间件
+try:
+    from app.core.tenant_middleware import tenant_middleware
+    @app.middleware("http")
+    async def tenant_middleware_wrapper(request: Request, call_next):
+        return await tenant_middleware(request, call_next)
+    logger.info("租户中间件已启用")
+except ImportError as e:
+    logger.warning(f"无法导入租户中间件: {e}")
 
 app.add_middleware(
     CORSMiddleware,
@@ -1349,6 +1405,131 @@ try:
     
     app.include_router(api_router)
     logger.info("API v1 路由已注册到应用")
+    
+    # 注册新的多租户相关路由
+    try:
+        # 从子模块导入（admin目录下的auth.py，不是admin.py）
+        import importlib.util
+        
+        # 导入auth路由（正常导入）
+        from app.api.v1.admin.auth import router as admin_auth_router
+        logger.info("✓ admin.auth路由导入成功")
+        
+        from app.api.v1.app.auth import router as app_auth_router
+        logger.info("✓ app.auth路由导入成功")
+        
+        from app.api.v1.admin.tenants import router as tenants_router
+        logger.info("✓ tenants路由导入成功")
+        
+        from app.api.v1.admin.users import router as users_router
+        logger.info("✓ users路由导入成功")
+        
+        from app.api.v1.admin.roles import router as roles_router
+        logger.info("✓ roles路由导入成功")
+        
+        from app.api.v1.admin.memberships import router as memberships_router
+        logger.info("✓ memberships路由导入成功")
+        
+        from app.api.v1.admin.alerts import router as alerts_router
+        logger.info("✓ alerts路由导入成功")
+        
+        from app.api.v1.admin.configs import router as configs_router
+        logger.info("✓ configs路由导入成功")
+        
+        from app.api.v1.admin.statistics import router as admin_statistics_router
+        logger.info("✓ statistics路由导入成功")
+        
+        # 导入end-users.py（文件名有连字符，需要特殊处理）
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        end_users_path = os.path.join(current_dir, "api", "v1", "admin", "end-users.py")
+        if not os.path.exists(end_users_path):
+            # 尝试相对路径
+            end_users_path = os.path.join("app", "api", "v1", "admin", "end-users.py")
+        
+        if os.path.exists(end_users_path):
+            spec = importlib.util.spec_from_file_location("app.api.v1.admin.end_users", end_users_path)
+            end_users_module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(end_users_module)
+            end_users_router = end_users_module.router
+            logger.info("✓ end-users路由导入成功")
+        else:
+            logger.warning(f"未找到end-users.py文件，跳过注册。尝试路径: {end_users_path}")
+            end_users_router = None
+        
+        # 管理员认证路由
+        app.include_router(
+            admin_auth_router,
+            prefix="/api/v1/admin/auth",
+            tags=["管理员认证"]
+        )
+        
+        # 终端用户认证路由
+        app.include_router(
+            app_auth_router,
+            prefix="/api/v1/app/auth",
+            tags=["终端用户认证"]
+        )
+        
+        # 租户管理路由
+        app.include_router(
+            tenants_router,
+            prefix="/api/v1/admin/tenants",
+            tags=["租户管理"]
+        )
+        
+        # 管理员用户管理路由
+        app.include_router(
+            users_router,
+            prefix="/api/v1/admin/users",
+            tags=["管理员用户管理"]
+        )
+        
+        # 终端用户管理路由
+        if end_users_router:
+            app.include_router(
+                end_users_router,
+                prefix="/api/v1/admin/end-users",
+                tags=["终端用户管理"]
+            )
+        
+        # 角色权限管理路由
+        app.include_router(
+            roles_router,
+            prefix="/api/v1/admin/roles",
+            tags=["角色权限管理"]
+        )
+        
+        # 租户成员管理路由
+        app.include_router(
+            memberships_router,
+            prefix="/api/v1/admin/memberships",
+            tags=["租户成员管理"]
+        )
+        
+        # 告警管理路由
+        app.include_router(
+            alerts_router,
+            prefix="/api/v1/admin/alerts",
+            tags=["告警管理"]
+        )
+        
+        # 系统配置管理路由
+        app.include_router(
+            configs_router,
+            prefix="/api/v1/admin/configs",
+            tags=["系统配置管理"]
+        )
+        
+        # 统计报表路由
+        app.include_router(
+            admin_statistics_router,
+            prefix="/api/v1/admin/statistics",
+            tags=["统计报表"]
+        )
+        
+        logger.info("多租户相关路由已注册")
+    except ImportError as e:
+        logger.warning(f"无法注册多租户路由: {e}", exc_info=True)
     
     # 验证路由是否注册成功 - 列出所有注册的路由
     all_routes = []

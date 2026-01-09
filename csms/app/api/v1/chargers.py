@@ -8,8 +8,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy import or_, func
-from app.database import get_db, ChargePoint, Site, EVSE, EVSEStatus, Tariff
+from app.database.base import get_db, tenant_id_context
+from app.database.models import ChargePoint, Site, EVSE, EVSEStatus, Tariff
 from app.core.logging_config import get_logger
+from app.core.permissions import get_current_admin_user
 
 logger = get_logger("ocpp_csms")
 
@@ -26,6 +28,7 @@ class CreateChargerRequest(BaseModel):
 @router.get("", summary="获取所有充电桩")
 def list_chargers(
     filter_type: Optional[str] = Query(None, description="筛选类型: configured(已配置), unconfigured(未配置)"),
+    current_user_obj = Depends(get_current_admin_user),
     db: Session = Depends(get_db)
 ) -> List[dict]:
     """
@@ -37,7 +40,14 @@ def list_chargers(
     """
     logger.info(f"[API] GET /api/v1/chargers | 筛选类型: {filter_type or '全部'}")
     
+    # 获取租户ID（RLS会自动过滤，但为了性能也在应用层过滤）
+    tenant_id = tenant_id_context.get()
+    
     query = db.query(ChargePoint)
+    
+    # 添加租户过滤（如果不是超级管理员）
+    if tenant_id and not current_user_obj.is_super_admin:
+        query = query.filter(ChargePoint.tenant_id == tenant_id)
     
     # 根据筛选类型过滤
     if filter_type == "configured":
@@ -106,11 +116,20 @@ def list_chargers(
 
 
 @router.get("/{charge_point_id}", summary="获取充电桩详情")
-def get_charger(charge_point_id: str, db: Session = Depends(get_db)) -> dict:
+def get_charger(
+    charge_point_id: str,
+    current_user_obj = Depends(get_current_admin_user),
+    db: Session = Depends(get_db)
+) -> dict:
     """获取单个充电桩的详细信息（使用新表结构）"""
     logger.info(f"[API] GET /api/v1/chargers/{charge_point_id} | 请求充电桩详情")
     
-    charge_point = db.query(ChargePoint).filter(ChargePoint.id == charge_point_id).first()
+    tenant_id = tenant_id_context.get()
+    query = db.query(ChargePoint).filter(ChargePoint.id == charge_point_id)
+    if tenant_id and not current_user_obj.is_super_admin:
+        query = query.filter(ChargePoint.tenant_id == tenant_id)
+    
+    charge_point = query.first()
     if not charge_point:
         logger.warning(f"[API] GET /api/v1/chargers/{charge_point_id} | 充电桩未找到")
         raise HTTPException(status_code=404, detail=f"充电桩 {charge_point_id} 未找到")
@@ -174,13 +193,22 @@ def get_charger(charge_point_id: str, db: Session = Depends(get_db)) -> dict:
 @router.post("", summary="创建充电桩", status_code=201)
 def create_charger(
     req: CreateChargerRequest,
+    current_user_obj = Depends(get_current_admin_user),
     db: Session = Depends(get_db)
 ) -> dict:
     """创建新的充电桩"""
     logger.info(f"[API] POST /api/v1/chargers | 充电桩ID: {req.id}")
     
-    # 检查是否已存在
-    existing = db.query(ChargePoint).filter(ChargePoint.id == req.id).first()
+    tenant_id = tenant_id_context.get()
+    if not tenant_id:
+        raise HTTPException(status_code=403, detail="Tenant ID required")
+    
+    # 检查是否已存在（按租户）
+    query = db.query(ChargePoint).filter(ChargePoint.id == req.id)
+    if tenant_id and not current_user_obj.is_super_admin:
+        query = query.filter(ChargePoint.tenant_id == tenant_id)
+    
+    existing = query.first()
     if existing:
         logger.warning(f"[API] POST /api/v1/chargers | 充电桩 {req.id} 已存在")
         raise HTTPException(status_code=400, detail=f"充电桩 {req.id} 已存在")
@@ -188,6 +216,7 @@ def create_charger(
     # 创建新充电桩
     charge_point = ChargePoint(
         id=req.id,
+        tenant_id=tenant_id,
         vendor=req.vendor,
         model=req.model,
         site_id=req.site_id,
@@ -216,12 +245,18 @@ class UpdateChargerRequest(BaseModel):
 def update_charger(
     charge_point_id: str,
     req: UpdateChargerRequest,
+    current_user_obj = Depends(get_current_admin_user),
     db: Session = Depends(get_db)
 ) -> dict:
     """更新充电桩信息"""
     logger.info(f"[API] PUT /api/v1/chargers/{charge_point_id}")
     
-    charge_point = db.query(ChargePoint).filter(ChargePoint.id == charge_point_id).first()
+    tenant_id = tenant_id_context.get()
+    query = db.query(ChargePoint).filter(ChargePoint.id == charge_point_id)
+    if tenant_id and not current_user_obj.is_super_admin:
+        query = query.filter(ChargePoint.tenant_id == tenant_id)
+    
+    charge_point = query.first()
     if not charge_point:
         logger.warning(f"[API] PUT /api/v1/chargers/{charge_point_id} | 充电桩未找到")
         raise HTTPException(status_code=404, detail=f"充电桩 {charge_point_id} 未找到")
@@ -245,12 +280,18 @@ def update_charger(
 @router.delete("/{charge_point_id}", summary="删除充电桩", status_code=200)
 def delete_charger(
     charge_point_id: str,
+    current_user_obj = Depends(get_current_admin_user),
     db: Session = Depends(get_db)
 ) -> dict:
     """删除充电桩"""
     logger.info(f"[API] DELETE /api/v1/chargers/{charge_point_id}")
     
-    charge_point = db.query(ChargePoint).filter(ChargePoint.id == charge_point_id).first()
+    tenant_id = tenant_id_context.get()
+    query = db.query(ChargePoint).filter(ChargePoint.id == charge_point_id)
+    if tenant_id and not current_user_obj.is_super_admin:
+        query = query.filter(ChargePoint.tenant_id == tenant_id)
+    
+    charge_point = query.first()
     if not charge_point:
         logger.warning(f"[API] DELETE /api/v1/chargers/{charge_point_id} | 充电桩未找到")
         raise HTTPException(status_code=404, detail=f"充电桩 {charge_point_id} 未找到")

@@ -30,7 +30,7 @@ def register_routes():
         ("transactions", "/transactions", "事务管理"),
         ("orders", "/orders", "订单管理"),
         ("ocpp_control", "/ocpp", "OCPP控制"),
-        ("admin", "/admin", "管理功能"),
+        ("admin_main", "/admin", "管理功能"),  # admin.py 已重命名为 admin_main.py
         ("charger_management", "/charger-management", "新充电桩管理"),
         ("statistics", "/statistics", "统计数据"),
         ("devices", "/devices", "设备管理"),

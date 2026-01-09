@@ -52,7 +52,9 @@ from app.database import get_db
 from app.database.models import (
     Site, ChargePoint, EVSE, EVSEStatus, Device,
     ChargingSession, DeviceEvent, DeviceConfig, ChargePointConfig,
-    Order, Invoice, Payment, Tariff, MeterValue, PricingSnapshot, SupportMessage
+    Order, Invoice, Payment, Tariff, MeterValue, PricingSnapshot, SupportMessage,
+    Tenant, AdminUser, EndUser, TenantMembership, Role, TenantMembershipRole,
+    RefreshToken, Alert, AlertRule, SystemConfig, AuditLog
 )
 
 # Mock Redis客户端在导入app.main之前
@@ -132,46 +134,145 @@ def db_session():
 @pytest.fixture(scope="function")
 def client(db_session: Session):
     """创建测试客户端"""
-    from app.main import app
-    import redis
-    from unittest.mock import MagicMock, patch
+    import logging
+    import sys
+    from app.database.base import get_db
+    from fastapi.testclient import TestClient
     
-    # Mock Redis客户端以避免连接错误
-    mock_redis = MagicMock()
-    mock_redis.hgetall.return_value = {}
-    mock_redis.hset.return_value = None
-    mock_redis.get.return_value = None
-    mock_redis.set.return_value = None
-    mock_redis.delete.return_value = None
-    mock_redis.exists.return_value = False
-    mock_redis.ping.return_value = True
-    mock_redis.config_set.return_value = True
-    mock_redis.pubsub.return_value = MagicMock()
+    # 立即输出，确保能看到
+    print("\n" + "=" * 60, flush=True)
+    print("✓ [FIXTURE] client fixture 开始执行", flush=True)
+    print("=" * 60, flush=True)
     
-    def override_get_db():
-        try:
-            yield db_session
-        finally:
-            pass
+    logger = logging.getLogger(__name__)
+    logger.setLevel(logging.INFO)
     
-    app.dependency_overrides[get_db] = override_get_db
+    logger.info("=" * 60)
+    logger.info("开始创建测试客户端 (client fixture)")
+    logger.info("=" * 60)
     
-    # Mock Redis客户端 - 替换app.main中的redis_client
-    original_redis_client = getattr(app, 'redis_client', None)
+    print("✓ [FIXTURE] Logger已获取", flush=True)
+    
     try:
+        logger.info("步骤1: 导入app.main")
+        import sys
+        logger.info(f"  - Python路径: {sys.path[:3]}")
+        from app.main import app
+        logger.info("  - app.main导入成功")
+        logger.info(f"  - app对象: {app}")
+    except Exception as e:
+        logger.error(f"步骤1失败: 导入app.main失败: {e}", exc_info=True)
+        raise
+    
+    try:
+        print("✓ [FIXTURE] 步骤2: 导入redis和mock模块", file=sys.stderr, flush=True)
+        logger.info("步骤2: 导入redis和mock模块")
+        import redis
+        from unittest.mock import MagicMock, patch
+        print("✓ [FIXTURE] 模块导入成功", file=sys.stderr, flush=True)
+        logger.info("  - 模块导入成功")
+    except Exception as e:
+        print(f"✗ [FIXTURE] 步骤2失败: 导入模块失败: {e}", file=sys.stderr, flush=True)
+        logger.error(f"步骤2失败: 导入模块失败: {e}", exc_info=True)
+        raise
+    
+    try:
+        print("✓ [FIXTURE] 步骤3: 创建Mock Redis客户端", file=sys.stderr, flush=True)
+        logger.info("步骤3: 创建Mock Redis客户端")
+        mock_redis = MagicMock()
+        mock_redis.hgetall.return_value = {}
+        mock_redis.hset.return_value = None
+        mock_redis.get.return_value = None
+        mock_redis.set.return_value = None
+        mock_redis.delete.return_value = None
+        mock_redis.exists.return_value = False
+        mock_redis.ping.return_value = True
+        mock_redis.config_set.return_value = True
+        mock_redis.pubsub.return_value = MagicMock()
+        print("✓ [FIXTURE] Mock Redis客户端创建成功", file=sys.stderr, flush=True)
+        logger.info("  - Mock Redis客户端创建成功")
+    except Exception as e:
+        print(f"✗ [FIXTURE] 步骤3失败: 创建Mock Redis失败: {e}", file=sys.stderr, flush=True)
+        logger.error(f"步骤3失败: 创建Mock Redis失败: {e}", exc_info=True)
+        raise
+    
+    try:
+        print("✓ [FIXTURE] 步骤4: 设置数据库依赖覆盖", file=sys.stderr, flush=True)
+        logger.info("步骤4: 设置数据库依赖覆盖")
+        def override_get_db():
+            try:
+                logger.info("    - get_db被调用，返回db_session")
+                yield db_session
+            finally:
+                logger.info("    - get_db清理完成")
+                pass
+        
+        app.dependency_overrides[get_db] = override_get_db
+        print("✓ [FIXTURE] 数据库依赖覆盖设置成功", file=sys.stderr, flush=True)
+        logger.info("  - 数据库依赖覆盖设置成功")
+        logger.info(f"  - dependency_overrides: {list(app.dependency_overrides.keys())}")
+        print(f"  - dependency_overrides: {list(app.dependency_overrides.keys())}", file=sys.stderr, flush=True)
+    except Exception as e:
+        print(f"✗ [FIXTURE] 步骤4失败: 设置数据库依赖覆盖失败: {e}", file=sys.stderr, flush=True)
+        logger.error(f"步骤4失败: 设置数据库依赖覆盖失败: {e}", exc_info=True)
+        raise
+    
+    original_redis_client = None
+    try:
+        print("✓ [FIXTURE] 步骤5: Mock Redis客户端并创建TestClient", file=sys.stderr, flush=True)
+        logger.info("步骤5: Mock Redis客户端并创建TestClient")
+        original_redis_client = getattr(app, 'redis_client', None)
+        logger.info(f"  - 原始redis_client: {original_redis_client}")
+        
         # 替换redis_client
         if hasattr(app, 'redis_client'):
             app.redis_client = mock_redis
+            logger.info("  - app.redis_client已替换为mock_redis")
+        else:
+            logger.info("  - app没有redis_client属性，将创建")
+        
         # 也mock redis.from_url以防其他地方使用
+        logger.info("  - 开始patch redis.from_url...")
         with patch('redis.from_url', return_value=mock_redis):
+            logger.info("  - redis.from_url已patch")
+            logger.info("  - 开始patch app.main.redis_client...")
             with patch('app.main.redis_client', mock_redis, create=True):
-                with TestClient(app) as test_client:
+                logger.info("  - app.main.redis_client已patch")
+                print("✓ [FIXTURE] 开始创建TestClient（这可能需要一些时间）...", file=sys.stderr, flush=True)
+                logger.info("  - 开始创建TestClient（这可能需要一些时间）...")
+                import time
+                start_time = time.time()
+                print(f"  - 开始时间: {start_time}", file=sys.stderr, flush=True)
+                
+                test_client = TestClient(app)
+                elapsed = time.time() - start_time
+                print(f"✓ [FIXTURE] TestClient创建成功！耗时: {elapsed:.2f}秒", file=sys.stderr, flush=True)
+                logger.info(f"  - TestClient创建成功！耗时: {elapsed:.2f}秒")
+                logger.info(f"  - TestClient对象: {test_client}")
+                print(f"  - TestClient对象类型: {type(test_client)}", file=sys.stderr, flush=True)
+                
+                with test_client:
+                    print("✓ [FIXTURE] TestClient上下文管理器已进入", file=sys.stderr, flush=True)
+                    logger.info("  - TestClient上下文管理器已进入")
                     yield test_client
+                    print("✓ [FIXTURE] TestClient使用完毕，准备退出上下文", file=sys.stderr, flush=True)
+                    logger.info("  - TestClient使用完毕，准备退出上下文")
+                print("✓ [FIXTURE] TestClient上下文管理器已退出", file=sys.stderr, flush=True)
+                logger.info("  - TestClient上下文管理器已退出")
+    except Exception as e:
+        logger.error(f"步骤5失败: 创建TestClient失败: {e}", exc_info=True)
+        import traceback
+        logger.error(f"完整错误堆栈:\n{traceback.format_exc()}")
+        raise
     finally:
+        logger.info("步骤6: 清理和恢复")
         # 恢复原始redis_client
         if original_redis_client is not None:
             app.redis_client = original_redis_client
+            logger.info("  - 已恢复原始redis_client")
         app.dependency_overrides.clear()
+        logger.info("  - 已清理dependency_overrides")
+        logger.info("  - client fixture清理完成")
 
 
 @pytest.fixture

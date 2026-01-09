@@ -15,6 +15,9 @@ from app.database.models import (
     DeviceEvent,
     DeviceConfig, ChargePointConfig,
     SupportMessage,
+    # 多租户相关表
+    Tenant, AdminUser, EndUser, TenantMembership, Role, TenantMembershipRole,
+    Alert, AlertRule, SystemConfig, RefreshToken, AuditLog,
 )
 
 # 然后导入base（需要Base已定义）
@@ -46,4 +49,16 @@ __all__ = [
     "DeviceConfig",
     "ChargePointConfig",
     "SupportMessage",
+    # 多租户相关表
+    "Tenant",
+    "AdminUser",
+    "EndUser",
+    "TenantMembership",
+    "Role",
+    "TenantMembershipRole",
+    "Alert",
+    "AlertRule",
+    "SystemConfig",
+    "RefreshToken",
+    "AuditLog",
 ]

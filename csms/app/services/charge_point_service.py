@@ -128,7 +128,9 @@ class ChargePointService:
                     charge_point_id = f"cp_{generate_uuid()[:16]}"
                     logger.warning(f"充电桩ID生成冲突，使用UUID: {charge_point_id}")
             
-            # 创建充电桩
+            # 创建充电桩（需要tenant_id，但这个方法没有tenant_id参数）
+            # 注意：这个方法需要更新以支持tenant_id，暂时使用默认值或从上下文获取
+            # 这里暂时不设置tenant_id，需要在调用时确保已设置
             charge_point = ChargePoint(
                 id=charge_point_id,
                 site_id=default_site.id,
@@ -137,6 +139,7 @@ class ChargePointService:
                 serial_number=serial_number,
                 firmware_version=firmware_version,
                 device_serial_number=device_serial_number
+                # tenant_id 需要在调用时设置
             )
             db.add(charge_point)
             db.flush()
@@ -151,10 +154,12 @@ class ChargePointService:
             ).first()
             
             if not evse:
+                # 注意：EVSE需要tenant_id，但这里暂时不设置（需要在调用时确保已设置）
                 evse = EVSE(
                     charge_point_id=charge_point_id,
                     evse_id=1,
                     connector_type="Type2"  # 默认连接器类型
+                    # tenant_id 需要在调用时设置
                 )
                 db.add(evse)
                 db.flush()
@@ -165,6 +170,7 @@ class ChargePointService:
                     charge_point_id=charge_point_id,
                     status="Unknown",
                     last_seen=datetime.now(timezone.utc)
+                    # tenant_id 需要在调用时设置
                 )
                 db.add(evse_status)
             
@@ -263,11 +269,13 @@ class ChargePointService:
         ).first()
         
         if not evse:
-            # 创建EVSE
+            # 创建EVSE（需要tenant_id，但这个方法没有tenant_id参数）
+            # 注意：需要在调用时确保tenant_id已设置
             evse = EVSE(
                 charge_point_id=charge_point_id,
                 evse_id=evse_id,
                 connector_type="Type2"  # 默认连接器类型
+                # tenant_id 需要在调用时设置
             )
             db.add(evse)
             db.flush()
@@ -283,6 +291,7 @@ class ChargePointService:
                 charge_point_id=charge_point_id,
                 status=status,
                 last_seen=datetime.now(timezone.utc)
+                # tenant_id 需要在调用时设置
             )
             db.add(evse_status)
         else:
@@ -294,7 +303,15 @@ class ChargePointService:
         
         # 记录状态变化事件
         if previous_status and previous_status != status:
+            # 获取tenant_id（从charge_point）
+            tenant_id = None
+            if charge_point_id:
+                cp = db.query(ChargePoint).filter(ChargePoint.id == charge_point_id).first()
+                if cp:
+                    tenant_id = cp.tenant_id
+            
             event = DeviceEvent(
+                tenant_id=tenant_id,
                 charge_point_id=charge_point_id,
                 evse_id=evse.id,
                 event_type="status_change",
@@ -327,7 +344,15 @@ class ChargePointService:
                 )
                 device_serial_number = None
         
+        # 获取tenant_id（从charge_point）
+        tenant_id = None
+        if charge_point_id:
+            cp = db.query(ChargePoint).filter(ChargePoint.id == charge_point_id).first()
+            if cp:
+                tenant_id = cp.tenant_id
+        
         event = DeviceEvent(
+            tenant_id=tenant_id,
             device_serial_number=device_serial_number,
             charge_point_id=charge_point_id,
             event_type="heartbeat",
@@ -382,7 +407,8 @@ class ChargePointService:
         db: Session,
         device_serial_number: str,
         vendor: Optional[str] = None,
-        type_code: Optional[str] = None
+        type_code: Optional[str] = None,
+        tenant_id: Optional[str] = None
     ) -> Optional[Device]:
         """获取或创建设备
         
@@ -392,10 +418,12 @@ class ChargePointService:
             logger.warning(f"设备序列号无效: {device_serial_number}（不能为空）")
             return None
         
-        # 查找设备
-        device = db.query(Device).filter(
-            Device.serial_number == device_serial_number
-        ).first()
+        # 查找设备（按租户）
+        query = db.query(Device).filter(Device.serial_number == device_serial_number)
+        if tenant_id:
+            query = query.filter(Device.tenant_id == tenant_id)
+        
+        device = query.first()
         
         if not device:
             # 推断设备类型代码（如果未提供）
@@ -423,8 +451,13 @@ class ChargePointService:
                 logger.warning("加密模块不可用，使用简单哈希（仅用于开发环境）")
             
             # 创建设备（每个设备独立存储master_secret）
+            if not tenant_id:
+                logger.error(f"创建设备 {device_serial_number} 时缺少 tenant_id")
+                return None
+            
             device = Device(
                 serial_number=device_serial_number,
+                tenant_id=tenant_id,
                 type_code=type_code,
                 mqtt_client_id=mqtt_client_id,
                 mqtt_username=mqtt_username,
@@ -488,8 +521,15 @@ class ChargePointService:
             ("requires_auth", "true", "bool"),
         ]
         
+        # 获取tenant_id（从charge_point）
+        tenant_id = None
+        cp = db.query(ChargePoint).filter(ChargePoint.id == charge_point_id).first()
+        if cp:
+            tenant_id = cp.tenant_id
+        
         for config_key, config_value, value_type in default_configs:
             config = ChargePointConfig(
+                tenant_id=tenant_id,
                 charge_point_id=charge_point_id,
                 config_key=config_key,
                 config_value=config_value,

@@ -6,7 +6,9 @@
 from typing import List, Optional
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
-from app.database import get_db, ChargingSession, ChargePoint, EVSE
+from app.database.base import get_db, tenant_id_context
+from app.database.models import ChargingSession, ChargePoint, EVSE
+from app.core.permissions import get_current_admin_user
 from app.core.logging_config import get_logger
 
 logger = get_logger("ocpp_csms")
@@ -20,6 +22,7 @@ def list_transactions(
     status: Optional[str] = Query(None, description="状态过滤"),
     limit: int = Query(100, le=1000),
     offset: int = Query(0, ge=0),
+    current_user_obj = Depends(get_current_admin_user),
     db: Session = Depends(get_db)
 ) -> List[dict]:
     """获取充电会话列表（使用新表结构）"""
@@ -30,7 +33,12 @@ def list_transactions(
         f"限制: {limit} | 偏移: {offset}"
     )
     
+    tenant_id = tenant_id_context.get()
     query = db.query(ChargingSession)
+    
+    # 添加租户过滤（如果不是超级管理员）
+    if tenant_id and not current_user_obj.is_super_admin:
+        query = query.filter(ChargingSession.tenant_id == tenant_id)
     
     if charge_point_id:
         query = query.filter(ChargingSession.charge_point_id == charge_point_id)

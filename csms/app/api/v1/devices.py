@@ -9,8 +9,10 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from datetime import datetime, timezone
 
-from app.database import get_db
+from app.database.base import get_db
 from app.database.models import Device
+from app.core.permissions import get_current_admin_user
+from app.database.base import tenant_id_context
 from app.services.charge_point_service import ChargePointService
 from app.core.mqtt_auth import MQTTAuthService
 from app.core.crypto import derive_password, decrypt_master_secret
@@ -57,6 +59,7 @@ class DeviceListResponse(BaseModel):
 @router.post("", response_model=DeviceResponse, status_code=201, summary="录入设备")
 def create_device(
     req: CreateDeviceRequest,
+    current_user_obj = Depends(get_current_admin_user),
     db: Session = Depends(get_db)
 ):
     """
@@ -81,8 +84,13 @@ def create_device(
             detail="设备序列号不能为空"
         )
     
-    # 检查设备是否已存在
+    tenant_id = tenant_id_context.get()
+    if not tenant_id:
+        raise HTTPException(status_code=403, detail="Tenant ID required")
+    
+    # 检查设备是否已存在（按租户）
     existing_device = db.query(Device).filter(
+        Device.tenant_id == tenant_id,
         Device.serial_number == req.serial_number
     ).first()
     
@@ -106,7 +114,8 @@ def create_device(
         db=db,
         device_serial_number=req.serial_number,
         vendor=vendor,
-        type_code=type_code
+        type_code=type_code,
+        tenant_id=tenant_id
     )
     
     if not device:
@@ -205,12 +214,16 @@ def list_devices(
 @router.get("/{serial_number}", response_model=DeviceResponse, summary="获取设备详情")
 def get_device(
     serial_number: str,
+    current_user_obj = Depends(get_current_admin_user),
     db: Session = Depends(get_db)
 ):
     """获取设备详情（包含MQTT认证信息）"""
-    device = db.query(Device).filter(
-        Device.serial_number == serial_number
-    ).first()
+    tenant_id = tenant_id_context.get()
+    query = db.query(Device).filter(Device.serial_number == serial_number)
+    if tenant_id and not current_user_obj.is_super_admin:
+        query = query.filter(Device.tenant_id == tenant_id)
+    
+    device = query.first()
     
     if not device:
         raise HTTPException(
@@ -242,6 +255,7 @@ def get_device(
 @router.get("/{serial_number}/password", summary="获取设备MQTT密码")
 def get_device_password(
     serial_number: str,
+    current_user_obj = Depends(get_current_admin_user),
     db: Session = Depends(get_db)
 ):
     """
@@ -249,9 +263,12 @@ def get_device_password(
     
     密码通过HMAC从master_secret派生，每次调用返回相同的密码。
     """
-    device = db.query(Device).filter(
-        Device.serial_number == serial_number
-    ).first()
+    tenant_id = tenant_id_context.get()
+    query = db.query(Device).filter(Device.serial_number == serial_number)
+    if tenant_id and not current_user_obj.is_super_admin:
+        query = query.filter(Device.tenant_id == tenant_id)
+    
+    device = query.first()
     
     if not device:
         raise HTTPException(
@@ -286,9 +303,12 @@ def toggle_device_status(
     db: Session = Depends(get_db)
 ):
     """激活或停用设备"""
-    device = db.query(Device).filter(
-        Device.serial_number == serial_number
-    ).first()
+    tenant_id = tenant_id_context.get()
+    query = db.query(Device).filter(Device.serial_number == serial_number)
+    if tenant_id and not current_user_obj.is_super_admin:
+        query = query.filter(Device.tenant_id == tenant_id)
+    
+    device = query.first()
     
     if not device:
         raise HTTPException(

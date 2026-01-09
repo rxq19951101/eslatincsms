@@ -6,9 +6,11 @@
 from datetime import datetime, timezone
 from sqlalchemy import (
     Column, Integer, String, Float, Boolean, 
-    DateTime, Text, ForeignKey, JSON, Index, Numeric
+    DateTime, Text, ForeignKey, JSON, Index, Numeric, UniqueConstraint
 )
+from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
+import uuid
 from app.database.base import Base
 
 
@@ -21,6 +23,7 @@ class Site(Base):
     __tablename__ = "sites"
     
     id = Column(String(100), primary_key=True, index=True)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
     name = Column(String(200), nullable=False)  # 站点名称
     address = Column(Text, nullable=False)  # 详细地址
     latitude = Column(Float, nullable=False, index=True)
@@ -35,10 +38,12 @@ class Site(Base):
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
     
     # 关系
+    tenant = relationship("Tenant")
     charge_points = relationship("ChargePoint", back_populates="site", cascade="all, delete-orphan")
     
     __table_args__ = (
         Index('idx_sites_location', 'latitude', 'longitude'),
+        Index('idx_sites_tenant_id', 'tenant_id'),
     )
 
 
@@ -50,6 +55,7 @@ class ChargePoint(Base):
     __tablename__ = "charge_points"
     
     id = Column(String(100), primary_key=True, index=True)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
     site_id = Column(String(100), ForeignKey("sites.id"), nullable=False, index=True)
     
     # 资产信息
@@ -72,6 +78,7 @@ class ChargePoint(Base):
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
     
     # 关系
+    tenant = relationship("Tenant")
     site = relationship("Site", back_populates="charge_points")
     device = relationship("Device", foreign_keys=[device_serial_number], back_populates="charge_points")
     evses = relationship("EVSE", back_populates="charge_point", cascade="all, delete-orphan")
@@ -80,6 +87,7 @@ class ChargePoint(Base):
     __table_args__ = (
         Index('idx_charge_points_site', 'site_id'),
         Index('idx_charge_points_device', 'device_serial_number'),
+        Index('idx_charge_points_tenant_id', 'tenant_id'),
     )
 
 
@@ -90,6 +98,7 @@ class EVSE(Base):
     __tablename__ = "evses"
     
     id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
     charge_point_id = Column(String(100), ForeignKey("charge_points.id"), nullable=False, index=True)
     evse_id = Column(Integer, nullable=False)  # OCPP中的evse_id
     
@@ -102,6 +111,7 @@ class EVSE(Base):
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
     
     # 关系
+    tenant = relationship("Tenant")
     charge_point = relationship("ChargePoint", back_populates="evses")
     evse_status = relationship("EVSEStatus", back_populates="evse", uselist=False, cascade="all, delete-orphan")
     charging_sessions = relationship("ChargingSession", back_populates="evse", cascade="all, delete-orphan")
@@ -109,6 +119,7 @@ class EVSE(Base):
     __table_args__ = (
         Index('idx_evses_charge_point', 'charge_point_id'),
         Index('idx_evses_charge_point_evse', 'charge_point_id', 'evse_id', unique=True),
+        Index('idx_evses_tenant_id', 'tenant_id'),
     )
 
 
@@ -119,6 +130,7 @@ class EVSEStatus(Base):
     __tablename__ = "evse_status"
     
     id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
     evse_id = Column(Integer, ForeignKey("evses.id"), nullable=False, unique=True, index=True)
     charge_point_id = Column(String(100), ForeignKey("charge_points.id"), nullable=False, index=True)
     
@@ -133,6 +145,7 @@ class EVSEStatus(Base):
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
     
     # 关系
+    tenant = relationship("Tenant")
     evse = relationship("EVSE", back_populates="evse_status")
     charge_point = relationship("ChargePoint", back_populates="evse_statuses")
     current_session = relationship("ChargingSession", foreign_keys=[current_session_id])
@@ -141,6 +154,7 @@ class EVSEStatus(Base):
         Index('idx_evse_status_charge_point', 'charge_point_id'),
         Index('idx_evse_status_status', 'status'),
         Index('idx_evse_status_last_seen', 'last_seen'),
+        Index('idx_evse_status_tenant_id', 'tenant_id'),
     )
 
 
@@ -155,6 +169,7 @@ class Device(Base):
     
     # 设备SN号（主键）
     serial_number = Column(String(100), primary_key=True, index=True)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
     
     # 设备类型代码（用于MQTT topic和client_id，如 "zcf", "tesla", "abb"）
     type_code = Column(String(50), nullable=False, index=True, default="default")  # 设备类型代码
@@ -176,12 +191,15 @@ class Device(Base):
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
     
     # 关系
+    tenant = relationship("Tenant")
     charge_points = relationship("ChargePoint", foreign_keys="ChargePoint.device_serial_number", back_populates="device")
     
     __table_args__ = (
+        UniqueConstraint('tenant_id', 'serial_number', name='unique_tenant_serial_number'),
         Index('idx_devices_type_code', 'type_code'),
         Index('idx_devices_mqtt_client_id', 'mqtt_client_id'),
         Index('idx_devices_mqtt_username', 'mqtt_username'),
+        Index('idx_devices_tenant_id', 'tenant_id'),
     )
 
 
@@ -195,6 +213,7 @@ class ChargingSession(Base):
     __tablename__ = "charging_sessions"
     
     id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
     evse_id = Column(Integer, ForeignKey("evses.id"), nullable=False, index=True)
     charge_point_id = Column(String(100), ForeignKey("charge_points.id"), nullable=False, index=True)
     
@@ -219,6 +238,7 @@ class ChargingSession(Base):
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
     
     # 关系
+    tenant = relationship("Tenant")
     evse = relationship("EVSE", back_populates="charging_sessions")
     charge_point = relationship("ChargePoint")
     meter_values = relationship("MeterValue", back_populates="session", cascade="all, delete-orphan")
@@ -230,6 +250,7 @@ class ChargingSession(Base):
         Index('idx_sessions_start_time', 'start_time'),
         Index('idx_sessions_charge_point', 'charge_point_id'),
         Index('idx_sessions_transaction_unique', 'charge_point_id', 'evse_id', 'transaction_id', unique=True),
+        Index('idx_charging_sessions_tenant_id', 'tenant_id'),
     )
 
 
@@ -240,6 +261,7 @@ class MeterValue(Base):
     __tablename__ = "meter_values"
     
     id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
     session_id = Column(Integer, ForeignKey("charging_sessions.id"), nullable=False, index=True)
     
     connector_id = Column(Integer, nullable=True)
@@ -250,11 +272,13 @@ class MeterValue(Base):
     sampled_value = Column(JSON, nullable=True)  # 完整采样值数据（JSON格式）
     
     # 关系
+    tenant = relationship("Tenant")
     session = relationship("ChargingSession", back_populates="meter_values")
     
     __table_args__ = (
         Index('idx_meter_values_timestamp', 'timestamp'),
         Index('idx_meter_values_session', 'session_id'),
+        Index('idx_meter_values_tenant_id', 'tenant_id'),
     )
 
 
@@ -268,6 +292,7 @@ class Order(Base):
     __tablename__ = "orders"
     
     id = Column(String(100), primary_key=True, index=True)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
     session_id = Column(Integer, ForeignKey("charging_sessions.id"), nullable=True, index=True)
     charge_point_id = Column(String(100), ForeignKey("charge_points.id"), nullable=False, index=True)
     
@@ -291,6 +316,7 @@ class Order(Base):
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
     
     # 关系
+    tenant = relationship("Tenant")
     session = relationship("ChargingSession")
     charge_point = relationship("ChargePoint")
     invoices = relationship("Invoice", back_populates="order", cascade="all, delete-orphan")
@@ -299,6 +325,7 @@ class Order(Base):
         Index('idx_orders_status', 'status'),
         Index('idx_orders_user_id', 'user_id'),
         Index('idx_orders_created_at', 'created_at'),
+        Index('idx_orders_tenant_id', 'tenant_id'),
     )
 
 
@@ -311,6 +338,7 @@ class Tariff(Base):
     __tablename__ = "tariffs"
     
     id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
     site_id = Column(String(100), ForeignKey("sites.id"), nullable=True, index=True)  # 站点级别定价
     charge_point_id = Column(String(100), ForeignKey("charge_points.id"), nullable=True, index=True)  # 桩级别定价
     
@@ -334,6 +362,7 @@ class Tariff(Base):
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
     
     # 关系
+    tenant = relationship("Tenant")
     site = relationship("Site")
     charge_point = relationship("ChargePoint")
     pricing_snapshots = relationship("PricingSnapshot", back_populates="tariff", cascade="all, delete-orphan")
@@ -342,6 +371,7 @@ class Tariff(Base):
         Index('idx_tariffs_site', 'site_id'),
         Index('idx_tariffs_charge_point', 'charge_point_id'),
         Index('idx_tariffs_valid', 'valid_from', 'valid_until'),
+        Index('idx_tariffs_tenant_id', 'tenant_id'),
     )
 
 
@@ -353,6 +383,7 @@ class PricingSnapshot(Base):
     __tablename__ = "pricing_snapshots"
     
     id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
     tariff_id = Column(Integer, ForeignKey("tariffs.id"), nullable=False, index=True)
     session_id = Column(Integer, ForeignKey("charging_sessions.id"), nullable=True, index=True)
     order_id = Column(String(100), ForeignKey("orders.id"), nullable=True, index=True)
@@ -366,6 +397,7 @@ class PricingSnapshot(Base):
     snapshot_time = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
     
     # 关系
+    tenant = relationship("Tenant")
     tariff = relationship("Tariff", back_populates="pricing_snapshots")
     session = relationship("ChargingSession")
     order = relationship("Order")
@@ -373,6 +405,7 @@ class PricingSnapshot(Base):
     __table_args__ = (
         Index('idx_pricing_snapshots_session', 'session_id'),
         Index('idx_pricing_snapshots_order', 'order_id'),
+        Index('idx_pricing_snapshots_tenant_id', 'tenant_id'),
     )
 
 
@@ -383,6 +416,7 @@ class Invoice(Base):
     __tablename__ = "invoices"
     
     id = Column(String(100), primary_key=True, index=True)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
     session_id = Column(Integer, ForeignKey("charging_sessions.id"), nullable=False, index=True)
     order_id = Column(String(100), ForeignKey("orders.id"), nullable=True, index=True)
     pricing_snapshot_id = Column(Integer, ForeignKey("pricing_snapshots.id"), nullable=False, index=True)
@@ -409,6 +443,7 @@ class Invoice(Base):
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
     
     # 关系
+    tenant = relationship("Tenant")
     session = relationship("ChargingSession", back_populates="invoices")
     order = relationship("Order", back_populates="invoices")
     pricing_snapshot = relationship("PricingSnapshot")
@@ -419,6 +454,7 @@ class Invoice(Base):
         Index('idx_invoices_session', 'session_id'),
         Index('idx_invoices_order', 'order_id'),
         Index('idx_invoices_issued_at', 'issued_at'),
+        Index('idx_invoices_tenant_id', 'tenant_id'),
     )
 
 
@@ -429,6 +465,7 @@ class Payment(Base):
     __tablename__ = "payments"
     
     id = Column(String(100), primary_key=True, index=True)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
     invoice_id = Column(String(100), ForeignKey("invoices.id"), nullable=False, index=True)
     
     # 支付信息
@@ -449,12 +486,14 @@ class Payment(Base):
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
     
     # 关系
+    tenant = relationship("Tenant")
     invoice = relationship("Invoice", back_populates="payments")
     
     __table_args__ = (
         Index('idx_payments_status', 'status'),
         Index('idx_payments_invoice', 'invoice_id'),
         Index('idx_payments_transaction_id', 'transaction_id'),
+        Index('idx_payments_tenant_id', 'tenant_id'),
     )
 
 
@@ -467,6 +506,7 @@ class DeviceEvent(Base):
     __tablename__ = "device_events"
     
     id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
     device_serial_number = Column(String(100), ForeignKey("devices.serial_number"), nullable=True, index=True)
     charge_point_id = Column(String(100), ForeignKey("charge_points.id"), nullable=True, index=True)
     evse_id = Column(Integer, ForeignKey("evses.id"), nullable=True, index=True)
@@ -493,6 +533,7 @@ class DeviceEvent(Base):
     timestamp = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False, index=True)
     
     # 关系
+    tenant = relationship("Tenant")
     device = relationship("Device")
     charge_point = relationship("ChargePoint")
     evse = relationship("EVSE")
@@ -502,6 +543,7 @@ class DeviceEvent(Base):
         Index('idx_device_events_timestamp', 'timestamp'),
         Index('idx_device_events_device_timestamp', 'device_serial_number', 'timestamp'),
         Index('idx_device_events_charge_point_timestamp', 'charge_point_id', 'timestamp'),
+        Index('idx_device_events_tenant_id', 'tenant_id'),
     )
 
 
@@ -514,6 +556,7 @@ class DeviceConfig(Base):
     __tablename__ = "device_configs"
     
     id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
     device_serial_number = Column(String(100), ForeignKey("devices.serial_number"), nullable=False, index=True)
     
     config_key = Column(String(100), nullable=False)  # 配置键
@@ -528,10 +571,12 @@ class DeviceConfig(Base):
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
     
     # 关系
+    tenant = relationship("Tenant")
     device = relationship("Device")
     
     __table_args__ = (
         Index('idx_device_configs_device_key', 'device_serial_number', 'config_key', unique=True),
+        Index('idx_device_configs_tenant_id', 'tenant_id'),
     )
 
 
@@ -542,6 +587,7 @@ class ChargePointConfig(Base):
     __tablename__ = "charge_point_configs"
     
     id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
     charge_point_id = Column(String(100), ForeignKey("charge_points.id"), nullable=False, index=True)
     
     config_key = Column(String(100), nullable=False)  # 配置键
@@ -556,10 +602,12 @@ class ChargePointConfig(Base):
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
     
     # 关系
+    tenant = relationship("Tenant")
     charge_point = relationship("ChargePoint")
     
     __table_args__ = (
         Index('idx_charge_point_configs_cp_key', 'charge_point_id', 'config_key', unique=True),
+        Index('idx_charge_point_configs_tenant_id', 'tenant_id'),
     )
 
 
@@ -572,6 +620,7 @@ class SupportMessage(Base):
     __tablename__ = "support_messages"
     
     id = Column(String(100), primary_key=True, index=True)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
     user_id = Column(String(100), nullable=False, index=True)
     username = Column(String(100), nullable=False)
     
@@ -583,8 +632,295 @@ class SupportMessage(Base):
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     replied_at = Column(DateTime(timezone=True), nullable=True)
     
+    tenant = relationship("Tenant")
+    
     __table_args__ = (
         Index('idx_messages_status', 'status'),
         Index('idx_messages_user_id', 'user_id'),
         Index('idx_messages_created_at', 'created_at'),
+        Index('idx_support_messages_tenant_id', 'tenant_id'),
+    )
+
+
+# ==================== 多租户核心表 ====================
+
+class Tenant(Base):
+    """租户表"""
+    __tablename__ = "tenants"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    name = Column(String(200), nullable=False)
+    domain = Column(String(200), unique=True, nullable=True)
+    status = Column(String(50), nullable=False, default="active")  # active, suspended, deleted
+    subscription_plan = Column(String(50), nullable=False, default="free")  # free, basic, premium, enterprise
+    max_charge_points = Column(Integer, default=10)
+    max_users = Column(Integer, default=100)
+    settings = Column(JSON, default={})
+    
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    
+    __table_args__ = (
+        Index('idx_tenants_domain', 'domain'),
+        Index('idx_tenants_status', 'status'),
+    )
+
+
+class AdminUser(Base):
+    """管理员用户表"""
+    __tablename__ = "admin_users"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    username = Column(String(100), nullable=False, unique=True, index=True)
+    email = Column(String(200), nullable=False, unique=True, index=True)
+    password_hash = Column(String(255), nullable=False)
+    full_name = Column(String(200), nullable=True)
+    is_active = Column(Boolean, nullable=False, default=True)
+    is_super_admin = Column(Boolean, nullable=False, default=False)
+    last_login_at = Column(DateTime(timezone=True), nullable=True)
+    
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    
+    memberships = relationship("TenantMembership", back_populates="admin_user", cascade="all, delete-orphan")
+    
+    __table_args__ = (
+        Index('idx_admin_users_email', 'email'),
+        Index('idx_admin_users_username', 'username'),
+    )
+
+
+class EndUser(Base):
+    """终端用户表"""
+    __tablename__ = "end_users"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    phone = Column(String(50), nullable=False)
+    email = Column(String(200), nullable=True)
+    full_name = Column(String(200), nullable=True)
+    id_tag = Column(String(100), nullable=False)  # RFID标签
+    balance = Column(Numeric(10, 2), nullable=False, default=0)
+    status = Column(String(50), nullable=False, default="active")  # active, suspended, deleted
+    last_login_at = Column(DateTime(timezone=True), nullable=True)
+    
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    
+    tenant = relationship("Tenant")
+    
+    __table_args__ = (
+        UniqueConstraint('tenant_id', 'phone', name='unique_tenant_phone'),
+        UniqueConstraint('tenant_id', 'id_tag', name='unique_tenant_id_tag'),
+        Index('idx_end_users_tenant_id', 'tenant_id'),
+        Index('idx_end_users_phone', 'phone'),
+        Index('idx_end_users_id_tag', 'id_tag'),
+    )
+
+
+class TenantMembership(Base):
+    """租户成员关系表"""
+    __tablename__ = "tenant_memberships"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    admin_user_id = Column(UUID(as_uuid=True), ForeignKey("admin_users.id", ondelete="CASCADE"), nullable=False, index=True)
+    is_primary = Column(Boolean, nullable=False, default=False)  # 是否为主租户（默认租户）
+    status = Column(String(50), nullable=False, default="active")  # active, suspended
+    
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    
+    tenant = relationship("Tenant")
+    admin_user = relationship("AdminUser", back_populates="memberships")
+    roles = relationship("TenantMembershipRole", back_populates="membership", cascade="all, delete-orphan")
+    
+    __table_args__ = (
+        UniqueConstraint('tenant_id', 'admin_user_id', name='unique_tenant_admin_user'),
+        Index('idx_tenant_memberships_tenant_id', 'tenant_id'),
+        Index('idx_tenant_memberships_admin_user_id', 'admin_user_id'),
+        Index('idx_tenant_memberships_primary', 'admin_user_id', 'is_primary'),
+    )
+
+
+class Role(Base):
+    """角色表"""
+    __tablename__ = "roles"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=True, index=True)  # NULL表示系统角色
+    name = Column(String(100), nullable=False)
+    permissions = Column(JSON, nullable=False, default=[])  # 权限列表
+    description = Column(Text, nullable=True)
+    scope = Column(String(50), nullable=False, default="tenant")  # system / tenant
+    
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    
+    tenant = relationship("Tenant")
+    membership_roles = relationship("TenantMembershipRole", back_populates="role")
+    
+    __table_args__ = (
+        UniqueConstraint('tenant_id', 'name', name='unique_tenant_role_name'),
+        Index('idx_roles_tenant_id', 'tenant_id'),
+        Index('idx_roles_scope', 'scope'),
+    )
+
+
+class TenantMembershipRole(Base):
+    """成员角色关系表"""
+    __tablename__ = "tenant_membership_roles"
+    
+    membership_id = Column(UUID(as_uuid=True), ForeignKey("tenant_memberships.id", ondelete="CASCADE"), nullable=False, primary_key=True)
+    role_id = Column(UUID(as_uuid=True), ForeignKey("roles.id", ondelete="CASCADE"), nullable=False, primary_key=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    
+    membership = relationship("TenantMembership", back_populates="roles")
+    role = relationship("Role", back_populates="membership_roles")
+    
+    __table_args__ = (
+        Index('idx_tenant_membership_roles_membership_id', 'membership_id'),
+        Index('idx_tenant_membership_roles_role_id', 'role_id'),
+    )
+
+
+# ==================== 告警监控表 ====================
+
+class Alert(Base):
+    """告警表"""
+    __tablename__ = "alerts"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    charge_point_id = Column(String(100), ForeignKey("charge_points.id", ondelete="SET NULL"), nullable=True, index=True)
+    evse_id = Column(Integer, ForeignKey("evses.id", ondelete="SET NULL"), nullable=True, index=True)
+    alert_type = Column(String(50), nullable=False)  # offline, faulted, overcurrent, overvoltage, temperature, etc.
+    severity = Column(String(50), nullable=False)  # critical, warning, info
+    status = Column(String(50), nullable=False, default="pending")  # pending, acknowledged, resolved
+    title = Column(String(200), nullable=False)
+    description = Column(Text, nullable=True)
+    alert_metadata = Column(JSON, default={})  # 使用 alert_metadata 避免与 SQLAlchemy 保留字冲突
+    acknowledged_by = Column(UUID(as_uuid=True), ForeignKey("admin_users.id"), nullable=True)
+    acknowledged_at = Column(DateTime(timezone=True), nullable=True)
+    resolved_at = Column(DateTime(timezone=True), nullable=True)
+    
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    
+    tenant = relationship("Tenant")
+    charge_point = relationship("ChargePoint")
+    evse = relationship("EVSE")
+    acknowledged_by_user = relationship("AdminUser", foreign_keys=[acknowledged_by])
+    
+    __table_args__ = (
+        Index('idx_alerts_tenant_id', 'tenant_id'),
+        Index('idx_alerts_charge_point_id', 'charge_point_id'),
+        Index('idx_alerts_status', 'status'),
+        Index('idx_alerts_severity', 'severity'),
+        Index('idx_alerts_created_at', 'created_at'),
+    )
+
+
+class AlertRule(Base):
+    """告警规则表"""
+    __tablename__ = "alert_rules"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    name = Column(String(200), nullable=False)
+    alert_type = Column(String(50), nullable=False)
+    conditions = Column(JSON, nullable=False)  # 条件配置
+    severity = Column(String(50), nullable=False)
+    is_enabled = Column(Boolean, nullable=False, default=True)
+    
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    
+    tenant = relationship("Tenant")
+    
+    __table_args__ = (
+        UniqueConstraint('tenant_id', 'name', name='unique_tenant_alert_rule_name'),
+        Index('idx_alert_rules_tenant_id', 'tenant_id'),
+        Index('idx_alert_rules_is_enabled', 'is_enabled'),
+    )
+
+
+# ==================== 系统配置表 ====================
+
+class SystemConfig(Base):
+    """系统配置表"""
+    __tablename__ = "system_configs"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=True, index=True)  # NULL表示全局配置
+    config_key = Column(String(200), nullable=False)
+    config_value = Column(Text, nullable=True)
+    value_type = Column(String(20), nullable=False, default="string")  # string, int, bool, json
+    description = Column(Text, nullable=True)
+    
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    
+    tenant = relationship("Tenant")
+    
+    __table_args__ = (
+        UniqueConstraint('tenant_id', 'config_key', name='unique_tenant_config_key'),
+        Index('idx_system_configs_tenant_id_key', 'tenant_id', 'config_key'),
+    )
+
+
+# ==================== Token 管理表 ====================
+
+class RefreshToken(Base):
+    """刷新Token表"""
+    __tablename__ = "refresh_tokens"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    jti = Column(String(100), nullable=False, unique=True, index=True)  # JWT ID
+    user_id = Column(UUID(as_uuid=True), nullable=False, index=True)  # admin_user_id 或 end_user_id
+    user_type = Column(String(20), nullable=False)  # admin / end_user
+    token_hash = Column(String(255), nullable=False)  # refresh token的哈希值
+    expires_at = Column(DateTime(timezone=True), nullable=False, index=True)
+    revoked_at = Column(DateTime(timezone=True), nullable=True)
+    device_info = Column(JSON, nullable=True)  # 设备信息
+    ip_address = Column(String(50), nullable=True)
+    
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    
+    __table_args__ = (
+        Index('idx_refresh_tokens_jti', 'jti'),
+        Index('idx_refresh_tokens_user_id', 'user_id', 'user_type'),
+        Index('idx_refresh_tokens_expires_at', 'expires_at'),
+    )
+
+
+# ==================== 审计日志表 ====================
+
+class AuditLog(Base):
+    """审计日志表"""
+    __tablename__ = "audit_logs"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="SET NULL"), nullable=True, index=True)
+    actor_id = Column(UUID(as_uuid=True), nullable=False, index=True)  # admin_user_id 或 end_user_id
+    actor_type = Column(String(20), nullable=False)  # admin / end_user / system
+    action = Column(String(100), nullable=False, index=True)  # create, update, delete, login, etc.
+    resource_type = Column(String(100), nullable=True, index=True)  # charge_point, order, user, etc.
+    resource_id = Column(String(100), nullable=True, index=True)  # 资源ID
+    before_data = Column(JSON, nullable=True)  # 变更前数据
+    after_data = Column(JSON, nullable=True)  # 变更后数据
+    ip_address = Column(String(50), nullable=True)
+    user_agent = Column(Text, nullable=True)
+    audit_metadata = Column(JSON, default={})  # 使用 audit_metadata 避免与 SQLAlchemy 保留字冲突
+    
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
+    
+    tenant = relationship("Tenant")
+    
+    __table_args__ = (
+        Index('idx_audit_logs_tenant_id', 'tenant_id'),
+        Index('idx_audit_logs_actor', 'actor_id', 'actor_type'),
+        Index('idx_audit_logs_resource', 'resource_type', 'resource_id'),
+        Index('idx_audit_logs_action', 'action'),
+        Index('idx_audit_logs_created_at', 'created_at'),
     )

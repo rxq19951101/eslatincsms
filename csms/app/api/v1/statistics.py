@@ -8,8 +8,10 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import func, and_, or_, case
-from app.database import get_db, ChargePoint, ChargingSession, MeterValue, DeviceEvent, Invoice, EVSEStatus, Tariff
+from app.database.base import get_db, tenant_id_context
+from app.database.models import ChargePoint, ChargingSession, MeterValue, DeviceEvent, Invoice, EVSEStatus, Tariff
 from app.core.logging_config import get_logger
+from app.core.permissions import get_current_admin_user
 
 logger = get_logger("ocpp_csms")
 router = APIRouter()
@@ -19,6 +21,7 @@ router = APIRouter()
 def get_charger_history(
     charge_point_id: str,
     days: int = Query(10, ge=1, le=30, description="查询天数，默认10天"),
+    current_user_obj = Depends(get_current_admin_user),
     db: Session = Depends(get_db)
 ) -> Dict[str, Any]:
     """
@@ -37,8 +40,15 @@ def get_charger_history(
         f"查询天数: {days} 天"
     )
     
-    # 验证充电桩是否存在
-    charge_point = db.query(ChargePoint).filter(ChargePoint.id == charge_point_id).first()
+    # 获取租户ID
+    tenant_id = tenant_id_context.get()
+    
+    # 验证充电桩是否存在（RLS会自动过滤，但为了性能也在应用层过滤）
+    query = db.query(ChargePoint).filter(ChargePoint.id == charge_point_id)
+    if tenant_id and not current_user_obj.is_super_admin:
+        query = query.filter(ChargePoint.tenant_id == tenant_id)
+    
+    charge_point = query.first()
     if not charge_point:
         logger.warning(f"[API] GET /api/v1/statistics/charger/{charge_point_id}/history | 充电桩未找到")
         raise HTTPException(status_code=404, detail=f"充电桩 {charge_point_id} 未找到")
@@ -159,6 +169,7 @@ def get_charger_history(
 def get_charger_status_history(
     charge_point_id: str,
     days: int = Query(10, ge=1, le=30, description="查询天数"),
+    current_user_obj = Depends(get_current_admin_user),
     db: Session = Depends(get_db)
 ) -> Dict[str, Any]:
     """
@@ -229,6 +240,7 @@ def get_charger_status_history(
 def get_charger_heartbeat_history(
     charge_point_id: str,
     hours: int = Query(24, ge=1, le=168, description="查询小时数，默认24小时"),
+    current_user_obj = Depends(get_current_admin_user),
     db: Session = Depends(get_db)
 ) -> Dict[str, Any]:
     """
@@ -310,6 +322,7 @@ def get_charger_heartbeat_history(
 def get_charger_status_timeline(
     charge_point_id: str,
     hours: int = Query(24, ge=1, le=168, description="查询小时数，默认24小时"),
+    current_user_obj = Depends(get_current_admin_user),
     db: Session = Depends(get_db)
 ) -> Dict[str, Any]:
     """

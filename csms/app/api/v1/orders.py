@@ -6,8 +6,10 @@
 from typing import List, Optional
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
-from app.database import get_db, Order, ChargePoint, Invoice
+from app.database.base import get_db, tenant_id_context
+from app.database.models import Order, ChargePoint, Invoice
 from app.core.logging_config import get_logger
+from app.core.permissions import get_current_admin_user
 
 logger = get_logger("ocpp_csms")
 
@@ -22,6 +24,7 @@ def list_orders(
     status: Optional[str] = Query(None, description="状态过滤"),
     limit: int = Query(100, le=1000),
     offset: int = Query(0, ge=0),
+    current_user_obj = Depends(get_current_admin_user),
     db: Session = Depends(get_db)
 ) -> List[dict]:
     """获取订单列表（使用新表结构）"""
@@ -34,7 +37,14 @@ def list_orders(
         f"限制: {limit} | 偏移: {offset}"
     )
     
+    # 获取租户ID（RLS会自动过滤，但为了性能也在应用层过滤）
+    tenant_id = tenant_id_context.get()
+    
     query = db.query(Order)
+    
+    # 添加租户过滤（如果不是超级管理员）
+    if tenant_id and not current_user_obj.is_super_admin:
+        query = query.filter(Order.tenant_id == tenant_id)
     
     if user_id:
         query = query.filter(Order.user_id == user_id)
