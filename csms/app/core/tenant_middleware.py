@@ -133,23 +133,32 @@ async def tenant_middleware(request: Request, call_next):
     3. 设置上下文变量（tenant_id, is_super_admin, use_super_connection）
     4. 在请求结束后清理上下文
     """
-    # 跳过非业务路径（如 /health, /docs 等）
-    if request.url.path.startswith(("/health", "/docs", "/redoc", "/openapi.json")):
+    # 跳过非业务路径和认证相关路径（如 /health, /docs, /auth/login, /auth/refresh 等）
+    skip_paths = (
+        "/health", "/docs", "/redoc", "/openapi.json",
+        "/api/v1/admin/auth/login", "/api/v1/admin/auth/refresh"
+    )
+    if any(request.url.path.startswith(path) for path in skip_paths):
         return await call_next(request)
     
     # 从 request.state 获取当前用户（由认证中间件设置）
     current_user = getattr(request.state, 'current_user', None)
+    
+    # 如果没有当前用户（未认证的请求，如登录接口），跳过租户检查
+    if not current_user:
+        return await call_next(request)
     
     # 提取 tenant_id
     tenant_id_header = request.headers.get("X-Tenant-Id")
     tenant_id = get_tenant_id_from_request(request, current_user)
     
     # 硬规则：管理员请求必须提供 tenant_id（除非是 super admin）
+    # super_admin 可以不需要 tenant_id（可以访问所有租户）
     if current_user and current_user.user_type == "admin":
         if not current_user.is_super_admin and not tenant_id:
             raise HTTPException(
                 status_code=403,
-                detail="TENANT_REQUIRED: X-Tenant-Id header is required for admin requests"
+                detail="TENANT_REQUIRED: X-Tenant-Id header is required for non-super-admin requests"
             )
     
     # 判断是否使用 super 连接

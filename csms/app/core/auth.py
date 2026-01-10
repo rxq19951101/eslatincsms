@@ -20,7 +20,7 @@ import logging
 logging.getLogger('passlib').setLevel(logging.ERROR)  # 抑制 passlib 警告
 
 try:
-    pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+    pwd_context = CryptContext(schemes=["bcrypt", "pbkdf2_sha256"], deprecated="auto")
     # 尝试进行一次哈希测试以检测兼容性问题（使用短密码避免bug检测）
     _test_hash = pwd_context.hash("test")
 except (AttributeError, ValueError, TypeError) as e:

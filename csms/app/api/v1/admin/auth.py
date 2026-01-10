@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from typing import Optional
 from uuid import UUID
 from datetime import datetime, timezone, timedelta
-from app.database.base import get_db
+from app.database.base import get_db, SuperSessionLocal, is_super_admin_context, use_super_connection_context
 from app.database.models import AdminUser, TenantMembership, Tenant
 from app.core.auth import (
     get_current_user,
@@ -76,100 +76,113 @@ class UserInfoResponse(BaseModel):
 @router.post("/login", response_model=LoginResponse, summary="管理员登录")
 async def login(
     request_data: LoginRequest,
-    request: Request,
-    db: Session = Depends(get_db)
+    request: Request
 ):
     """管理员登录"""
-    # 验证用户名和密码
-    admin_user = AdminUserService.get_admin_user_by_username(db, request_data.username)
+    # 登录接口需要绕过 RLS 检查（因为还没有认证，无法获取 tenant_id）
+    # 使用 SuperSessionLocal 来绕过 RLS
+    db: Session = SuperSessionLocal()
     
-    if not admin_user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid username or password"
-        )
-    
-    if not admin_user.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="User account is inactive"
-        )
-    
-    if not verify_password(request_data.password, admin_user.password_hash):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid username or password"
-        )
-    
-    # 更新最后登录时间
-    admin_user.last_login_at = datetime.now(timezone.utc)
-    db.commit()
-    
-    # 生成 token pair
-    access_token, refresh_token = await create_token_pair(
-        user_id=admin_user.id,
-        user_type="admin",
-        audience="admin",
-        is_super_admin=admin_user.is_super_admin,
-        request=request
-    )
-    
-    # 保存 refresh token（从刚创建的token中提取信息，使用base64解码，不经过jwt验证）
-    # 因为create_refresh_token已经包含了exp信息，我们需要提取jti和exp
     try:
-        import base64
-        import json
+        # 设置超级管理员上下文（临时，用于登录操作）
+        is_super_admin_context.set(True)
+        use_super_connection_context.set(True)
         
-        # JWT格式：header.payload.signature
-        parts = refresh_token.split('.')
-        if len(parts) >= 2:
-            # 解码payload（base64url）
-            payload_encoded = parts[1]
-            # 添加填充（base64url解码）
-            padding = 4 - len(payload_encoded) % 4
-            if padding != 4:
-                payload_encoded += '=' * padding
-            payload_bytes = base64.urlsafe_b64decode(payload_encoded)
-            payload_dict = json.loads(payload_bytes.decode('utf-8'))
+        # 验证用户名和密码
+        admin_user = AdminUserService.get_admin_user_by_username(db, request_data.username)
+        
+        if not admin_user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid username or password"
+            )
+        
+        if not admin_user.is_active:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="User account is inactive"
+            )
+        
+        if not verify_password(request_data.password, admin_user.password_hash):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid username or password"
+            )
+        
+        # 更新最后登录时间
+        admin_user.last_login_at = datetime.now(timezone.utc)
+        db.commit()
+        
+        # 生成 token pair
+        access_token, refresh_token = await create_token_pair(
+            user_id=admin_user.id,
+            user_type="admin",
+            audience="admin",
+            is_super_admin=admin_user.is_super_admin,
+            request=request
+        )
+        
+        # 保存 refresh token（从刚创建的token中提取信息，使用base64解码，不经过jwt验证）
+        # 因为create_refresh_token已经包含了exp信息，我们需要提取jti和exp
+        try:
+            import base64
+            import json
             
-            refresh_jti = payload_dict.get("jti")
-            exp = payload_dict.get("exp")
-            refresh_expires_at = datetime.fromtimestamp(exp, tz=timezone.utc) if exp else datetime.now(timezone.utc) + timedelta(days=7)
-            
-            logger.info(f"从refresh token提取信息成功: jti={refresh_jti}, exp={exp}")
-        else:
-            raise ValueError("Invalid JWT format")
-    except Exception as e:
-        logger.error(f"解析refresh token失败: {e}", exc_info=True)
-        # 如果解析失败，使用默认值（不应该发生，但为了容错）
-        import secrets
-        refresh_jti = secrets.token_urlsafe(32)
-        refresh_expires_at = datetime.now(timezone.utc) + timedelta(days=7)
-        logger.warning(f"使用默认值保存refresh token: jti={refresh_jti}")
-    
-    await save_refresh_token(
-        jti=refresh_jti,
-        user_id=admin_user.id,
-        user_type="admin",
-        refresh_token=refresh_token,
-        expires_at=refresh_expires_at,
-        db=db,
-        request=request
-    )
-    
-    logger.info(f"Refresh token已保存: jti={refresh_jti}, user_id={admin_user.id}")
-    
-    return LoginResponse(
-        access_token=access_token,
-        refresh_token=refresh_token,
-        user={
-            "id": str(admin_user.id),
-            "username": admin_user.username,
-            "email": admin_user.email,
-            "full_name": admin_user.full_name,
-            "is_super_admin": admin_user.is_super_admin
-        }
-    )
+            # JWT格式：header.payload.signature
+            parts = refresh_token.split('.')
+            if len(parts) >= 2:
+                # 解码payload（base64url）
+                payload_encoded = parts[1]
+                # 添加填充（base64url解码）
+                padding = 4 - len(payload_encoded) % 4
+                if padding != 4:
+                    payload_encoded += '=' * padding
+                payload_bytes = base64.urlsafe_b64decode(payload_encoded)
+                payload_dict = json.loads(payload_bytes.decode('utf-8'))
+                
+                refresh_jti = payload_dict.get("jti")
+                exp = payload_dict.get("exp")
+                refresh_expires_at = datetime.fromtimestamp(exp, tz=timezone.utc) if exp else datetime.now(timezone.utc) + timedelta(days=7)
+                
+                logger.info(f"从refresh token提取信息成功: jti={refresh_jti}, exp={exp}")
+            else:
+                raise ValueError("Invalid JWT format")
+        except Exception as e:
+            logger.error(f"解析refresh token失败: {e}", exc_info=True)
+            # 如果解析失败，使用默认值（不应该发生，但为了容错）
+            import secrets
+            refresh_jti = secrets.token_urlsafe(32)
+            refresh_expires_at = datetime.now(timezone.utc) + timedelta(days=7)
+            logger.warning(f"使用默认值保存refresh token: jti={refresh_jti}")
+        
+        await save_refresh_token(
+            jti=refresh_jti,
+            user_id=admin_user.id,
+            user_type="admin",
+            refresh_token=refresh_token,
+            expires_at=refresh_expires_at,
+            db=db,
+            request=request
+        )
+        
+        logger.info(f"Refresh token已保存: jti={refresh_jti}, user_id={admin_user.id}")
+        
+        return LoginResponse(
+            access_token=access_token,
+            refresh_token=refresh_token,
+            user={
+                "id": str(admin_user.id),
+                "username": admin_user.username,
+                "email": admin_user.email,
+                "full_name": admin_user.full_name,
+                "is_super_admin": admin_user.is_super_admin
+            }
+        )
+    finally:
+        # 清理上下文
+        is_super_admin_context.set(False)
+        use_super_connection_context.set(False)
+        db.close()
 
 
 @router.post("/refresh", response_model=RefreshTokenResponse, summary="刷新token")
@@ -209,43 +222,55 @@ async def logout(
 
 @router.get("/me", response_model=UserInfoResponse, summary="获取当前用户信息")
 async def get_current_user_info(
-    current_user_obj = Depends(get_current_admin_user),
-    db: Session = Depends(get_db)
+    current_user: dict = Depends(get_current_user)
 ):
     """获取当前管理员信息（包含默认租户）"""
-    user_id = current_user_obj.id
+    # 对于 /me 接口，super_admin 不需要 tenant_id，使用 SuperSessionLocal
+    from uuid import UUID
+    user_id = UUID(current_user["user_id"])
+    is_super_admin = current_user.get("global_role") == "super_admin" or current_user.get("is_super_admin", False)
     
-    # 获取用户信息
-    admin_user = AdminUserService.get_admin_user_by_id(db, user_id)
-    if not admin_user:
-        raise HTTPException(status_code=404, detail="User not found")
+    # super_admin 使用 SuperSessionLocal，普通管理员使用普通 Session（需要 tenant_id）
+    if is_super_admin:
+        db: Session = SuperSessionLocal()
+    else:
+        db: Session = Depends(get_db)()
     
-    # 获取用户所属的所有租户
-    memberships = MembershipService.get_user_tenants(db, user_id)
-    
-    # 找到默认租户
-    default_tenant = next((m for m in memberships if m.is_primary), None)
-    
-    # 构建租户列表
-    tenant_list = []
-    for m in memberships:
-        tenant = db.query(Tenant).filter(Tenant.id == m.tenant_id).first()
-        if tenant:
-            tenant_list.append({
-                "id": str(tenant.id),
-                "name": tenant.name,
-                "is_primary": m.is_primary
-            })
-    
-    return UserInfoResponse(
-        id=str(current_user_obj.id),
-        username=current_user_obj.username,
-        email=current_user_obj.email,
-        full_name=current_user_obj.full_name,
-        is_super_admin=current_user_obj.is_super_admin,
-        default_tenant_id=str(default_tenant.tenant_id) if default_tenant else None,
-        tenant_list=tenant_list
-    )
+    try:
+        # 获取用户信息
+        admin_user = AdminUserService.get_admin_user_by_id(db, user_id)
+        if not admin_user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # 获取用户所属的所有租户
+        memberships = MembershipService.get_user_tenants(db, user_id)
+        
+        # 找到默认租户
+        default_tenant = next((m for m in memberships if m.is_primary), None)
+        
+        # 构建租户列表
+        tenant_list = []
+        for m in memberships:
+            tenant = db.query(Tenant).filter(Tenant.id == m.tenant_id).first()
+            if tenant:
+                tenant_list.append({
+                    "id": str(tenant.id),
+                    "name": tenant.name,
+                    "is_primary": m.is_primary
+                })
+        
+        return UserInfoResponse(
+            id=str(admin_user.id),
+            username=admin_user.username,
+            email=admin_user.email,
+            full_name=admin_user.full_name,
+            is_super_admin=admin_user.is_super_admin,
+            default_tenant_id=str(default_tenant.tenant_id) if default_tenant else None,
+            tenant_list=tenant_list
+        )
+    finally:
+        if is_super_admin:
+            db.close()
 
 
 @router.put("/me/default-tenant", summary="设置默认租户")

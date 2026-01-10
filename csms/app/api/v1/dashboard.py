@@ -211,7 +211,7 @@ async def get_dashboard_trends(
     - 收入趋势（过去N天）
     - 订单趋势（过去N天）
     """
-    tenant_id = get_tenant_id(request)
+    tenant_id = tenant_id_context.get()
     
     # 计算日期范围
     end_date = datetime.now(timezone.utc).replace(hour=23, minute=59, second=59)

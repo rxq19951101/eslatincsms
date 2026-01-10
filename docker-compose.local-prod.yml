@@ -52,8 +52,8 @@ services:
       - DEBUG=false
       - DATABASE_URL=postgresql://ocpp_user:ocpp_password@db:5432/ocpp
       - REDIS_URL=redis://redis:6379/0
-      - ENCRYPTION_KEY=
-      - SECRET_KEY=
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY:-ocpp-local-encryption-key-change-in-production}
+      - SECRET_KEY=${SECRET_KEY:-ocpp-local-secret-key-change-in-production-please}
       - ENCRYPTION_SALT=ocpp_csms_salt
       - MQTT_BROKER_HOST=mqtt-broker
       - MQTT_BROKER_PORT=1883
@@ -63,6 +63,8 @@ services:
       - LOG_FORMAT=json
       - DOCS_URL=None
       - REDOC_URL=None
+      - ENABLE_WEBSOCKET_TRANSPORT=true
+      - ENABLE_HTTP_TRANSPORT=false
     depends_on:
       db:
         condition: service_healthy
@@ -106,6 +108,7 @@ services:
       - "3000:3000"
     environment:
       - NEXT_PUBLIC_CSMS_HTTP=http://localhost:9000
+      - NEXT_PUBLIC_API_BASE_URL=http://localhost:9000
     depends_on:
       - csms
     networks:
