@@ -193,7 +193,7 @@ export default function ChargerDetailPage() {
               {charger.price_per_kwh && (
                 <div>
                   <label className="text-sm text-slate-400">定价</label>
-                  <p className="text-white mt-1">¥{charger.price_per_kwh.toFixed(2)}/kWh</p>
+                  <p className="text-white mt-1">¥{Number(charger.price_per_kwh).toFixed(2)}/kWh</p>
                 </div>
               )}
             </CardContent>

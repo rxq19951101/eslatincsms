@@ -911,8 +911,8 @@ class AuditLog(Base):
     after_data = Column(JSON, nullable=True)  # 变更后数据
     ip_address = Column(String(50), nullable=True)
     user_agent = Column(Text, nullable=True)
-    audit_metadata = Column(JSON, default={})  # 使用 audit_metadata 避免与 SQLAlchemy 保留字冲突
-    
+    audit_metadata = Column("metadata", JSON, default={})  # 映射到数据库的metadata字段
+
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
     
     tenant = relationship("Tenant")

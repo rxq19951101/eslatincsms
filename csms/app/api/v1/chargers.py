@@ -105,7 +105,7 @@ def list_chargers(
                 "longitude": site.longitude if site else None,
                 "address": site.address if site else None,
             },
-            "price_per_kwh": tariff.base_price_per_kwh if tariff else None,
+            "price_per_kwh": float(tariff.base_price_per_kwh) if tariff else None,
             "is_configured": is_configured,
             "has_location": has_location,
             "has_pricing": has_pricing,
@@ -181,7 +181,7 @@ def get_charger(
             "longitude": site.longitude if site else None,
             "address": site.address if site else None,
         },
-        "price_per_kwh": tariff.base_price_per_kwh if tariff else None,
+        "price_per_kwh": float(tariff.base_price_per_kwh) if tariff else None,
         "evses": evse_list,  # 每个 EVSE 都有自己的 connector_type
         "created_at": charge_point.created_at.isoformat() if charge_point.created_at else None,
         "updated_at": charge_point.updated_at.isoformat() if charge_point.updated_at else None,

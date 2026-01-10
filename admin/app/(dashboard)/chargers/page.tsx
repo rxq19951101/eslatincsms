@@ -189,7 +189,7 @@ export default function ChargersPage() {
                     {charger.price_per_kwh && (
                       <div className="text-slate-400">
                         <span className="text-slate-500">价格：</span>
-                        ¥{charger.price_per_kwh.toFixed(2)}/kWh
+                        ¥{Number(charger.price_per_kwh).toFixed(2)}/kWh
                       </div>
                     )}
                     {charger.last_seen && (
