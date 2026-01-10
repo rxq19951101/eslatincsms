@@ -55,13 +55,79 @@ export default function LoginPage() {
       setTokens(response.access_token, response.refresh_token);
 
       // 获取完整的用户信息（包含租户列表）
+      // #region agent log
+      try {
+        fetch('http://127.0.0.1:7242/ingest/ef49133c-edf7-44f0-b6da-8a7d43918316', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            location: 'login/page.tsx:after_login',
+            message: 'Login successful, attempting to fetch /me',
+            data: {
+              login_response_user: response.user,
+              has_default_tenant_id: !!response.user.default_tenant_id,
+              default_tenant_id: response.user.default_tenant_id
+            },
+            timestamp: Date.now(),
+            sessionId: 'debug-session',
+            runId: 'run1',
+            hypothesisId: 'A'
+          })
+        }).catch(() => {});
+      } catch {}
+      // #endregion
+      
       try {
         const userData = await apiGet<AdminUser>(API_ENDPOINTS.AUTH_ME, {
-          skipTenantId: true, // 认证接口不需要 tenant_id
+          skipTenantId: true, // /me 接口应该能够自动处理（已跳过 tenant_middleware 检查）
         });
+        
+        // #region agent log
+        try {
+          fetch('http://127.0.0.1:7242/ingest/ef49133c-edf7-44f0-b6da-8a7d43918316', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              location: 'login/page.tsx:/me_success',
+              message: '/me endpoint returned user data',
+              data: {
+                has_default_tenant_id: !!userData.default_tenant_id,
+                default_tenant_id: userData.default_tenant_id,
+                tenant_list_size: userData.tenant_list?.length || 0
+              },
+              timestamp: Date.now(),
+              sessionId: 'debug-session',
+              runId: 'run1',
+              hypothesisId: 'A'
+            })
+          }).catch(() => {});
+        } catch {}
+        // #endregion
+        
         setUser(userData);
       } catch (error) {
-        // 如果获取用户信息失败，使用登录响应中的基本信息
+        // #region agent log
+        try {
+          fetch('http://127.0.0.1:7242/ingest/ef49133c-edf7-44f0-b6da-8a7d43918316', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              location: 'login/page.tsx:/me_failed',
+              message: '/me endpoint failed, using fallback',
+              data: {
+                error: error instanceof Error ? error.message : String(error),
+                login_response_has_tenant_id: !!response.user.default_tenant_id
+              },
+              timestamp: Date.now(),
+              sessionId: 'debug-session',
+              runId: 'run1',
+              hypothesisId: 'A'
+            })
+          }).catch(() => {});
+        } catch {}
+        // #endregion
+        
+        // 如果获取用户信息失败，使用登录响应中的基本信息（如果包含 default_tenant_id）
         console.error('Failed to fetch user info:', error);
         setUser({
           id: response.user.id,
@@ -69,7 +135,7 @@ export default function LoginPage() {
           email: response.user.email,
           full_name: response.user.full_name,
           is_super_admin: response.user.is_super_admin,
-          default_tenant_id: undefined,
+          default_tenant_id: response.user.default_tenant_id, // 使用登录响应中的 default_tenant_id
           tenant_list: [],
         });
       }
@@ -78,7 +144,39 @@ export default function LoginPage() {
       router.push('/');
     } catch (err) {
       console.error('Login failed:', err);
-      setError(err instanceof Error ? err.message : '登录失败，请检查用户名和密码');
+      
+      // 处理不同类型的错误
+      let errorMessage = '登录失败，请稍后重试';
+      
+      if (err instanceof Error) {
+        const message = err.message.toLowerCase();
+        
+        // 网络错误
+        if (message.includes('failed to fetch') || message.includes('network')) {
+          errorMessage = '网络连接失败，请检查网络或后端服务是否正常运行';
+        }
+        // 401 认证错误（用户名或密码错误）
+        else if (message.includes('401') || message.includes('unauthorized') || 
+                 message.includes('invalid username or password') ||
+                 message.includes('用户名或密码错误')) {
+          errorMessage = '用户名或密码错误，请重新输入';
+        }
+        // 403 账户被禁用
+        else if (message.includes('403') || message.includes('forbidden') || 
+                 message.includes('inactive')) {
+          errorMessage = '账户已被禁用，请联系管理员';
+        }
+        // 500 服务器错误
+        else if (message.includes('500') || message.includes('internal server error')) {
+          errorMessage = '服务器内部错误，请联系技术支持';
+        }
+        // 其他错误，显示原始消息
+        else if (err.message) {
+          errorMessage = err.message;
+        }
+      }
+      
+      setError(errorMessage);
     } finally {
       setIsLoading(false);
     }

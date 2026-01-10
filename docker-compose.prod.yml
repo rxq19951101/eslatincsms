@@ -146,6 +146,8 @@ services:
       # 例如：访问 http://47.236.134.99:3000 时，会自动使用 http://47.236.134.99:9000
       # 注意：如果访问URL包含占位符（如 your-server-ip），会导致连接失败
       - NEXT_PUBLIC_CSMS_HTTP=${NEXT_PUBLIC_CSMS_HTTP:-}
+      # 禁用 Next.js 遥测（消除浏览器控制台的 127.0.0.1:7242 错误）
+      - NEXT_TELEMETRY_DISABLED=1
     depends_on:
       - csms
     networks:

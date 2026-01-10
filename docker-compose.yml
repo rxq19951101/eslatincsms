@@ -1,6 +1,11 @@
 #
-# 本文件定义本地多服务编排：csms、admin、redis、db 以及可选 charger-sim。
-# 端口绑定：csms:9000，admin:3000，db:5432，redis:6379。
+# 快速开发环境 Docker Compose 配置（默认配置）
+# 端口绑定：csms:9000，admin:3000，db:5432，redis:6379
+# 
+# 注意：此配置使用生产端口，可能与本地开发服务冲突
+# 推荐使用：docker compose -f docker-compose.dev.yml up -d（开发环境，端口：8000, 3001）
+#          docker compose -f docker-compose.test.yml up -d（测试环境，端口：8001, 3002）
+#          docker compose -f docker-compose.prod.yml up -d（生产环境，端口：9000, 3000）
 
 version: "3.9"
 services:
@@ -42,9 +47,13 @@ services:
     ports:
       - "9000:9000"
     environment:
+      - ENVIRONMENT=development
       - REDIS_URL=redis://redis:6379/0
       - DATABASE_URL=postgresql://local:local@db:5432/ocpp
       - PORT=9000
+      - CORS_ORIGINS=http://localhost:3000,http://localhost:3001,http://localhost:3002
+      - DOCS_URL=/docs
+      - REDOC_URL=/redoc
     depends_on:
       db:
         condition: service_healthy
@@ -60,6 +69,7 @@ services:
       - "3000:3000"
     environment:
       - NEXT_PUBLIC_CSMS_HTTP=http://localhost:9000
+      - NEXT_PUBLIC_API_BASE_URL=http://localhost:9000
     depends_on:
       - csms
     networks:

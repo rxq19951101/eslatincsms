@@ -34,6 +34,7 @@ def register_routes():
         ("charger_management", "/charger-management", "新充电桩管理"),
         ("statistics", "/statistics", "统计数据"),
         ("devices", "/devices", "设备管理"),
+        ("dashboard", "/dashboard", "仪表板"),  # 添加 dashboard 路由
     ]
     
     for module_name, prefix, tag in routes_config:

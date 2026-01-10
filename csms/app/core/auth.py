@@ -163,10 +163,23 @@ async def get_current_user(
     - aud: Token audience
     - jti: JWT ID
     """
+    # #region agent log
+    import logging
+    logger = logging.getLogger("ocpp_csms")
+    logger.warning(f"[DEBUG] get_current_user ENTRY - has_token={credentials.credentials is not None}, token_prefix={credentials.credentials[:20] + '...' if credentials.credentials else None}")
+    # #endregion
+    
     token = credentials.credentials
     payload = verify_token(token)
     
+    # #region agent log
+    logger.warning(f"[DEBUG] get_current_user - JWT verified, payload_exists={payload is not None}, user_id={payload.get('user_id') if payload else None}, user_type={payload.get('user_type') if payload else None}, is_super_admin={payload.get('global_role') == 'super_admin' if payload else None}")
+    # #endregion
+    
     if payload is None:
+        # #region agent log
+        logger.error(f"[DEBUG] get_current_user - JWT verification FAILED, raising 401")
+        # #endregion
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="无效的认证令牌",

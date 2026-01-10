@@ -4,8 +4,13 @@
   "private": true,
   "scripts": {
     "dev": "next dev -p 3000",
+    "dev:dev": "next dev -p 3001",
+    "dev:test": "next dev -p 3002",
+    "dev:prod": "next dev -p 3000",
     "build": "next build",
     "start": "next start -p 3000",
+    "start:dev": "next start -p 3001",
+    "start:test": "next start -p 3002",
     "lint": "eslint",
     "test": "vitest run",
     "test:ui": "vitest --ui",

@@ -66,7 +66,7 @@ def create_initial_data():
             tenant_id = str(uuid.uuid4())
             connection.execute(text("""
                 INSERT INTO tenants (id, name, domain, status, subscription_plan, max_charge_points, max_users, settings, created_at, updated_at)
-                VALUES (:id, :name, :domain, :status, :plan, :max_cp, :max_users, :settings::jsonb, NOW(), NOW())
+                VALUES (:id, :name, :domain, :status, :plan, :max_cp, :max_users, %(settings)s::jsonb, NOW(), NOW())
             """), {
                 "id": tenant_id,
                 "name": "默认租户",
@@ -83,7 +83,7 @@ def create_initial_data():
             # 创建超级管理员用户
             print("\n2. 创建超级管理员用户...")
             super_admin_id = str(uuid.uuid4())
-            super_admin_password_hash = get_password_hash("admin123")
+            super_admin_password_hash = get_password_hash("test123")
             connection.execute(text("""
                 INSERT INTO admin_users (id, username, email, password_hash, full_name, is_active, is_super_admin, created_at, updated_at)
                 VALUES (:id, :username, :email, :password_hash, :full_name, :is_active, :is_super_admin, NOW(), NOW())
@@ -101,6 +101,22 @@ def create_initial_data():
             print(f"  邮箱: admin@example.com")
             print(f"  默认密码: admin123")
             print(f"  ⚠️  请在生产环境中立即修改默认密码！")
+            
+            # 为超级管理员创建租户成员关系（关联到默认租户）
+            print("\n2.1 创建超级管理员的租户关联...")
+            super_admin_membership_id = str(uuid.uuid4())
+            connection.execute(text("""
+                INSERT INTO tenant_memberships (id, tenant_id, admin_user_id, is_primary, status, created_at, updated_at)
+                VALUES (:id, :tenant_id, :admin_user_id, :is_primary, :status, NOW(), NOW())
+            """), {
+                "id": super_admin_membership_id,
+                "tenant_id": tenant_id,
+                "admin_user_id": super_admin_id,
+                "is_primary": True,
+                "status": "active"
+            })
+            connection.commit()
+            print(f"✓ 超级管理员已关联到默认租户")
             
             # 创建租户管理员用户
             print("\n3. 创建租户管理员用户...")
@@ -145,9 +161,10 @@ def create_initial_data():
             print("-" * 50)
             print("超级管理员:")
             print(f"  用户名: admin")
-            print(f"  密码: admin123")
+            print(f"  密码: test123")
             print(f"  邮箱: admin@example.com")
             print(f"  权限: 超级管理员（可访问所有租户）")
+            print(f"  主租户: 默认租户")
             print("-" * 50)
             print("租户管理员:")
             print(f"  用户名: tenant_admin")

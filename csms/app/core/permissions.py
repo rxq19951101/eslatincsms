@@ -113,12 +113,38 @@ def get_current_admin_user(
     获取当前管理员用户对象（从数据库查询）
     
     返回 AdminUser 对象，而不是 JWT payload
+    
+    注意：这个函数在 tenant_middleware 之后执行，tenant_id 应该已经被设置到上下文中
+    admin_users 表本身不受 RLS 限制，所以可以使用普通的 db session
     """
+    # #region agent log
+    from app.core.logging_config import get_logger
+    logger = get_logger("ocpp_csms")
+    logger.warning(f"[DEBUG] get_current_admin_user ENTRY - current_user_from_jwt: {current_user}")
+    # #endregion
+    
     from app.database.models import AdminUser
     from uuid import UUID
     
     user_id = UUID(current_user["user_id"])
+    
+    # #region agent log
+    try:
+        tenant_id_at_this_point = None
+        try:
+            tenant_id_at_this_point = tenant_id_context.get()
+        except LookupError:
+            pass
+        logger.warning(f"[DEBUG] get_current_admin_user - Before DB query, user_id={user_id}, tenant_id_from_context={tenant_id_at_this_point}")
+    except Exception as e:
+        logger.warning(f"[DEBUG] get_current_admin_user - Error checking tenant_id: {e}")
+    # #endregion
+    
     admin_user = db.query(AdminUser).filter(AdminUser.id == user_id).first()
+    
+    # #region agent log
+    logger.warning(f"[DEBUG] get_current_admin_user - After DB query, admin_user_found={admin_user is not None}, admin_user_id={admin_user.id if admin_user else None}, is_super_admin={admin_user.is_super_admin if admin_user else None}, username={admin_user.username if admin_user else None}")
+    # #endregion
     
     if not admin_user:
         raise HTTPException(status_code=404, detail="User not found")

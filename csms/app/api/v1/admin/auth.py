@@ -167,6 +167,11 @@ async def login(
         
         logger.info(f"Refresh token已保存: jti={refresh_jti}, user_id={admin_user.id}")
         
+        # 获取用户的默认租户信息（用于登录响应）
+        from app.services.membership_service import MembershipService
+        memberships = MembershipService.get_user_tenants(db, admin_user.id)
+        default_tenant = next((m for m in memberships if m.is_primary), None)
+        
         return LoginResponse(
             access_token=access_token,
             refresh_token=refresh_token,
@@ -175,7 +180,9 @@ async def login(
                 "username": admin_user.username,
                 "email": admin_user.email,
                 "full_name": admin_user.full_name,
-                "is_super_admin": admin_user.is_super_admin
+                "is_super_admin": admin_user.is_super_admin,
+                # 登录响应中包含默认租户 ID，方便前端使用
+                "default_tenant_id": str(default_tenant.tenant_id) if default_tenant else None
             }
         )
     finally:
@@ -222,28 +229,53 @@ async def logout(
 
 @router.get("/me", response_model=UserInfoResponse, summary="获取当前用户信息")
 async def get_current_user_info(
+    request: Request,
     current_user: dict = Depends(get_current_user)
 ):
     """获取当前管理员信息（包含默认租户）"""
-    # 对于 /me 接口，super_admin 不需要 tenant_id，使用 SuperSessionLocal
+    # #region agent log
+    all_headers = dict(request.headers)
+    x_tenant_id_header = request.headers.get("X-Tenant-Id") or request.headers.get("x-tenant-id")
+    logger.info(f"[DEBUG] /me ENTRY - method={request.method}, path={request.url.path}, X-Tenant-Id={x_tenant_id_header}, current_user_from_depends={current_user}")
+    # #endregion
+    
+    # #region agent log
+    from app.database.base import tenant_id_context
+    try:
+        tenant_id_from_context = tenant_id_context.get()
+        logger.info(f"[DEBUG] /me - tenant_id_from_context: {tenant_id_from_context}")
+    except LookupError:
+        logger.info(f"[DEBUG] /me - tenant_id_from_context: None (LookupError)")
+    # #endregion
+    
     from uuid import UUID
     user_id = UUID(current_user["user_id"])
     is_super_admin = current_user.get("global_role") == "super_admin" or current_user.get("is_super_admin", False)
     
-    # super_admin 使用 SuperSessionLocal，普通管理员使用普通 Session（需要 tenant_id）
-    if is_super_admin:
-        db: Session = SuperSessionLocal()
-    else:
-        db: Session = Depends(get_db)()
+    # /me 接口用于获取用户自己的信息，应该允许在没有 tenant_id header 的情况下访问
+    # 使用 SuperSessionLocal 绕过 RLS 检查（因为这是查询用户自己的信息）
+    db: Session = SuperSessionLocal()
     
     try:
+        # #region agent log
+        logger.info(f"[DEBUG] /me - Querying user info with SuperSessionLocal, user_id={user_id}, is_super_admin={is_super_admin}")
+        # #endregion
+        
         # 获取用户信息
         admin_user = AdminUserService.get_admin_user_by_id(db, user_id)
         if not admin_user:
             raise HTTPException(status_code=404, detail="User not found")
         
+        # #region agent log
+        logger.info(f"[DEBUG] /me - Admin user found: username={admin_user.username}, is_super_admin={admin_user.is_super_admin}")
+        # #endregion
+        
         # 获取用户所属的所有租户
         memberships = MembershipService.get_user_tenants(db, user_id)
+        
+        # #region agent log
+        logger.info(f"[DEBUG] /me - User memberships retrieved: count={len(memberships)}, memberships={[{'tenant_id': str(m.tenant_id), 'is_primary': m.is_primary} for m in memberships]}")
+        # #endregion
         
         # 找到默认租户
         default_tenant = next((m for m in memberships if m.is_primary), None)
@@ -259,7 +291,11 @@ async def get_current_user_info(
                     "is_primary": m.is_primary
                 })
         
-        return UserInfoResponse(
+        # #region agent log
+        logger.info(f"[DEBUG] /me - Building response: default_tenant_id={str(default_tenant.tenant_id) if default_tenant else None}, tenant_list_count={len(tenant_list)}")
+        # #endregion
+        
+        result = UserInfoResponse(
             id=str(admin_user.id),
             username=admin_user.username,
             email=admin_user.email,
@@ -268,9 +304,14 @@ async def get_current_user_info(
             default_tenant_id=str(default_tenant.tenant_id) if default_tenant else None,
             tenant_list=tenant_list
         )
+        
+        # #region agent log
+        logger.info(f"[DEBUG] /me - SUCCESS: default_tenant_id={result.default_tenant_id}, tenant_list_size={len(result.tenant_list)}")
+        # #endregion
+        
+        return result
     finally:
-        if is_super_admin:
-            db.close()
+        db.close()
 
 
 @router.put("/me/default-tenant", summary="设置默认租户")

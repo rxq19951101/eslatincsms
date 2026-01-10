@@ -31,6 +31,7 @@ export interface LoginResponse {
     email: string;
     full_name?: string;
     is_super_admin: boolean;
+    default_tenant_id?: string; // 登录响应中包含默认租户 ID
   };
 }
 

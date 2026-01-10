@@ -1,0 +1,121 @@
+#
+# 测试环境 Docker Compose 配置
+# 使用端口: CSMS:8001, Admin:3002, DB:5434, Redis:6381, MQTT:1885/9003
+# 使用: docker compose -f docker-compose.test.yml up -d
+#
+
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: ocpp-db-test
+    ports:
+      - "5434:5432"
+    environment:
+      - POSTGRES_USER=ocpp_user
+      - POSTGRES_PASSWORD=ocpp_password
+      - POSTGRES_DB=ocpp
+    volumes:
+      - postgres_data_test:/var/lib/postgresql/data
+    networks:
+      - ocppnet-test
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ocpp_user -d ocpp"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: ocpp-redis-test
+    ports:
+      - "6381:6379"
+    command: redis-server --appendonly yes --protected-mode no
+    volumes:
+      - redis_data_test:/data
+    networks:
+      - ocppnet-test
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  mqtt-broker:
+    image: eclipse-mosquitto:2.0
+    container_name: ocpp-mqtt-test
+    ports:
+      - "1885:1883"
+      - "9003:9001"
+    volumes:
+      - mqtt_data_test:/mosquitto/data
+      - mqtt_log_test:/mosquitto/log
+      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+    networks:
+      - ocppnet-test
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "mosquitto_pub -h localhost -t test -m 'healthcheck' && mosquitto_sub -h localhost -t test -C 1 -W 2 || exit 0"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  csms:
+    build: ./csms
+    container_name: ocpp-csms-test
+    ports:
+      - "8001:9000"
+    environment:
+      - ENVIRONMENT=testing
+      - DEBUG=false
+      - DATABASE_URL=postgresql://ocpp_user:ocpp_password@db:5432/ocpp
+      - REDIS_URL=redis://redis:6379/0
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY:-test-encryption-key}
+      - SECRET_KEY=${SECRET_KEY:-test-secret-key}
+      - ENCRYPTION_SALT=ocpp_csms_salt
+      - MQTT_BROKER_HOST=mqtt-broker
+      - MQTT_BROKER_PORT=1883
+      - CORS_ORIGINS=http://localhost:3002,http://localhost:3001,http://localhost:3000
+      - LOG_LEVEL=INFO
+      - DOCS_URL=/docs
+      - REDOC_URL=/redoc
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mqtt-broker:
+        condition: service_started
+    networks:
+      - ocppnet-test
+    restart: unless-stopped
+
+  admin:
+    build: ./admin
+    container_name: ocpp-admin-test
+    ports:
+      - "3002:3000"
+    environment:
+      - NEXT_PUBLIC_CSMS_HTTP=http://localhost:8001
+      - NEXT_PUBLIC_API_BASE_URL=http://localhost:8001
+    depends_on:
+      - csms
+    networks:
+      - ocppnet-test
+    restart: unless-stopped
+
+volumes:
+  postgres_data_test:
+    driver: local
+  redis_data_test:
+    driver: local
+  mqtt_data_test:
+    driver: local
+  mqtt_log_test:
+    driver: local
+
+networks:
+  ocppnet-test:
+    driver: bridge

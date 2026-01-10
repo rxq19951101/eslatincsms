@@ -11,11 +11,26 @@
 - **admin (3000)**: Next.js 14 (App Router)。多页面管理：首页、地图视图、监测中心、客服消息（查看/回复用户消息）。
 - **app**: Expo React Native 移动应用。底部标签导航：Support（发送消息） / Map（地图） / Scan（扫码） / History / Account。
 
-### 端口
-- csms: `9000`
-- admin: `3000`
-- db (PostgreSQL): `5432`
-- redis: `6379`
+### 端口配置
+
+**重要提示**：项目现在支持多环境端口配置，避免开发/测试/生产环境端口冲突。
+
+| 服务 | 开发环境 | 测试环境 | 生产环境 |
+|-----|---------|---------|---------|
+| CSMS Backend | 8000 | 8001 | 9000 |
+| Admin Frontend | 3001 | 3002 | 3000 |
+| PostgreSQL | 5433 | 5434 | 5432 |
+| Redis | 6380 | 6381 | 6379 |
+| MQTT (TCP) | 1884 | 1885 | 1883 |
+| MQTT (WS) | 9002 | 9003 | 9001 |
+
+**Docker Compose 文件选择**：
+- `docker-compose.dev.yml` - 开发环境（端口：8000, 3001）
+- `docker-compose.test.yml` - 测试环境（端口：8001, 3002）
+- `docker-compose.yml` - 快速启动（使用生产端口：9000, 3000）
+- `docker-compose.prod.yml` - 生产环境（端口：9000, 3000）
+
+详细配置说明请查看 [PORT_CONFIGURATION.md](./PORT_CONFIGURATION.md)
 
 ### 前置要求
 
@@ -38,12 +53,26 @@ docker compose version
 ```
 
 2) 构建与启动容器
+
+**选择环境启动**：
 ```bash
+# 开发环境（推荐本地开发使用，避免端口冲突）
+docker compose -f docker-compose.dev.yml up --build
+
+# 测试环境
+docker compose -f docker-compose.test.yml up --build
+
+# 快速启动（默认，使用生产端口）
 docker compose up --build
+
+# 生产环境
+docker compose -f docker-compose.prod.yml up --build
 ```
 
 3) 访问管理界面
-- 浏览器打开 `http://localhost:3000/chargers`
+- 开发环境: `http://localhost:3001/chargers`
+- 测试环境: `http://localhost:3002/chargers`
+- 生产环境: `http://localhost:3000/chargers`
 
 4) 运行额外模拟器（可选，多实例）
 ```bash

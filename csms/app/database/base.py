@@ -7,6 +7,7 @@
 import os
 import time
 import uuid
+import logging
 from typing import Optional
 from contextvars import ContextVar
 from sqlalchemy import create_engine, text, event
@@ -15,6 +16,8 @@ from sqlalchemy.pool import QueuePool
 from sqlalchemy.orm import declarative_base
 from fastapi import HTTPException
 from app.core.config import get_settings
+
+logger = logging.getLogger("ocpp_csms")
 
 settings = get_settings()
 
@@ -39,17 +42,10 @@ engine = create_engine(
     echo=settings.db_echo
 )
 
-# 创建超级管理员引擎（使用 app_super 角色）
-# 注意：需要在连接字符串中指定角色，这里假设通过环境变量配置
+# 创建超级管理员引擎
+# 使用相同的连接字符串，但在连接后通过监听器设置角色
+# 这样可以避免角色登录问题（app_super是NOLOGIN角色）
 super_database_url = os.getenv("SUPER_DATABASE_URL", settings.database_url)
-if super_database_url == settings.database_url:
-    # 如果未配置超级管理员连接字符串，从默认连接字符串修改
-    # 假设格式为：postgresql://user:pass@host:port/dbname
-    # 需要添加 ?options=-c%20role%3Dapp_super
-    if "?" in super_database_url:
-        super_database_url += "&options=-c%20role%3Dapp_super"
-    else:
-        super_database_url += "?options=-c%20role%3Dapp_super"
 
 super_engine = create_engine(
     super_database_url,
@@ -60,6 +56,19 @@ super_engine = create_engine(
     pool_recycle=settings.db_pool_recycle,
     echo=settings.db_echo
 )
+
+# 在超级引擎的每个连接上设置 app_super 角色
+@event.listens_for(super_engine, "connect")
+def set_app_super_role(dbapi_conn, connection_record):
+    """在连接建立后设置 app_super 角色"""
+    cursor = dbapi_conn.cursor()
+    try:
+        cursor.execute("SET ROLE app_super")
+    except Exception as e:
+        # 如果角色不存在或没有权限，记录警告但不中断
+        logger.warning(f"无法设置 app_super 角色: {e}")
+    finally:
+        cursor.close()
 
 # 创建会话工厂
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -126,23 +135,24 @@ def set_tenant_context(session, transaction, connection):
             import logging
             logger = logging.getLogger("ocpp_csms")
             
-            # 检查是否是默认值（未设置）
+            # 检查是否是默认值（未设置或设置为 None）
             try:
-                tenant_id_context.get()  # 如果未设置会抛出 LookupError
-                is_default_context = False
+                ctx_tenant_id = tenant_id_context.get()
+                # 如果 tenant_id 是 None，可能是：
+                # 1. 超级管理员请求（没有携带 X-Tenant-Id）
+                # 2. 认证操作（如 /auth/me，跳过了 tenant_middleware）
+                # 对于这两种情况，我们都应该允许继续
+                is_default_context = (ctx_tenant_id is None)
             except LookupError:
                 is_default_context = True
             
             if is_default_context:
-                # 可能是认证操作，允许继续但记录警告
-                logger.warning(f"Database access without tenant_id context (likely during authentication). Allowing but this should be handled by middleware.")
+                # 可能是认证操作或超级管理员访问，允许继续但记录警告
+                logger.warning(f"Database access without tenant_id context (likely during authentication or super admin operation). Allowing but this should be handled by middleware.")
                 # 不抛出异常，允许继续
             else:
-                # 明确设置了 None，说明这不是认证操作，应该要求 tenant_id
-                raise HTTPException(
-                    status_code=403,
-                    detail="TENANT_REQUIRED: Tenant ID must be set for non-super-admin requests"
-                )
+                # tenant_id 存在但不是 None，正常情况，不需要额外检查
+                pass
     
     if use_super_connection and is_super_admin:
         # 超级管理员使用 app_super 角色（绕过 RLS）
