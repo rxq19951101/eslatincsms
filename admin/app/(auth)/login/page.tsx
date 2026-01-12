@@ -55,78 +55,12 @@ export default function LoginPage() {
       setTokens(response.access_token, response.refresh_token);
 
       // 获取完整的用户信息（包含租户列表）
-      // #region agent log
-      try {
-        fetch('http://127.0.0.1:7242/ingest/ef49133c-edf7-44f0-b6da-8a7d43918316', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            location: 'login/page.tsx:after_login',
-            message: 'Login successful, attempting to fetch /me',
-            data: {
-              login_response_user: response.user,
-              has_default_tenant_id: !!response.user.default_tenant_id,
-              default_tenant_id: response.user.default_tenant_id
-            },
-            timestamp: Date.now(),
-            sessionId: 'debug-session',
-            runId: 'run1',
-            hypothesisId: 'A'
-          })
-        }).catch(() => {});
-      } catch {}
-      // #endregion
-      
       try {
         const userData = await apiGet<AdminUser>(API_ENDPOINTS.AUTH_ME, {
           skipTenantId: true, // /me 接口应该能够自动处理（已跳过 tenant_middleware 检查）
         });
-        
-        // #region agent log
-        try {
-          fetch('http://127.0.0.1:7242/ingest/ef49133c-edf7-44f0-b6da-8a7d43918316', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              location: 'login/page.tsx:/me_success',
-              message: '/me endpoint returned user data',
-              data: {
-                has_default_tenant_id: !!userData.default_tenant_id,
-                default_tenant_id: userData.default_tenant_id,
-                tenant_list_size: userData.tenant_list?.length || 0
-              },
-              timestamp: Date.now(),
-              sessionId: 'debug-session',
-              runId: 'run1',
-              hypothesisId: 'A'
-            })
-          }).catch(() => {});
-        } catch {}
-        // #endregion
-        
         setUser(userData);
       } catch (error) {
-        // #region agent log
-        try {
-          fetch('http://127.0.0.1:7242/ingest/ef49133c-edf7-44f0-b6da-8a7d43918316', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              location: 'login/page.tsx:/me_failed',
-              message: '/me endpoint failed, using fallback',
-              data: {
-                error: error instanceof Error ? error.message : String(error),
-                login_response_has_tenant_id: !!response.user.default_tenant_id
-              },
-              timestamp: Date.now(),
-              sessionId: 'debug-session',
-              runId: 'run1',
-              hypothesisId: 'A'
-            })
-          }).catch(() => {});
-        } catch {}
-        // #endregion
-        
         // 如果获取用户信息失败，使用登录响应中的基本信息（如果包含 default_tenant_id）
         console.error('Failed to fetch user info:', error);
         setUser({

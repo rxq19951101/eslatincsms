@@ -4,11 +4,11 @@
 #
 
 import logging
+import os
 import re
 from typing import Dict, Any, Optional, Tuple
 from datetime import datetime, timezone
 from sqlalchemy.orm import Session
-from typing import Optional
 from app.database.base import SessionLocal
 from app.database.models import DeviceEvent, Device, ChargePoint
 from app.services.charge_point_service import ChargePointService
@@ -109,6 +109,19 @@ class OCPPMessageHandler:
             existing_charge_point = db.query(ChargePoint).filter(
                 ChargePoint.id == charge_point_id
             ).first()
+
+            # 严格模式：不允许 BootNotification 自动创建新桩（必须先在后台录入硬件码/charge_point_id）
+            require_pre_registered = os.getenv("OCPP_WS_REQUIRE_PRE_REGISTERED", "true").lower() in ("true", "1", "yes")
+            if require_pre_registered and not existing_charge_point:
+                logger.warning(
+                    f"[{charge_point_id}] BootNotification rejected: charge point not pre-registered"
+                )
+                # OCPP 1.6 BootNotificationResponse
+                return {
+                    "status": "Rejected",
+                    "currentTime": datetime.now(timezone.utc).isoformat(),
+                    "interval": 30,
+                }
             
             # 如果是第一次BootNotification（充电桩不存在），清理charge_point_id
             if not existing_charge_point:

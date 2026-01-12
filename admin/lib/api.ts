@@ -52,7 +52,6 @@ export async function apiRequest<T = any>(
   endpoint: string,
   config: RequestConfig = {}
 ): Promise<T> {
-  const isTestEnv = typeof process !== 'undefined' && process.env.NODE_ENV === 'test';
   const {
     skipAuth = false,
     skipTenantId = false,
@@ -85,55 +84,8 @@ export async function apiRequest<T = any>(
     const tenantId = getTenantId(userInfo);
     const isSuperAdmin = userInfo?.is_super_admin || false;
 
-    // #region agent log (skip in test env to avoid polluting fetch mock)
-    try {
-      if (!isTestEnv && typeof window !== 'undefined') {
-        fetch('http://127.0.0.1:7242/ingest/ef49133c-edf7-44f0-b6da-8a7d43918316', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            location: 'api.ts:before_tenant_id_check',
-            message: 'Checking tenant_id before API request',
-            data: {
-              endpoint,
-              has_user_info: !!userInfo,
-              is_super_admin: isSuperAdmin,
-              tenant_id: tenantId,
-              skipAuth,
-              skipTenantId
-            },
-            timestamp: Date.now(),
-            sessionId: 'debug-session',
-            runId: 'run1',
-            hypothesisId: 'B'
-          })
-        }).catch(() => {});
-      }
-    } catch {}
-    // #endregion
-
     // 如果不是 super_admin 且没有 tenant_id，但已经认证（有 token），阻止请求
     if (!isSuperAdmin && !tenantId && !skipAuth) {
-      // #region agent log
-      try {
-        if (typeof window !== 'undefined') {
-          fetch('http://127.0.0.1:7242/ingest/ef49133c-edf7-44f0-b6da-8a7d43918316', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              location: 'api.ts:tenant_id_missing',
-              message: 'Tenant ID missing for non-super-admin request',
-              data: { endpoint, user_info: userInfo },
-              timestamp: Date.now(),
-              sessionId: 'debug-session',
-              runId: 'run1',
-              hypothesisId: 'B'
-            })
-          }).catch(() => {});
-        }
-      } catch {}
-      // #endregion
-      
       // 跳转到租户选择页（如果存在）
       if (typeof window !== 'undefined') {
         const hasSelectTenantPage = false; // TODO: 实现租户选择页后改为 true
@@ -150,26 +102,6 @@ export async function apiRequest<T = any>(
     // 如果不是 super_admin 且有 tenant_id，添加 X-Tenant-Id header
     if (!isSuperAdmin && tenantId) {
       requestHeaders['X-Tenant-Id'] = tenantId;
-      
-      // #region agent log
-      try {
-        if (!isTestEnv && typeof window !== 'undefined') {
-          fetch('http://127.0.0.1:7242/ingest/ef49133c-edf7-44f0-b6da-8a7d43918316', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              location: 'api.ts:tenant_id_added',
-              message: 'X-Tenant-Id header added to request',
-              data: { endpoint, tenant_id: tenantId },
-              timestamp: Date.now(),
-              sessionId: 'debug-session',
-              runId: 'run1',
-              hypothesisId: 'B'
-            })
-          }).catch(() => {});
-        }
-      } catch {}
-      // #endregion
     }
   }
 

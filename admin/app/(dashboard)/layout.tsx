@@ -11,7 +11,7 @@ export default function DashboardLayout({
 }: {
   children: React.ReactNode;
 }) {
-  const { isAuthenticated } = useRequireAuth();
+  const { isAuthenticated, isReady } = useRequireAuth();
   const router = useRouter();
   const pathname = usePathname();
   const [isLoading, setIsLoading] = useState(true);
@@ -25,8 +25,8 @@ export default function DashboardLayout({
 
   // 登录页面不需要布局（已经在 (auth) 路由组中处理，不会进入此布局）
 
-  // 如果正在加载或未认证，显示加载状态
-  if (isLoading || !isAuthenticated) {
+  // 如果正在加载或认证校验未完成/未认证，显示加载状态
+  if (isLoading || !isReady || !isAuthenticated) {
     return (
       <div className="flex items-center justify-center h-screen bg-slate-950">
         <div className="text-slate-400">加载中...</div>

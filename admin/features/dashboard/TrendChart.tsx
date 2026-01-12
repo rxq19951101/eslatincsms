@@ -33,7 +33,8 @@ export function TrendChart({ data, title, color, unit = '' }: TrendChartProps) {
   const secondaryColor = 'hsl(var(--chart-secondary))';
 
   return (
-    <div className="w-full h-full">
+    // Recharts 的 ResponsiveContainer 需要父容器有明确高度，否则会出现 width/height=-1
+    <div className="w-full h-[260px]">
       <ResponsiveContainer width="100%" height="100%">
         <AreaChart
           data={data}

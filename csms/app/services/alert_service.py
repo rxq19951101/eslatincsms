@@ -39,7 +39,8 @@ class AlertService:
             status="pending",
             title=title,
             description=description,
-            metadata=metadata or {}
+            # models.Alert 使用 alert_metadata 避免与 SQLAlchemy Base.metadata 冲突
+            alert_metadata=metadata or {}
         )
         
         db.add(alert)

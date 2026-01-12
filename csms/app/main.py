@@ -1313,6 +1313,40 @@ async def ocpp_ws(ws: WebSocket, id: str = Query(..., description="Charge Point 
         # Refuse if client does not offer ocpp1.6
         await ws.close(code=1002)
         return
+
+    # ---- 严格模式：必须预先录入硬件码/充电桩 ----
+    # 你的业务要求：只有系统中已录入的硬件码（charge_point_id）才能建立连接。
+    # 默认开启（可通过环境变量关闭，便于本地调试/回归旧行为）。
+    require_pre_registered = os.getenv("OCPP_WS_REQUIRE_PRE_REGISTERED", "true").lower() in ("true", "1", "yes")
+    if require_pre_registered:
+        # 后端 BootNotification 处理会对首次 charge_point_id 做“只保留字母数字”的清洗；
+        # 为避免连接 ID 与系统记录不一致，这里直接要求连接参数本身必须是字母数字。
+        if not id or not id.isalnum():
+            await ws.close(code=1008)
+            return
+        if not DATABASE_AVAILABLE:
+            # 没有数据库就无法验证预注册，严格模式直接拒绝
+            await ws.close(code=1011)
+            return
+        try:
+            from app.database.base import SessionLocal
+            from app.database.models import ChargePoint
+
+            db = SessionLocal()
+            try:
+                exists = db.query(ChargePoint.id).filter(ChargePoint.id == id).first() is not None
+            finally:
+                db.close()
+
+            if not exists:
+                # 未预注册：拒绝连接
+                await ws.close(code=1008)
+                return
+        except Exception as e:
+            logger.error(f"[{id}] 预注册校验失败: {e}", exc_info=True)
+            await ws.close(code=1011)
+            return
+
     await ws.accept(subprotocol="ocpp1.6")
     
     # 注册WebSocket连接（用于传输管理器）

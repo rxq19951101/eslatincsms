@@ -27,9 +27,11 @@ export default function TransactionsPage() {
   );
 
   const filteredTransactions = transactions?.filter((tx) => {
+    const txId = String(tx.transaction_id ?? '');
+    const cpId = String(tx.charge_point_id ?? '');
     const matchesSearch =
-      tx.transaction_id.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      tx.charge_point_id.toLowerCase().includes(searchQuery.toLowerCase());
+      txId.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      cpId.toLowerCase().includes(searchQuery.toLowerCase());
     const matchesStatus = statusFilter === 'all' || tx.status === statusFilter;
     const matchesCharger = !chargePointFilter || tx.charge_point_id === chargePointFilter;
     return matchesSearch && matchesStatus && matchesCharger;
