@@ -58,6 +58,21 @@ class RefreshTokenResponse(BaseModel):
     token_type: str = "bearer"
 
 
+# 邮箱注册/登录请求模型
+class EmailRegisterRequest(BaseModel):
+    email: str
+    password: str
+    full_name: str
+    tenant_id: UUID
+
+
+class EmailLoginRequest(BaseModel):
+    email: str
+    password: str
+    tenant_id: UUID
+    remember_me: bool = False
+
+
 # ==================== 认证端点 ====================
 
 @router.post("/register", summary="终端用户注册")
@@ -224,5 +239,152 @@ async def get_current_user_info(
         "id_tag": end_user.id_tag,
         "balance": float(end_user.balance),
         "tenant_id": str(end_user.tenant_id),
-        "status": end_user.status
+        "status": end_user.status,
+        "email_verified": end_user.email_verified if hasattr(end_user, 'email_verified') else False
     }
+
+
+# ==================== 邮箱认证端点 ====================
+
+@router.post("/register-email", summary="邮箱注册")
+async def register_with_email(
+    request_data: EmailRegisterRequest,
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    """使用邮箱和密码注册"""
+    from app.core.auth import get_password_hash
+    
+    # 检查邮箱是否已被注册
+    existing_user = db.query(EndUser).filter(
+        EndUser.tenant_id == request_data.tenant_id,
+        EndUser.email == request_data.email
+    ).first()
+    
+    if existing_user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email already registered"
+        )
+    
+    # 创建新用户
+    new_user = EndUser()
+    new_user.tenant_id = request_data.tenant_id
+    new_user.email = request_data.email
+    new_user.full_name = request_data.full_name
+    new_user.password_hash = get_password_hash(request_data.password)
+    new_user.email_verified = False
+    new_user.status = "active"
+    new_user.balance = 0
+    new_user.created_at = datetime.now(timezone.utc)
+    new_user.updated_at = datetime.now(timezone.utc)
+    
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+    
+    return {
+        "success": True,
+        "message": "User registered successfully",
+        "user_id": str(new_user.id)
+    }
+
+
+@router.post("/login-email", response_model=LoginResponse, summary="邮箱登录")
+async def login_with_email(
+    request_data: EmailLoginRequest,
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    """使用邮箱和密码登录"""
+    logger.info(f"Login attempt for email: {request_data.email}, tenant: {request_data.tenant_id}")
+    
+    # 查找用户
+    end_user = db.query(EndUser).filter(
+        EndUser.tenant_id == request_data.tenant_id,
+        EndUser.email == request_data.email
+    ).first()
+    
+    if not end_user:
+        logger.warning(f"User not found: {request_data.email}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password"
+        )
+    
+    logger.info(f"User found: {end_user.email}, password_hash exists: {bool(end_user.password_hash)}")
+    
+    # 验证密码
+    if not end_user.password_hash:
+        logger.warning("Password hash is empty")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password"
+        )
+    
+    password_valid = verify_password(request_data.password, end_user.password_hash)
+    logger.info(f"Password verification result: {password_valid}")
+    
+    if not password_valid:
+        logger.warning("Password verification failed")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password"
+        )
+    
+    if end_user.status != "active":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="User account is not active"
+        )
+    
+    # 更新最后登录时间
+    end_user.last_login_at = datetime.now(timezone.utc)
+    db.commit()
+    
+    # 生成 token pair
+    access_token, refresh_token = await create_token_pair(
+        user_id=end_user.id,
+        user_type="end_user",
+        audience="app",
+        is_super_admin=False,
+        request=request
+    )
+    
+    # 保存 refresh token
+    from jose import jwt
+    from app.core.config import get_settings
+    settings = get_settings()
+    
+    unverified_payload = jwt.decode(
+        refresh_token,
+        settings.secret_key,
+        algorithms=[settings.algorithm],
+        options={"verify_signature": False, "verify_aud": False}
+    )
+    
+    refresh_jti = unverified_payload.get("jti")
+    refresh_expires_at = datetime.fromtimestamp(unverified_payload.get("exp"), tz=timezone.utc)
+    
+    await save_refresh_token(
+        jti=refresh_jti,
+        user_id=end_user.id,
+        user_type="end_user",
+        refresh_token=refresh_token,
+        expires_at=refresh_expires_at,
+        db=db,
+        request=request
+    )
+    
+    return LoginResponse(
+        access_token=access_token,
+        refresh_token=refresh_token,
+        user={
+            "id": str(end_user.id),
+            "phone": end_user.phone,
+            "email": end_user.email,
+            "full_name": end_user.full_name,
+            "email_verified": end_user.email_verified if hasattr(end_user, 'email_verified') else False,
+            "tenant_id": str(end_user.tenant_id)
+        }
+    )

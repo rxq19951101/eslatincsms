@@ -35,6 +35,11 @@ def register_routes():
         ("statistics", "/statistics", "统计数据"),
         ("devices", "/devices", "设备管理"),
         ("dashboard", "/dashboard", "仪表板"),  # 添加 dashboard 路由
+        ("app.auth", "/app/auth", "APP用户认证"),
+    ("app.chargers", "/app/chargers", "APP充电站查询"),  # 添加 APP 认证路由
+    ("app.charging", "/app/charging", "APP扫码充电"),
+    ("app.wallet", "/app/wallet", "APP钱包"),
+    ("app.transactions", "/app/transactions", "APP充电记录"),
     ]
     
     for module_name, prefix, tag in routes_config:

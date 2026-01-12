@@ -17,6 +17,7 @@ from app.database.models import (
     SupportMessage,
     # 多租户相关表
     Tenant, AdminUser, EndUser, TenantMembership, Role, TenantMembershipRole,
+    WalletTransaction,
     Alert, AlertRule, SystemConfig, RefreshToken, AuditLog,
 )
 
@@ -53,6 +54,7 @@ __all__ = [
     "Tenant",
     "AdminUser",
     "EndUser",
+    "WalletTransaction",
     "TenantMembership",
     "Role",
     "TenantMembershipRole",

@@ -1,8 +1,0 @@
-__pycache__/
-*.py[cod]
-*.so
-.Python
-venv/
-env/
-*.log
-.DS_Store

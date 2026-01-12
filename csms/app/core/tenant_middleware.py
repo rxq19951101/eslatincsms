@@ -7,6 +7,7 @@ from fastapi import Request, HTTPException
 from typing import Optional
 import uuid
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import SQLAlchemyError
 from app.database.base import (
     tenant_id_context, 
     is_super_admin_context, 
@@ -110,6 +111,17 @@ def validate_tenant_membership(user_id: uuid.UUID, tenant_id: uuid.UUID, is_supe
     ).first()
     
     return membership is not None
+
+
+def validate_end_user_tenant(end_user_id: uuid.UUID, tenant_id: uuid.UUID, db: Session) -> bool:
+    """
+    验证 EndUser 是否属于该租户。
+    注意：EndUser 只属于一个 tenant_id，因此只需要比对 end_users.tenant_id。
+    """
+    end_user = db.query(EndUser).filter(EndUser.id == end_user_id).first()
+    if not end_user:
+        return False
+    return end_user.tenant_id == tenant_id
 
 
 def should_use_super_connection(current_user, tenant_id_header) -> bool:
@@ -224,19 +236,65 @@ async def tenant_middleware(request: Request, call_next):
     # 判断是否使用 super 连接
     use_super_connection = should_use_super_connection(current_user, tenant_id_header)
     
-    # 验证 membership（如果不是 super admin）
+    # 验证租户归属（如果不是 super admin）
     if tenant_id and current_user and not current_user.is_super_admin:
-        # 使用 SuperSessionLocal 来验证 membership（tenant_memberships 表不受 RLS 限制，但为了安全使用 super session）
-        from app.database.base import SuperSessionLocal
-        db = SuperSessionLocal()
-        try:
-            if not validate_tenant_membership(current_user.id, tenant_id, False, db):
-                raise HTTPException(
-                    status_code=403,
-                    detail="TENANT_ACCESS_DENIED: User does not belong to the specified tenant"
-                )
-        finally:
-            db.close()
+        # 说明：
+        # - admin：校验 tenant_memberships（使用 super session，避免 RLS 影响）
+        # - end_user：校验 end_users.tenant_id（不需要 super session；避免触发 app_super 角色设置）
+        user_type = getattr(current_user, "user_type", "admin")
+
+        if user_type == "admin":
+            from app.database.base import SuperSessionLocal
+            db = SuperSessionLocal()
+            try:
+                # 清理可能复用到的异常事务状态（避免 InFailedSqlTransaction）
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+
+                if not validate_tenant_membership(current_user.id, tenant_id, False, db):
+                    raise HTTPException(
+                        status_code=403,
+                        detail="TENANT_ACCESS_DENIED: User does not belong to the specified tenant"
+                    )
+            except SQLAlchemyError:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+                raise
+            finally:
+                db.close()
+
+        elif user_type == "end_user":
+            # EndUser 校验：使用普通 SessionLocal（get_end_user_tenant 已经用它能查询到 end_users）
+            db = SessionLocal()
+            try:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+
+                if not validate_end_user_tenant(current_user.id, tenant_id, db):
+                    raise HTTPException(
+                        status_code=403,
+                        detail="TENANT_ACCESS_DENIED: End user does not belong to the specified tenant"
+                    )
+            except SQLAlchemyError:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+                raise
+            finally:
+                db.close()
+
+        else:
+            raise HTTPException(
+                status_code=403,
+                detail="TENANT_ACCESS_DENIED: Unsupported user type"
+            )
     
     # 设置上下文变量
     # #region agent log

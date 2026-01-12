@@ -67,6 +67,11 @@ def set_app_super_role(dbapi_conn, connection_record):
     except Exception as e:
         # 如果角色不存在或没有权限，记录警告但不中断
         logger.warning(f"无法设置 app_super 角色: {e}")
+        # 关键：SET ROLE 失败会让连接处于 aborted transaction 状态，必须 rollback 清理，否则后续任何查询都会 InFailedSqlTransaction
+        try:
+            dbapi_conn.rollback()
+        except Exception:
+            pass
     finally:
         cursor.close()
 

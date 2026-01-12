@@ -497,6 +497,41 @@ class Payment(Base):
     )
 
 
+# ==================== 钱包层（APP简化版） ====================
+
+class WalletTransaction(Base):
+    """钱包交易流水（简化版）
+    - 余额权威字段在 EndUser.balance
+    - 这里记录每次余额变化/消费的流水，便于APP展示
+    """
+    __tablename__ = "wallet_transactions"
+
+    id = Column(String(100), primary_key=True, index=True)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    end_user_id = Column(UUID(as_uuid=True), ForeignKey("end_users.id", ondelete="CASCADE"), nullable=False, index=True)
+
+    # 关联信息（可选）
+    charge_point_id = Column(String(100), ForeignKey("charge_points.id"), nullable=True, index=True)
+
+    # 交易信息
+    # amount > 0 表示入账（top_up），amount < 0 表示扣费（charge）
+    type = Column(String(50), nullable=False)  # top_up / charge
+    amount = Column(Numeric(10, 2), nullable=False)
+    description = Column(Text, nullable=True)
+
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False, index=True)
+
+    tenant = relationship("Tenant")
+    end_user = relationship("EndUser")
+    charge_point = relationship("ChargePoint")
+
+    __table_args__ = (
+        Index('idx_wallet_tx_tenant_id', 'tenant_id'),
+        Index('idx_wallet_tx_end_user', 'end_user_id', 'created_at'),
+        Index('idx_wallet_tx_charge_point', 'charge_point_id'),
+    )
+
+
 # ==================== 事件和日志层 ====================
 
 class DeviceEvent(Base):
@@ -693,27 +728,31 @@ class AdminUser(Base):
 class EndUser(Base):
     """终端用户表"""
     __tablename__ = "end_users"
-    
+
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
     tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
-    phone = Column(String(50), nullable=False)
+    phone = Column(String(50), nullable=True)  # 改为可选
     email = Column(String(200), nullable=True)
     full_name = Column(String(200), nullable=True)
-    id_tag = Column(String(100), nullable=False)  # RFID标签
+    id_tag = Column(String(100), nullable=True)  # RFID标签，改为可选
+    password_hash = Column(String(200), nullable=True)  # 新增：密码哈希
+    email_verified = Column(Boolean, default=False)  # 新增：邮箱验证状态
     balance = Column(Numeric(10, 2), nullable=False, default=0)
     status = Column(String(50), nullable=False, default="active")  # active, suspended, deleted
     last_login_at = Column(DateTime(timezone=True), nullable=True)
-    
+
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
-    
+
     tenant = relationship("Tenant")
-    
+
     __table_args__ = (
         UniqueConstraint('tenant_id', 'phone', name='unique_tenant_phone'),
+        UniqueConstraint('tenant_id', 'email', name='unique_tenant_email'),  # 新增：邮箱唯一约束
         UniqueConstraint('tenant_id', 'id_tag', name='unique_tenant_id_tag'),
         Index('idx_end_users_tenant_id', 'tenant_id'),
         Index('idx_end_users_phone', 'phone'),
+        Index('idx_end_users_email', 'email'),  # 新增：邮箱索引
         Index('idx_end_users_id_tag', 'id_tag'),
     )
 
