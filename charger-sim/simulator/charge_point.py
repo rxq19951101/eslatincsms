@@ -181,9 +181,7 @@ class SimChargePoint(OcppChargePoint):
                     soc_end=m.soc_end,
                 )
 
-                # 注意：后端当前实现期望 meterValue 数组内的每个元素也包含 connectorId（非标准但需兼容）
                 mv = {
-                    "connectorId": connector_id,
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                     "sampledValue": [
                         {"measurand": "Energy.Active.Import.Register", "value": str(c.meter.meter_wh), "unit": "Wh"},
@@ -220,19 +218,23 @@ class SimChargePoint(OcppChargePoint):
             # 已在充电中
             return call_result.RemoteStartTransactionPayload(status="Rejected")
 
-        # Authorize (optional, backend accepts mostly)
-        try:
-            await self.send_status_notification("Preparing", connector_id=connector_id)
-            await self.send_authorize(id_tag)
-            await self.send_start_transaction(id_tag, connector_id=connector_id)
-            await self.send_status_notification("Charging", connector_id=connector_id)
+        # RemoteStartTransaction 的 CALLRESULT 应尽快返回，否则 CSMS 侧会超时。
+        # 因此把“授权/启动事务/状态切换/开始抄表”的重活放到后台任务里执行。
+        async def _run_start_flow() -> None:
+            try:
+                await self.send_status_notification("Preparing", connector_id=connector_id)
+                await self.send_authorize(id_tag)
+                await self.send_start_transaction(id_tag, connector_id=connector_id)
+                await self.send_status_notification("Charging", connector_id=connector_id)
 
-            # Start metering loop
-            if c.metering_task and not c.metering_task.done():
-                c.metering_task.cancel()
-            c.metering_task = asyncio.create_task(self._meter_values_loop(connector_id=connector_id))
-        except Exception as e:
-            logger.error("[%s] remote start flow failed: %s", self.id, e)
+                # Start metering loop
+                if c.metering_task and not c.metering_task.done():
+                    c.metering_task.cancel()
+                c.metering_task = asyncio.create_task(self._meter_values_loop(connector_id=connector_id))
+            except Exception as e:
+                logger.error("[%s] remote start flow failed: %s", self.id, e)
+
+        asyncio.create_task(_run_start_flow())
 
         return call_result.RemoteStartTransactionPayload(status="Accepted")
 
@@ -247,15 +249,20 @@ class SimChargePoint(OcppChargePoint):
                 target = (cid, c)
                 break
 
-        try:
-            if target:
-                cid, c = target
-                if c.metering_task and not c.metering_task.done():
-                    c.metering_task.cancel()
-                await self.send_stop_transaction(connector_id=cid, reason="Remote")
-                await self.send_status_notification("Available", connector_id=cid)
-        except Exception as e:
-            logger.error("[%s] remote stop flow failed: %s", self.id, e)
+        # RemoteStopTransaction 的 CALLRESULT 也应尽快返回，否则 CSMS 侧会超时并把停止操作判定为失败。
+        # 所以把 StopTransaction/状态切换 放到后台任务。
+        async def _run_stop_flow() -> None:
+            try:
+                if target:
+                    cid, c = target
+                    if c.metering_task and not c.metering_task.done():
+                        c.metering_task.cancel()
+                    await self.send_stop_transaction(connector_id=cid, reason="Remote")
+                    await self.send_status_notification("Available", connector_id=cid)
+            except Exception as e:
+                logger.error("[%s] remote stop flow failed: %s", self.id, e)
+
+        asyncio.create_task(_run_stop_flow())
 
         return call_result.RemoteStopTransactionPayload(status="Accepted")
 
@@ -264,10 +271,32 @@ async def connect_and_run(profile: ChargePointProfile, meterings: List[MeteringP
     url = f"{ws_base}?id={profile.charge_point_id}"
     logger.info("[%s] connecting %s", profile.charge_point_id, url)
     async with websockets.connect(url, subprotocols=["ocpp1.6"]) as ws:
-        cp = SimChargePoint(profile=profile, meterings=meterings, ws=ws)
-        await cp.start_background()
+        # CSMS 侧会在连接建立后发送一条非 OCPP 标准的 “Connected” JSON（用于调试）。
+        # ocpp 库的 listener 只能处理 OCPP 1.6 的数组消息格式，若直接进入 cp.start() 会因解析失败而断开。
+        # 因此这里先吞掉这条欢迎消息（如果存在）。
         try:
-            await cp.start()  # listen forever
+            hello = await asyncio.wait_for(ws.recv(), timeout=2)
+            if isinstance(hello, str) and hello.lstrip().startswith("{"):
+                logger.debug("[%s] ignored non-ocpp greeting: %s", profile.charge_point_id, hello[:200])
+            else:
+                # 如果不是该欢迎消息，则不再额外处理（避免误吞合法 OCPP 数据）
+                logger.debug("[%s] first message not greeting, ignoring peek", profile.charge_point_id)
+        except asyncio.TimeoutError:
+            # 某些环境不会发欢迎消息，超时即可
+            pass
+
+        cp = SimChargePoint(profile=profile, meterings=meterings, ws=ws)
+        # 必须先启动 listener，才能让 cp.call() 收到 CALLRESULT/CALLERROR
+        listener_task = asyncio.create_task(cp.start())
+        try:
+            await cp.start_background()
+            await listener_task  # listen forever
         finally:
+            if not listener_task.done():
+                listener_task.cancel()
+                try:
+                    await listener_task
+                except asyncio.CancelledError:
+                    pass
             await cp.shutdown()
 

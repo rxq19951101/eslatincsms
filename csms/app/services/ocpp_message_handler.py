@@ -10,6 +10,7 @@ from typing import Dict, Any, Optional, Tuple
 from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 from app.database.base import SessionLocal
+from app.database.base import tenant_id_context
 from app.database.models import DeviceEvent, Device, ChargePoint
 from app.services.charge_point_service import ChargePointService
 from app.services.session_service import SessionService
@@ -214,7 +215,11 @@ class OCPPMessageHandler:
                     )
                     event_device_serial = None
             
+            # 注意：WebSocket/MQTT 的 OCPP 消息不经过 HTTP middleware，因此 tenant_id_context 可能为空。
+            # 但 device_events.tenant_id 为 NOT NULL，这里必须补齐 tenant_id。
+            resolved_tenant_id = tenant_id_context.get() or getattr(charge_point, "tenant_id", None)
             event = DeviceEvent(
+                tenant_id=resolved_tenant_id,
                 charge_point_id=charge_point_id,
                 device_serial_number=event_device_serial,
                 event_type="boot",
@@ -222,9 +227,9 @@ class OCPPMessageHandler:
                     "vendor": vendor,
                     "model": model,
                     "firmware_version": firmware_version,
-                    "serial_number": serial_number
+                    "serial_number": serial_number,
                 },
-                timestamp=datetime.now(timezone.utc)
+                timestamp=datetime.now(timezone.utc),
             )
             db.add(event)
             db.commit()

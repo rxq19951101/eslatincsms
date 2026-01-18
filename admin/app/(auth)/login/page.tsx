@@ -13,6 +13,8 @@ import { apiPost, apiGet } from '@/lib/api';
 import { API_ENDPOINTS } from '@/lib/constants';
 import { setTokens } from '@/lib/auth';
 import { useAuthStore } from '@/store/authStore';
+import { useTenantStore } from '@/store/tenantStore';
+import { getTenantId } from '@/lib/tenant';
 import { LoginRequest, LoginResponse, AdminUser } from '@/types';
 import { Zap } from 'lucide-react';
 
@@ -26,6 +28,7 @@ type LoginFormValues = z.infer<typeof loginSchema>;
 export default function LoginPage() {
   const router = useRouter();
   const { setUser } = useAuthStore();
+  const { setCurrentTenant } = useTenantStore();
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -60,6 +63,18 @@ export default function LoginPage() {
           skipTenantId: true, // /me 接口应该能够自动处理（已跳过 tenant_middleware 检查）
         });
         setUser(userData);
+        // 初始化当前租户（用于 UI 展示）
+        if (userData.is_super_admin) {
+          setCurrentTenant(null);
+        } else {
+          const tid = getTenantId(userData);
+          const selected =
+            (tid && userData.tenant_list?.find((t) => t.id === tid)) ||
+            userData.tenant_list?.find((t) => t.is_primary) ||
+            userData.tenant_list?.[0] ||
+            null;
+          if (selected) setCurrentTenant(selected);
+        }
       } catch (error) {
         // 如果获取用户信息失败，使用登录响应中的基本信息（如果包含 default_tenant_id）
         console.error('Failed to fetch user info:', error);
@@ -72,6 +87,7 @@ export default function LoginPage() {
           default_tenant_id: response.user.default_tenant_id, // 使用登录响应中的 default_tenant_id
           tenant_list: [],
         });
+        // fallback 情况下没有 tenant_list，后续 useAuth 会再次尝试 /me 以恢复租户展示
       }
 
       // 跳转到 Dashboard

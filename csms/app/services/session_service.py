@@ -11,6 +11,7 @@ from app.database.models import (
     ChargingSession, EVSE, EVSEStatus, Order, Invoice, PricingSnapshot
 )
 from app.core.id_generator import generate_order_id
+from app.database.base import tenant_id_context
 
 logger = logging.getLogger("ocpp_csms")
 
@@ -37,9 +38,16 @@ class SessionService:
         
         if not evse:
             raise ValueError(f"EVSE not found: charge_point_id={charge_point_id}, evse_id={evse_id}")
+
+        # OCPP(WebSocket/MQTT) 场景可能没有走 HTTP middleware，因此 tenant_id_context 可能为空。
+        # 但 charging_sessions/orders/meter_values 等表 tenant_id 为 NOT NULL，必须补齐。
+        tenant_id = tenant_id_context.get() or getattr(evse, "tenant_id", None)
+        if not tenant_id:
+            raise ValueError(f"Missing tenant_id for charge_point_id={charge_point_id}, evse_id={evse_id}")
         
         # 创建会话
         session = ChargingSession(
+            tenant_id=tenant_id,
             evse_id=evse.id,
             charge_point_id=charge_point_id,
             transaction_id=transaction_id,
@@ -56,6 +64,7 @@ class SessionService:
         order_id = generate_order_id(charge_point_id=charge_point_id, transaction_id=transaction_id)
         order = Order(
             id=order_id,
+            tenant_id=tenant_id,
             session_id=session.id,
             charge_point_id=charge_point_id,
             user_id=user_id or id_tag,  # 如果没有 user_id，使用 id_tag
@@ -160,7 +169,17 @@ class SessionService:
         """添加计量值"""
         from app.database.models import MeterValue
         
+        session = db.query(ChargingSession).filter(ChargingSession.id == session_id).first()
+        if not session:
+            logger.warning(f"add_meter_value: session not found: {session_id}")
+            return
+        tenant_id = tenant_id_context.get() or session.tenant_id
+        if not tenant_id:
+            logger.warning(f"add_meter_value: missing tenant_id for session: {session_id}")
+            return
+        
         meter_value = MeterValue(
+            tenant_id=tenant_id,
             session_id=session_id,
             connector_id=connector_id,
             timestamp=datetime.now(timezone.utc),

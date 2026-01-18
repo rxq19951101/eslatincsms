@@ -5,6 +5,8 @@ import { getAccessToken, redirectToLogin } from '@/lib/auth';
 import { apiGet } from '@/lib/api';
 import { API_ENDPOINTS } from '@/lib/constants';
 import { AdminUser } from '@/types';
+import { useTenantStore } from '@/store/tenantStore';
+import { getTenantId } from '@/lib/tenant';
 
 /**
  * 认证 Hook
@@ -13,6 +15,7 @@ import { AdminUser } from '@/types';
 export function useAuth() {
   const router = useRouter();
   const { user, setUser, logout } = useAuthStore();
+  const { currentTenant, setCurrentTenant } = useTenantStore();
   const [isReady, setIsReady] = useState(false);
 
   // 页面启动时验证 token
@@ -59,6 +62,27 @@ export function useAuth() {
       verifyAuth();
     }
   }, []); // 只在组件挂载时执行一次
+
+  // 当 user 恢复/更新后，自动初始化当前租户（用于右上角展示）
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (!user) return;
+    // super_admin 允许不选租户
+    if (user.is_super_admin) {
+      if (currentTenant) setCurrentTenant(null);
+      return;
+    }
+    // 普通租户用户：优先按 getTenantId（URL/localStorage/default）选中
+    if (!currentTenant) {
+      const tid = getTenantId(user);
+      const selected =
+        (tid && user.tenant_list?.find((t) => t.id === tid)) ||
+        user.tenant_list?.find((t) => t.is_primary) ||
+        user.tenant_list?.[0] ||
+        null;
+      if (selected) setCurrentTenant(selected);
+    }
+  }, [user, currentTenant, setCurrentTenant]);
 
   // 认证状态不要依赖 store 里单独存的 isAuthenticated（刷新后不一定能正确恢复），而是实时基于 token + user 计算
   const isAuthenticated = typeof window !== 'undefined' && !!getAccessToken() && !!user;

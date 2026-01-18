@@ -27,6 +27,8 @@ def register_routes():
     
     routes_config = [
         ("chargers", "/chargers", "充电桩管理"),
+        ("sites", "/sites", "站点管理"),
+        ("geocoding", "/geocoding", "地理编码"),
         ("transactions", "/transactions", "事务管理"),
         ("orders", "/orders", "订单管理"),
         ("ocpp_control", "/ocpp", "OCPP控制"),

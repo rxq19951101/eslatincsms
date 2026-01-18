@@ -137,29 +137,27 @@ async def login(
         request=request
     )
     
-    # 保存 refresh token（需要从token中提取audience）
-    from app.core.auth import verify_token
+    # 保存 refresh token
+    # 说明：refresh_token 刚生成，没必要再做一次严格 verify（尤其是 jose 的 aud 处理在不同环境会导致误判）。
+    # 这里仿照 admin 登录实现：仅解析 payload 读取 jti/exp 后存表即可。
     from jose import jwt
     from app.core.config import get_settings
     settings = get_settings()
+
     try:
         unverified_payload = jwt.decode(
             refresh_token,
             settings.secret_key,
             algorithms=[settings.algorithm],
-            options={"verify_signature": False}
+            options={"verify_signature": False, "verify_aud": False}
         )
-        token_audience = unverified_payload.get("aud")
-        refresh_payload = verify_token(refresh_token, audience=token_audience)
-    except Exception:
-        refresh_payload = None
-    
-    if not refresh_payload:
-        raise HTTPException(status_code=500, detail="Failed to verify refresh token")
-    
-    refresh_jti = refresh_payload.get("jti")
-    from datetime import timedelta
-    refresh_expires_at = datetime.fromtimestamp(refresh_payload.get("exp"), tz=timezone.utc)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to parse refresh token: {e}")
+
+    refresh_jti = unverified_payload.get("jti")
+    refresh_expires_at = datetime.fromtimestamp(unverified_payload.get("exp"), tz=timezone.utc)
+    if not refresh_jti:
+        raise HTTPException(status_code=500, detail="Failed to parse refresh token jti")
     
     await save_refresh_token(
         jti=refresh_jti,

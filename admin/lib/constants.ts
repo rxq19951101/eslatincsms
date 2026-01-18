@@ -18,6 +18,13 @@ export const API_ENDPOINTS = {
   // 充电桩
   CHARGERS: '/api/v1/chargers',
   CHARGER_DETAIL: (id: string) => `/api/v1/chargers/${id}`,
+
+  // 站点（Site）
+  SITES: '/api/v1/sites',
+  SITE_DETAIL: (id: string) => `/api/v1/sites/${id}`,
+  SITE_BINDABLE_CHARGE_POINTS: (id: string) => `/api/v1/sites/${id}/bindable-charge-points`,
+  SITE_BIND_CHARGE_POINTS: (id: string) => `/api/v1/sites/${id}/bind-charge-points`,
+  SITE_CREATE_CHARGE_POINT: (id: string) => `/api/v1/sites/${id}/charge-points`,
   
   // 交易
   TRANSACTIONS: '/api/v1/transactions',
@@ -33,6 +40,16 @@ export const API_ENDPOINTS = {
   ALERT_DETAIL: (id: string) => `/api/v1/admin/alerts/${id}`,
   ALERT_ACKNOWLEDGE: (id: string) => `/api/v1/admin/alerts/${id}/acknowledge`,
   ALERT_RESOLVE: (id: string) => `/api/v1/admin/alerts/${id}/resolve`,
+
+  // 租户（仅超级管理员）
+  TENANTS: '/api/v1/admin/tenants',
+  TENANT_DETAIL: (id: string) => `/api/v1/admin/tenants/${id}`,
+
+  // 管理员用户
+  ADMIN_USERS: '/api/v1/admin/users',
+
+  // 租户成员
+  MEMBERSHIPS: '/api/v1/admin/memberships',
   
   // OCPP 控制
   OCPP_REMOTE_START: '/api/v1/ocpp_control/remote-start-transaction',

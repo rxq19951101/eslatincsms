@@ -263,19 +263,56 @@ charger_websockets: Dict[str, WebSocket] = {}
 # ---- 统一的 OCPP 消息处理函数（供 MQTT 和 WebSocket 使用）----
 async def handle_ocpp_message(charge_point_id: str, action: str, payload: Dict[str, Any], device_serial_number: Optional[str] = None, evse_id: int = 1) -> Dict[str, Any]:
     """统一的 OCPP 消息处理函数（使用新表结构）"""
+    # WebSocket/MQTT 的 OCPP 消息不经过 HTTP middleware，因此 tenant_id_context 可能为空。
+    # 但新表结构（如 device_events）强制 tenant_id NOT NULL；如果不补齐会导致 Boot 等消息处理失败。
+    #
+    # 这里在进入 service 层前，尝试根据 charge_point_id 反查 tenant_id 并设置到上下文，
+    # 以保证后续 DB 写入具备 tenant_id。
+    # 说明：此处用函数内 import，避免顶层循环依赖/导入顺序问题。
+    from app.database.base import tenant_id_context, SuperSessionLocal
+
+    prev_tenant_id = tenant_id_context.get()
+    did_set_tenant = False
+
+    if prev_tenant_id is None and DATABASE_AVAILABLE:
+        db = SuperSessionLocal()
+        try:
+            from app.database.models import ChargePoint as DbChargePoint
+
+            cp = db.query(DbChargePoint).filter(DbChargePoint.id == charge_point_id).first()
+            if cp and getattr(cp, "tenant_id", None):
+                tenant_id_context.set(cp.tenant_id)
+                did_set_tenant = True
+        except Exception as e:
+            logger.warning(f"[{charge_point_id}] 无法从DB解析tenant_id（将继续处理但可能写入失败）: {e}")
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
+
     if OCPP_SERVICE_AVAILABLE:
-        # 使用新的服务层处理
-        return await ocpp_message_handler.handle_message(
-            charge_point_id=charge_point_id,
-            action=action,
-            payload=payload,
-            device_serial_number=device_serial_number,
-            evse_id=evse_id
-        )
+        try:
+            # 使用新的服务层处理
+            return await ocpp_message_handler.handle_message(
+                charge_point_id=charge_point_id,
+                action=action,
+                payload=payload,
+                device_serial_number=device_serial_number,
+                evse_id=evse_id
+            )
+        finally:
+            # 避免泄漏到下一条消息/连接
+            if did_set_tenant:
+                tenant_id_context.set(None)
     else:
         # 降级到旧逻辑（如果服务不可用）
         logger.warning("OCPP服务不可用，使用降级处理")
-        return {"error": "Service unavailable"}
+        try:
+            return {"error": "Service unavailable"}
+        finally:
+            if did_set_tenant:
+                tenant_id_context.set(None)
 
 
 # ---- Helper function to send OCPP messages from CSMS to Charge Point ----

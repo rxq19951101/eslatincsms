@@ -15,6 +15,46 @@ export interface Tenant {
   is_primary: boolean;
 }
 
+// 租户管理（超级管理员视角）
+export interface TenantRecord {
+  id: string;
+  name: string;
+  domain?: string | null;
+  status: string;
+  subscription_plan: string;
+  max_charge_points: number;
+  max_users: number;
+  settings: Record<string, any>;
+  created_at: string;
+  updated_at: string;
+}
+
+// 管理员用户（列表/创建等接口的返回）
+export interface AdminUserRecord {
+  id: string;
+  username: string;
+  email: string;
+  full_name?: string | null;
+  is_active: boolean;
+  is_super_admin: boolean;
+  last_login_at?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+// 租户成员关系
+export interface MembershipRecord {
+  id: string;
+  tenant_id: string;
+  tenant_name: string;
+  admin_user_id: string;
+  admin_username: string;
+  is_primary: boolean;
+  status: string;
+  created_at: string;
+  updated_at: string;
+}
+
 // 认证相关类型
 export interface LoginRequest {
   username: string;
@@ -109,6 +149,60 @@ export interface EVSE {
   max_power_kw?: number;
   status: string;
   last_seen?: string;
+}
+
+// 站点管理类型（Admin Web）
+export interface SiteListItem {
+  id: string;
+  name: string;
+  address: string;
+  latitude: number;
+  longitude: number;
+  is_active: boolean;
+  operating_hours?: string | null;
+  domain?: string | null;
+  charge_points_count: number;
+  online_charge_points_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SiteDetailChargePoint {
+  id: string;
+  vendor?: string | null;
+  model?: string | null;
+  status: string;
+  last_seen?: string | null;
+  site_id: string;
+  site_name?: string | null;
+}
+
+export interface SiteDetail {
+  id: string;
+  name: string;
+  address: string;
+  latitude: number;
+  longitude: number;
+  is_active: boolean;
+  operating_hours?: string | null;
+  domain?: string | null;
+  price_per_kwh?: number | null;
+  charge_points: SiteDetailChargePoint[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface BindChargePointsRequest {
+  charge_point_ids: string[];
+  force_move?: boolean;
+}
+
+export interface CreateChargePointInSiteRequest {
+  id: string; // charge_point_id（硬件码）
+  vendor?: string;
+  model?: string;
+  connector_count?: number;
+  connector_type?: string;
 }
 
 // 交易相关类型

@@ -21,7 +21,7 @@ import { Button } from '@/components/ui/button';
 
 const navigation = [
   { name: '仪表板', href: '/', icon: LayoutDashboard },
-  { name: '充电桩管理', href: '/chargers', icon: Zap },
+  { name: '站点管理', href: '/sites', icon: Zap },
   { name: '交易管理', href: '/transactions', icon: FileText },
   { name: '统计报表', href: '/statistics', icon: BarChart3 },
   { name: '告警管理', href: '/alerts', icon: Bell },
