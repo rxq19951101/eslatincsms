@@ -3,6 +3,7 @@
 import { useMemo, useState } from 'react';
 import useSWR from 'swr';
 import { useRouter } from 'next/navigation';
+import dynamic from 'next/dynamic';
 import { apiGet, apiPost } from '@/lib/api';
 import { API_ENDPOINTS } from '@/lib/constants';
 import type { SiteListItem } from '@/types';
@@ -19,7 +20,17 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Building2, MapPin, Plus } from 'lucide-react';
-import AddressAutocomplete from '@/components/sites/AddressAutocomplete';
+import GooglePlacesAutocomplete from '@/components/sites/GooglePlacesAutocomplete';
+
+// 动态导入地图组件（避免 SSR 错误）
+const GoogleMapView = dynamic(() => import('@/components/map/GoogleMapView'), {
+  ssr: false,
+  loading: () => (
+    <div className="h-[400px] bg-slate-800/50 animate-pulse rounded-md flex items-center justify-center">
+      <span className="text-slate-400 text-sm">加载地图中...</span>
+    </div>
+  )
+});
 
 const fetcher = (url: string) => apiGet<SiteListItem[]>(url);
 
@@ -231,7 +242,7 @@ export default function SitesPage() {
             </div>
           )}
 
-          <div className="space-y-4">
+          <div className="space-y-4 max-h-[70vh] overflow-y-auto">
             <div className="space-y-2">
               <Label className="text-slate-300">站点名称 *</Label>
               <Input
@@ -240,20 +251,47 @@ export default function SitesPage() {
                 className="bg-slate-800 border-slate-600 text-slate-200"
               />
             </div>
+            
             <div className="space-y-2">
               <Label className="text-slate-300">地址 *</Label>
-              <AddressAutocomplete
+              <GooglePlacesAutocomplete
                 value={address}
                 onChange={setAddress}
-                onSelect={(s) => {
-                  setAddress(s.display_name);
-                  setLatitude(String(s.lat));
-                  setLongitude(String(s.lon));
+                onSelect={(result) => {
+                  setAddress(result.address);
+                  setLatitude(String(result.lat));
+                  setLongitude(String(result.lng));
                 }}
-                placeholder="输入地址后选择建议，将自动填充经纬度"
+                placeholder="搜索地址（自动填充经纬度）"
                 className="bg-slate-800 border-slate-600 text-slate-200"
               />
             </div>
+
+            <div className="space-y-2">
+              <Label className="text-slate-300">地图选点</Label>
+              <GoogleMapView
+                center={
+                  latitude && longitude && !isNaN(Number(latitude)) && !isNaN(Number(longitude))
+                    ? { lat: Number(latitude), lng: Number(longitude) }
+                    : { lat: 4.6097, lng: -74.0817 }
+                }
+                markers={
+                  latitude && longitude && !isNaN(Number(latitude)) && !isNaN(Number(longitude))
+                    ? [{ lat: Number(latitude), lng: Number(longitude), title: name || '新站点' }]
+                    : []
+                }
+                onClick={(lat, lng) => {
+                  setLatitude(String(lat));
+                  setLongitude(String(lng));
+                }}
+                height="400px"
+                zoom={13}
+              />
+              <p className="text-xs text-slate-400 mt-1">
+                提示：搜索地址后自动定位，也可点击地图任意位置更新坐标
+              </p>
+            </div>
+
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div className="space-y-2">
                 <Label className="text-slate-300">纬度 *</Label>
@@ -272,6 +310,7 @@ export default function SitesPage() {
                 />
               </div>
             </div>
+            
             <div className="space-y-2">
               <Label className="text-slate-300">营业时间（可选）</Label>
               <Input
