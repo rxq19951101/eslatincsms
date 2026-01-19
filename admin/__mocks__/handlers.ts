@@ -88,6 +88,39 @@ export const handlers = [
     });
   }),
 
+  http.get(`${API_BASE_URL}/api/v1/dashboard/sites`, ({ request }) => {
+    const url = new URL(request.url);
+    const days = Number(url.searchParams.get('days') || 7);
+    return HttpResponse.json([
+      {
+        site_id: 'site_mock_1',
+        site_name: 'Mock站点A',
+        address: 'Bogotá, Colombia',
+        charge_points_count: 8,
+        online_charge_points_count: 6,
+        faulted_charge_points: 1,
+        charging_charge_points: 2,
+        available_charge_points: 3,
+        orders_count: 42,
+        energy_kwh: 1234.56,
+        revenue: 3456.78,
+      },
+      {
+        site_id: 'site_mock_2',
+        site_name: 'Mock站点B',
+        address: 'Medellín, Colombia',
+        charge_points_count: 4,
+        online_charge_points_count: 3,
+        faulted_charge_points: 0,
+        charging_charge_points: 1,
+        available_charge_points: 2,
+        orders_count: 15,
+        energy_kwh: 456.78,
+        revenue: 987.65,
+      },
+    ]);
+  }),
+
   http.get(`${API_BASE_URL}/api/v1/chargers`, () => {
     return HttpResponse.json([
       {

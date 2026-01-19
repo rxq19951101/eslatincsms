@@ -116,6 +116,23 @@ export interface DashboardTrends {
   orders_trend: TrendDataPoint[];
 }
 
+export interface DashboardSiteItem {
+  site_id: string;
+  site_name: string;
+  address?: string | null;
+
+  charge_points_count: number;
+  online_charge_points_count: number;
+
+  faulted_charge_points: number;
+  charging_charge_points: number;
+  available_charge_points: number;
+
+  orders_count: number;
+  energy_kwh: number;
+  revenue: number;
+}
+
 // 充电桩相关类型
 export interface ChargePoint {
   id: string;

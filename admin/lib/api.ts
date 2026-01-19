@@ -99,8 +99,10 @@ export async function apiRequest<T = any>(
       throw new Error('Tenant ID required');
     }
 
-    // 如果不是 super_admin 且有 tenant_id，添加 X-Tenant-Id header
-    if (!isSuperAdmin && tenantId) {
+    // 只要有 tenant_id 就带上（包括 super_admin 场景）
+    // - super_admin 不带 tenant_id 表示“跨租户聚合/全局视角”
+    // - 但创建/写操作通常必须明确 tenant_id，因此 super_admin 也需要可选 tenant_id
+    if (tenantId) {
       requestHeaders['X-Tenant-Id'] = tenantId;
     }
   }

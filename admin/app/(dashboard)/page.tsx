@@ -1,19 +1,17 @@
 'use client';
 
-import { useEffect } from 'react';
+import { useMemo, useState } from 'react';
 import useSWR from 'swr';
 import { apiGet } from '@/lib/api';
 import { API_ENDPOINTS, REFRESH_INTERVAL } from '@/lib/constants';
-import { DashboardSummary, DashboardTrends } from '@/types';
+import { DashboardSiteItem, DashboardSummary, DashboardTrends, SiteListItem } from '@/types';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import {
   Zap,
-  Plug,
   DollarSign,
-  FileText,
   Users,
   AlertTriangle,
-  TrendingUp,
   Activity,
   Battery,
 } from 'lucide-react';
@@ -22,6 +20,15 @@ import { TrendChart } from '@/features/dashboard/TrendChart';
 const fetcher = (url: string) => apiGet(url);
 
 export default function DashboardPage() {
+  const days = 7;
+  const [selectedSiteId, setSelectedSiteId] = useState<string>('all');
+
+  // 站点列表（用于下拉选择）
+  const { data: sites } = useSWR<SiteListItem[]>(API_ENDPOINTS.SITES, fetcher, {
+    refreshInterval: REFRESH_INTERVAL,
+    revalidateOnFocus: true,
+  });
+
   // 获取 Dashboard 概览数据
   const { data: summary, error: summaryError, isLoading: summaryLoading } = useSWR<DashboardSummary>(
     API_ENDPOINTS.DASHBOARD_SUMMARY,
@@ -32,9 +39,9 @@ export default function DashboardPage() {
     }
   );
 
-  // 获取趋势数据
-  const { data: trends, error: trendsError, isLoading: trendsLoading } = useSWR<DashboardTrends>(
-    `${API_ENDPOINTS.DASHBOARD_TRENDS}?days=7`,
+  // 站点维度汇总（用于“站点运营概览”与站点视角 KPI）
+  const { data: siteStats, error: siteStatsError, isLoading: siteStatsLoading } = useSWR<DashboardSiteItem[]>(
+    `${API_ENDPOINTS.DASHBOARD_SITES}?days=${days}&limit=200`,
     fetcher,
     {
       refreshInterval: REFRESH_INTERVAL,
@@ -42,57 +49,145 @@ export default function DashboardPage() {
     }
   );
 
+  // 获取趋势数据
+  const trendsUrl =
+    selectedSiteId === 'all'
+      ? `${API_ENDPOINTS.DASHBOARD_TRENDS}?days=${days}`
+      : `${API_ENDPOINTS.DASHBOARD_TRENDS}?days=${days}&site_id=${encodeURIComponent(selectedSiteId)}`;
+
+  const { data: trends, error: trendsError, isLoading: trendsLoading } = useSWR<DashboardTrends>(
+    trendsUrl,
+    fetcher,
+    {
+      refreshInterval: REFRESH_INTERVAL,
+      revalidateOnFocus: true,
+    }
+  );
+
+  const selectedSite = useMemo(() => {
+    if (selectedSiteId === 'all') return null;
+    return (sites || []).find((s) => s.id === selectedSiteId) || null;
+  }, [selectedSiteId, sites]);
+
+  const selectedSiteStat = useMemo(() => {
+    if (selectedSiteId === 'all') return null;
+    return (siteStats || []).find((s) => s.site_id === selectedSiteId) || null;
+  }, [selectedSiteId, siteStats]);
+
+  const sortedSiteStats = useMemo(() => {
+    const list = siteStats || [];
+    return [...list].sort((a, b) => {
+      if ((b.revenue || 0) !== (a.revenue || 0)) return (b.revenue || 0) - (a.revenue || 0);
+      if ((b.energy_kwh || 0) !== (a.energy_kwh || 0)) return (b.energy_kwh || 0) - (a.energy_kwh || 0);
+      return (b.orders_count || 0) - (a.orders_count || 0);
+    });
+  }, [siteStats]);
+
   // KPI 卡片数据
-  const kpiCards = [
-    {
-      title: '充电桩总数',
-      value: summary?.total_charge_points || 0,
-      subtitle: `在线 ${summary?.online_charge_points || 0} | 离线 ${summary?.offline_charge_points || 0}`,
-      icon: Zap,
-      color: 'from-purple-600 to-purple-800',
-      iconBg: 'bg-purple-600/20',
-    },
-    {
-      title: '充电桩状态',
-      value: summary?.charging_charge_points || 0,
-      subtitle: `充电中 ${summary?.charging_charge_points || 0} | 可用 ${summary?.available_charge_points || 0}`,
-      icon: Activity,
-      color: 'from-blue-600 to-blue-800',
-      iconBg: 'bg-blue-600/20',
-    },
-    {
-      title: '今日数据',
-      value: summary?.today_orders || 0,
-      subtitle: `订单 ${summary?.today_orders || 0} | 充电量 ${summary?.today_energy_kwh?.toFixed(2) || 0} kWh`,
-      icon: Battery,
-      color: 'from-green-600 to-green-800',
-      iconBg: 'bg-green-600/20',
-    },
-    {
-      title: '今日收入',
-      value: `¥${summary?.today_revenue?.toFixed(2) || 0}`,
-      subtitle: `订单 ${summary?.today_orders || 0} 笔`,
-      icon: DollarSign,
-      color: 'from-yellow-600 to-yellow-800',
-      iconBg: 'bg-yellow-600/20',
-    },
-    {
-      title: '用户统计',
-      value: summary?.total_users || 0,
-      subtitle: `总用户 ${summary?.total_users || 0} | 今日活跃 ${summary?.active_users_today || 0}`,
-      icon: Users,
-      color: 'from-pink-600 to-pink-800',
-      iconBg: 'bg-pink-600/20',
-    },
-    {
-      title: '告警统计',
-      value: summary?.critical_alerts || 0,
-      subtitle: `严重 ${summary?.critical_alerts || 0} | 警告 ${summary?.warning_alerts || 0} | 信息 ${summary?.info_alerts || 0}`,
-      icon: AlertTriangle,
-      color: 'from-red-600 to-red-800',
-      iconBg: 'bg-red-600/20',
-    },
-  ];
+  const kpiCards = useMemo(() => {
+    const common = [
+      {
+        title: '用户统计',
+        value: summary?.total_users || 0,
+        subtitle: `总用户 ${summary?.total_users || 0} | 今日活跃 ${summary?.active_users_today || 0}`,
+        icon: Users,
+        color: 'from-pink-600 to-pink-800',
+        iconBg: 'bg-pink-600/20',
+      },
+      {
+        title: '告警统计',
+        value: summary?.critical_alerts || 0,
+        subtitle: `严重 ${summary?.critical_alerts || 0} | 警告 ${summary?.warning_alerts || 0} | 信息 ${summary?.info_alerts || 0}`,
+        icon: AlertTriangle,
+        color: 'from-red-600 to-red-800',
+        iconBg: 'bg-red-600/20',
+      },
+    ];
+
+    if (selectedSiteId === 'all') {
+      return [
+        {
+          title: '充电桩总数',
+          value: summary?.total_charge_points || 0,
+          subtitle: `在线 ${summary?.online_charge_points || 0} | 离线 ${summary?.offline_charge_points || 0}`,
+          icon: Zap,
+          color: 'from-purple-600 to-purple-800',
+          iconBg: 'bg-purple-600/20',
+        },
+        {
+          title: '充电桩状态',
+          value: summary?.charging_charge_points || 0,
+          subtitle: `充电中 ${summary?.charging_charge_points || 0} | 可用 ${summary?.available_charge_points || 0} | 故障 ${summary?.faulted_charge_points || 0}`,
+          icon: Activity,
+          color: 'from-blue-600 to-blue-800',
+          iconBg: 'bg-blue-600/20',
+        },
+        {
+          title: '今日数据',
+          value: summary?.today_orders || 0,
+          subtitle: `订单 ${summary?.today_orders || 0} | 充电量 ${summary?.today_energy_kwh?.toFixed(2) || 0} kWh`,
+          icon: Battery,
+          color: 'from-green-600 to-green-800',
+          iconBg: 'bg-green-600/20',
+        },
+        {
+          title: '今日收入',
+          value: `¥${summary?.today_revenue?.toFixed(2) || 0}`,
+          subtitle: `订单 ${summary?.today_orders || 0} 笔`,
+          icon: DollarSign,
+          color: 'from-yellow-600 to-yellow-800',
+          iconBg: 'bg-yellow-600/20',
+        },
+        ...common,
+      ];
+    }
+
+    const ss = selectedSiteStat;
+    const cpTotal = ss?.charge_points_count || 0;
+    const cpOnline = ss?.online_charge_points_count || 0;
+    const cpFaulted = ss?.faulted_charge_points || 0;
+    const cpCharging = ss?.charging_charge_points || 0;
+    const cpAvailable = ss?.available_charge_points || 0;
+    const orders = ss?.orders_count || 0;
+    const energy = ss?.energy_kwh || 0;
+    const revenue = ss?.revenue || 0;
+
+    return [
+      {
+        title: '站点充电桩总数',
+        value: cpTotal,
+        subtitle: `在线 ${cpOnline} | 总数 ${cpTotal}`,
+        icon: Zap,
+        color: 'from-purple-600 to-purple-800',
+        iconBg: 'bg-purple-600/20',
+      },
+      {
+        title: '站点健康',
+        value: cpFaulted,
+        subtitle: `故障 ${cpFaulted} | 充电中 ${cpCharging} | 可用 ${cpAvailable}`,
+        icon: Activity,
+        color: 'from-blue-600 to-blue-800',
+        iconBg: 'bg-blue-600/20',
+      },
+      {
+        title: `近${days}天订单`,
+        value: orders,
+        subtitle: `充电量 ${energy.toFixed(2)} kWh`,
+        icon: Battery,
+        color: 'from-green-600 to-green-800',
+        iconBg: 'bg-green-600/20',
+      },
+      {
+        title: `近${days}天收入`,
+        value: `¥${revenue.toFixed(2)}`,
+        subtitle: `订单 ${orders} 笔`,
+        icon: DollarSign,
+        color: 'from-yellow-600 to-yellow-800',
+        iconBg: 'bg-yellow-600/20',
+      },
+      ...common,
+    ];
+  }, [days, selectedSiteId, selectedSiteStat, summary]);
 
   if (summaryLoading) {
     return (
@@ -113,9 +208,31 @@ export default function DashboardPage() {
   return (
     <div className="space-y-6">
       {/* Page Header */}
-      <div>
-        <h1 className="text-3xl font-bold text-white">仪表板</h1>
-        <p className="text-slate-400 mt-1">充电桩运营平台概览</p>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-3xl font-bold text-white">仪表板</h1>
+          <p className="text-slate-400 mt-1">
+            {selectedSiteId === 'all'
+              ? '租户汇总 + 站点维度运营分析'
+              : `站点视角：${selectedSite?.name || selectedSiteId}`}
+          </p>
+        </div>
+
+        <div className="w-[280px]">
+          <Select value={selectedSiteId} onValueChange={setSelectedSiteId}>
+            <SelectTrigger className="bg-slate-800/50 border-slate-700">
+              <SelectValue placeholder="选择站点" />
+            </SelectTrigger>
+            <SelectContent className="bg-slate-800 border-slate-700">
+              <SelectItem value="all">全部站点（租户汇总）</SelectItem>
+              {(sites || []).map((s) => (
+                <SelectItem key={s.id} value={s.id}>
+                  {s.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
       </div>
 
       {/* KPI Cards Grid */}
@@ -142,13 +259,74 @@ export default function DashboardPage() {
         })}
       </div>
 
+      {/* Site Analytics Table */}
+      <Card className="bg-slate-800/80 backdrop-blur-sm border-slate-700 shadow-lg">
+        <CardHeader>
+          <CardTitle className="text-white">站点运营概览（近 {days} 天）</CardTitle>
+          <p className="text-sm text-slate-400">按站点拆分：在线/故障、订单、充电量、收入（点击行可切换站点视角）</p>
+        </CardHeader>
+        <CardContent>
+          {siteStatsLoading ? (
+            <div className="text-slate-400">加载中...</div>
+          ) : siteStatsError ? (
+            <div className="text-red-400">加载失败</div>
+          ) : sortedSiteStats.length > 0 ? (
+            <div className="overflow-x-auto">
+              <table className="w-full">
+                <thead>
+                  <tr className="border-b border-slate-700">
+                    <th className="text-left py-3 px-4 text-slate-400 font-medium">站点</th>
+                    <th className="text-left py-3 px-4 text-slate-400 font-medium">在线/总桩</th>
+                    <th className="text-left py-3 px-4 text-slate-400 font-medium">故障</th>
+                    <th className="text-left py-3 px-4 text-slate-400 font-medium">订单</th>
+                    <th className="text-left py-3 px-4 text-slate-400 font-medium">充电量</th>
+                    <th className="text-left py-3 px-4 text-slate-400 font-medium">收入</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {sortedSiteStats.slice(0, 50).map((s) => {
+                    const isSelected = selectedSiteId !== 'all' && s.site_id === selectedSiteId;
+                    return (
+                      <tr
+                        key={s.site_id}
+                        className={[
+                          'border-b border-slate-700/50 hover:bg-slate-700/30 cursor-pointer',
+                          isSelected ? 'bg-slate-700/30' : '',
+                        ].join(' ')}
+                        onClick={() => setSelectedSiteId(s.site_id)}
+                      >
+                        <td className="py-3 px-4">
+                          <div className="text-white font-medium">{s.site_name}</div>
+                          <div className="text-xs text-slate-500 font-mono">{s.site_id}</div>
+                        </td>
+                        <td className="py-3 px-4 text-slate-300">
+                          {s.online_charge_points_count}/{s.charge_points_count}
+                        </td>
+                        <td className="py-3 px-4 text-slate-300">{s.faulted_charge_points}</td>
+                        <td className="py-3 px-4 text-slate-300">{s.orders_count}</td>
+                        <td className="py-3 px-4 text-slate-300">{s.energy_kwh.toFixed(2)} kWh</td>
+                        <td className="py-3 px-4 text-slate-300">¥{s.revenue.toFixed(2)}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <div className="text-slate-400">暂无数据</div>
+          )}
+        </CardContent>
+      </Card>
+
       {/* Charts Section */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Energy Trend Chart */}
         <Card className="bg-slate-800/80 backdrop-blur-sm border-slate-700 shadow-lg">
           <CardHeader>
             <CardTitle className="text-white">充电量趋势</CardTitle>
-            <p className="text-sm text-slate-400">过去 7 天充电量（kWh）</p>
+            <p className="text-sm text-slate-400">
+              过去 {days} 天充电量（kWh）{selectedSiteId === 'all' ? '（租户汇总）' : `（${selectedSite?.name || selectedSiteId}）`}
+            </p>
           </CardHeader>
           <CardContent>
             {trendsLoading ? (
@@ -180,7 +358,9 @@ export default function DashboardPage() {
         <Card className="bg-slate-800/80 backdrop-blur-sm border-slate-700 shadow-lg">
           <CardHeader>
             <CardTitle className="text-white">收入趋势</CardTitle>
-            <p className="text-sm text-slate-400">过去 7 天收入（¥）</p>
+            <p className="text-sm text-slate-400">
+              过去 {days} 天收入（¥）{selectedSiteId === 'all' ? '（租户汇总）' : `（${selectedSite?.name || selectedSiteId}）`}
+            </p>
           </CardHeader>
           <CardContent>
             {trendsLoading ? (
@@ -213,7 +393,9 @@ export default function DashboardPage() {
       <Card className="bg-slate-800/80 backdrop-blur-sm border-slate-700 shadow-lg">
         <CardHeader>
           <CardTitle className="text-white">订单趋势</CardTitle>
-          <p className="text-sm text-slate-400">过去 7 天订单数量</p>
+          <p className="text-sm text-slate-400">
+            过去 {days} 天订单数量{selectedSiteId === 'all' ? '（租户汇总）' : `（${selectedSite?.name || selectedSiteId}）`}
+          </p>
         </CardHeader>
         <CardContent>
           {trendsLoading ? (

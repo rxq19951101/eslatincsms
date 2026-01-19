@@ -3,7 +3,7 @@
 # 提供运营数据总览和关键指标
 #
 
-from typing import Optional, List
+from typing import Optional, List, Dict, Any, Tuple
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -67,6 +67,25 @@ class DashboardTrendsResponse(BaseModel):
     energy_trend: List[TrendDataPoint]  # 充电量趋势
     revenue_trend: List[TrendDataPoint]  # 收入趋势
     orders_trend: List[TrendDataPoint]  # 订单趋势
+
+
+class DashboardSiteItem(BaseModel):
+    """站点维度运营汇总（用于仪表盘站点分析）"""
+
+    site_id: str
+    site_name: str
+    address: Optional[str] = None
+
+    charge_points_count: int
+    online_charge_points_count: int
+
+    faulted_charge_points: int
+    charging_charge_points: int
+    available_charge_points: int
+
+    orders_count: int
+    energy_kwh: float
+    revenue: float
 
 
 # ==================== 仪表板端点 ====================
@@ -169,10 +188,17 @@ async def get_dashboard_summary(
     today_revenue = sum(float(inv.total_amount) for inv in today_invoices)
     
     # 用户统计
-    total_users = user_query.count()
-    active_users_today = user_query.filter(
-        EndUser.last_login_at >= today_start
-    ).count()
+    # 注意：某些部署的 end_users 表可能缺少模型中的部分字段（例如 password_hash）。
+    # 使用 count(EndUser.id) 避免 ORM 在子查询中选择所有列导致 UndefinedColumn。
+    total_users_q = db.query(func.count(EndUser.id))
+    if tenant_id and not current_user.is_super_admin:
+        total_users_q = total_users_q.filter(EndUser.tenant_id == tenant_id)
+    total_users = int(total_users_q.scalar() or 0)
+
+    active_users_today_q = db.query(func.count(EndUser.id)).filter(EndUser.last_login_at >= today_start)
+    if tenant_id and not current_user.is_super_admin:
+        active_users_today_q = active_users_today_q.filter(EndUser.tenant_id == tenant_id)
+    active_users_today = int(active_users_today_q.scalar() or 0)
     
     # 告警统计
     critical_alerts = alert_query.filter(
@@ -220,6 +246,7 @@ async def get_dashboard_summary(
 async def get_dashboard_trends(
     request: Request,
     days: int = Query(7, description="天数", ge=1, le=30),
+    site_id: Optional[str] = Query(None, description="站点ID（可选）：按站点过滤趋势数据"),
     current_user = Depends(get_current_admin_user),
     db: Session = Depends(get_db)
 ):
@@ -258,6 +285,18 @@ async def get_dashboard_trends(
     order_query = db.query(Order)
     if tenant_id and not current_user.is_super_admin:
         order_query = order_query.filter(Order.tenant_id == tenant_id)
+
+    # 站点过滤：Invoice 通过 session -> charge_point -> site 关联；Order 通过 charge_point_id -> site 关联
+    if site_id:
+        invoice_query = (
+            invoice_query.join(ChargingSession, ChargingSession.id == Invoice.session_id)
+            .join(ChargePoint, ChargePoint.id == ChargingSession.charge_point_id)
+            .filter(ChargePoint.site_id == site_id)
+        )
+        order_query = (
+            order_query.join(ChargePoint, ChargePoint.id == Order.charge_point_id)
+            .filter(ChargePoint.site_id == site_id)
+        )
     
     # 按日期聚合数据
     energy_trend = []
@@ -299,3 +338,181 @@ async def get_dashboard_trends(
         revenue_trend=revenue_trend,
         orders_trend=orders_trend
     )
+
+
+@router.get("/sites", response_model=List[DashboardSiteItem], summary="获取站点维度运营汇总")
+async def get_dashboard_sites(
+    request: Request,
+    days: int = Query(7, description="统计窗口天数（近 N 天）", ge=1, le=30),
+    limit: int = Query(50, description="返回站点数量上限", ge=1, le=200),
+    current_user=Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+) -> List[DashboardSiteItem]:
+    """
+    站点维度汇总（用于 Admin 仪表盘按站点分析）：
+    - 站点下充电桩数量（charge_points_count）
+    - 在线充电桩数量（online_charge_points_count，近 30 秒有心跳）
+    - 站点健康：Faulted/Charging/Available（按 EVSEStatus 统计 distinct charge_point）
+    - 近 N 天：订单数、充电量(kWh)、收入
+    """
+    # #region agent log
+    x_tenant_id_header = request.headers.get("X-Tenant-Id") or request.headers.get("x-tenant-id")
+    logger.info(
+        f"[DEBUG] /dashboard/sites ENTRY - method={request.method}, path={request.url.path}, "
+        f"X-Tenant-Id={x_tenant_id_header}, current_user_id={current_user.id if current_user else None}, "
+        f"is_super_admin={current_user.is_super_admin if current_user else None}, days={days}, limit={limit}"
+    )
+    # #endregion
+
+    try:
+        tenant_id = tenant_id_context.get()
+    except LookupError:
+        tenant_id = None
+
+    now = datetime.now(timezone.utc)
+    start_date = (now - timedelta(days=days)).replace(hour=0, minute=0, second=0, microsecond=0)
+    online_threshold = now - timedelta(seconds=30)
+
+    # 站点基础查询
+    site_q = db.query(Site).filter(Site.is_active == True)  # noqa: E712
+    if tenant_id and not current_user.is_super_admin:
+        site_q = site_q.filter(Site.tenant_id == tenant_id)
+
+    # 站点下充电桩数量
+    cp_count_sq = (
+        db.query(
+            ChargePoint.site_id.label("site_id"),
+            func.count(ChargePoint.id).label("cp_count"),
+        )
+        .filter(ChargePoint.is_active == True)  # noqa: E712
+        .group_by(ChargePoint.site_id)
+        .subquery()
+    )
+
+    # 在线充电桩数量（近 30 秒心跳）
+    online_cp_sq = (
+        db.query(
+            ChargePoint.site_id.label("site_id"),
+            func.count(func.distinct(ChargePoint.id)).label("online_cp_count"),
+        )
+        .join(EVSEStatus, EVSEStatus.charge_point_id == ChargePoint.id)
+        .filter(EVSEStatus.last_seen >= online_threshold)
+        .group_by(ChargePoint.site_id)
+        .subquery()
+    )
+
+    # 健康状态：Faulted / Charging / Available（distinct charge_point）
+    faulted_sq = (
+        db.query(
+            ChargePoint.site_id.label("site_id"),
+            func.count(func.distinct(ChargePoint.id)).label("faulted_cp_count"),
+        )
+        .join(EVSEStatus, EVSEStatus.charge_point_id == ChargePoint.id)
+        .filter(EVSEStatus.last_seen >= online_threshold, EVSEStatus.status == "Faulted")
+        .group_by(ChargePoint.site_id)
+        .subquery()
+    )
+    charging_sq = (
+        db.query(
+            ChargePoint.site_id.label("site_id"),
+            func.count(func.distinct(ChargePoint.id)).label("charging_cp_count"),
+        )
+        .join(EVSEStatus, EVSEStatus.charge_point_id == ChargePoint.id)
+        .filter(EVSEStatus.last_seen >= online_threshold, EVSEStatus.status == "Charging")
+        .group_by(ChargePoint.site_id)
+        .subquery()
+    )
+    available_sq = (
+        db.query(
+            ChargePoint.site_id.label("site_id"),
+            func.count(func.distinct(ChargePoint.id)).label("available_cp_count"),
+        )
+        .join(EVSEStatus, EVSEStatus.charge_point_id == ChargePoint.id)
+        .filter(EVSEStatus.last_seen >= online_threshold, EVSEStatus.status == "Available")
+        .group_by(ChargePoint.site_id)
+        .subquery()
+    )
+
+    # 近 N 天订单数（按站点聚合）
+    orders_sq = (
+        db.query(
+            ChargePoint.site_id.label("site_id"),
+            func.count(Order.id).label("orders_count"),
+        )
+        .join(ChargePoint, ChargePoint.id == Order.charge_point_id)
+        .filter(Order.created_at >= start_date)
+        .group_by(ChargePoint.site_id)
+        .subquery()
+    )
+
+    # 近 N 天电量/收入（Invoice -> Session -> ChargePoint -> Site）
+    invoice_sq = (
+        db.query(
+            ChargePoint.site_id.label("site_id"),
+            func.coalesce(func.sum(Invoice.energy_kwh), 0).label("energy_kwh"),
+            func.coalesce(func.sum(Invoice.total_amount), 0).label("revenue"),
+        )
+        .join(ChargingSession, ChargingSession.id == Invoice.session_id)
+        .join(ChargePoint, ChargePoint.id == ChargingSession.charge_point_id)
+        .filter(Invoice.issued_at >= start_date)
+        .group_by(ChargePoint.site_id)
+        .subquery()
+    )
+
+    rows = (
+        site_q.outerjoin(cp_count_sq, cp_count_sq.c.site_id == Site.id)
+        .outerjoin(online_cp_sq, online_cp_sq.c.site_id == Site.id)
+        .outerjoin(faulted_sq, faulted_sq.c.site_id == Site.id)
+        .outerjoin(charging_sq, charging_sq.c.site_id == Site.id)
+        .outerjoin(available_sq, available_sq.c.site_id == Site.id)
+        .outerjoin(orders_sq, orders_sq.c.site_id == Site.id)
+        .outerjoin(invoice_sq, invoice_sq.c.site_id == Site.id)
+        .with_entities(
+            Site,
+            cp_count_sq.c.cp_count,
+            online_cp_sq.c.online_cp_count,
+            faulted_sq.c.faulted_cp_count,
+            charging_sq.c.charging_cp_count,
+            available_sq.c.available_cp_count,
+            orders_sq.c.orders_count,
+            invoice_sq.c.energy_kwh,
+            invoice_sq.c.revenue,
+        )
+        .order_by(invoice_sq.c.revenue.desc().nullslast(), Site.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+
+    result: List[DashboardSiteItem] = []
+    for (
+        site,
+        cp_count,
+        online_cp_count,
+        faulted_cp_count,
+        charging_cp_count,
+        available_cp_count,
+        orders_count,
+        energy_kwh,
+        revenue,
+    ) in rows:
+        # Numeric/Decimal -> float
+        energy_f = float(energy_kwh or 0)
+        revenue_f = float(revenue or 0)
+
+        result.append(
+            DashboardSiteItem(
+                site_id=site.id,
+                site_name=site.name,
+                address=site.address,
+                charge_points_count=int(cp_count or 0),
+                online_charge_points_count=int(online_cp_count or 0),
+                faulted_charge_points=int(faulted_cp_count or 0),
+                charging_charge_points=int(charging_cp_count or 0),
+                available_charge_points=int(available_cp_count or 0),
+                orders_count=int(orders_count or 0),
+                energy_kwh=round(energy_f, 3),
+                revenue=round(revenue_f, 2),
+            )
+        )
+
+    return result

@@ -11,6 +11,8 @@ import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
 import AddressAutocomplete from '@/components/sites/AddressAutocomplete';
+import GoogleMapView from '@/components/map/GoogleMapView';
+import { hasPermission, usePermissions } from '@/hooks/usePermissions';
 import {
   Dialog,
   DialogContent,
@@ -20,7 +22,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Badge } from '@/components/ui/badge';
-import { ArrowLeft, Link2, Plus, Save } from 'lucide-react';
+import { ArrowLeft, Link2, Pencil, Plus, Save } from 'lucide-react';
 
 const fetcher = (url: string) => apiGet<SiteDetail>(url);
 
@@ -50,6 +52,13 @@ export default function SiteDetailPage() {
     { refreshInterval: 30000 }
   );
 
+  const { permissions } = usePermissions();
+  const canEditSite = useMemo(() => hasPermission(permissions, 'sites.edit'), [permissions]);
+  const canEditTariff = useMemo(() => hasPermission(permissions, 'tariffs.edit'), [permissions]);
+  const canEditAny = canEditSite || canEditTariff;
+
+  const [isEditing, setIsEditing] = useState(false);
+
   // 编辑表单（懒初始化）
   const [initialized, setInitialized] = useState(false);
   const [editName, setEditName] = useState('');
@@ -57,8 +66,11 @@ export default function SiteDetailPage() {
   const [editLat, setEditLat] = useState('');
   const [editLng, setEditLng] = useState('');
   const [editHours, setEditHours] = useState('');
+  const [editPrice, setEditPrice] = useState<string>('');
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [pricingSaving, setPricingSaving] = useState(false);
+  const [pricingError, setPricingError] = useState<string | null>(null);
 
   // 绑定弹窗
   const [bindOpen, setBindOpen] = useState(false);
@@ -78,6 +90,13 @@ export default function SiteDetailPage() {
   const [cpConnectorCount, setCpConnectorCount] = useState('1');
   const [cpConnectorType, setCpConnectorType] = useState('Type2');
 
+  // 覆盖价弹窗（桩级）
+  const [overrideOpen, setOverrideOpen] = useState(false);
+  const [overrideCpId, setOverrideCpId] = useState<string | null>(null);
+  const [overridePrice, setOverridePrice] = useState<string>('');
+  const [overrideSaving, setOverrideSaving] = useState(false);
+  const [overrideError, setOverrideError] = useState<string | null>(null);
+
   // 初始化编辑表单（仅一次，避免覆盖用户输入）
   useEffect(() => {
     if (!site || initialized) return;
@@ -86,11 +105,16 @@ export default function SiteDetailPage() {
     setEditLat(String(site.latitude));
     setEditLng(String(site.longitude));
     setEditHours(site.operating_hours || '');
+    setEditPrice(site.price_per_kwh != null ? String(site.price_per_kwh) : '');
     setInitialized(true);
   }, [site, initialized]);
 
   const onSave = async () => {
     if (!site) return;
+    if (!canEditSite) {
+      setSaveError('无权限编辑站点信息');
+      return;
+    }
     setSaveError(null);
     const lat = Number(editLat);
     const lng = Number(editLng);
@@ -120,8 +144,54 @@ export default function SiteDetailPage() {
     }
   };
 
+  const onSavePricing = async () => {
+    if (!site) return;
+    if (!canEditTariff) {
+      setPricingError('无权限编辑定价');
+      return;
+    }
+    setPricingError(null);
+    const price = Number(editPrice);
+    if (!Number.isFinite(price) || price <= 0) {
+      setPricingError('请填写正确的电价（>0）');
+      return;
+    }
+    setPricingSaving(true);
+    try {
+      await apiPut(API_ENDPOINTS.SITE_PRICING(site.id), {
+        base_price_per_kwh: price,
+        service_fee: 0,
+      });
+      mutate();
+      alert('站点定价已保存');
+    } catch (e) {
+      setPricingError(e instanceof Error ? e.message : '保存定价失败');
+    } finally {
+      setPricingSaving(false);
+    }
+  };
+
+  const mapCenter = useMemo(() => {
+    // 优先使用编辑表单中的坐标
+    const lat = Number(editLat);
+    const lng = Number(editLng);
+    if (Number.isFinite(lat) && Number.isFinite(lng)) {
+      return { lat, lng };
+    }
+    // fallback：用站点原始坐标
+    if (site && Number.isFinite(site.latitude) && Number.isFinite(site.longitude)) {
+      return { lat: site.latitude, lng: site.longitude };
+    }
+    // 如果都没有，返回默认坐标（波哥大）
+    return { lat: 4.6097, lng: -74.0817 };
+  }, [editLat, editLng, site]);
+
   const openBindDialog = async () => {
     if (!site) return;
+    if (!canEditAny) {
+      alert('无权限执行绑定操作');
+      return;
+    }
     setBindOpen(true);
     setBindLoading(true);
     setBindError(null);
@@ -159,6 +229,10 @@ export default function SiteDetailPage() {
   };
 
   const openCreateDialog = () => {
+    if (!canEditAny) {
+      alert('无权限添加充电桩');
+      return;
+    }
     setCreateError(null);
     setCpId('');
     setCpVendor('');
@@ -238,7 +312,17 @@ export default function SiteDetailPage() {
         </div>
         <div className="flex gap-2">
           <Button
+            onClick={() => setIsEditing((v) => !v)}
+            disabled={!canEditAny}
+            className="bg-slate-700/50 border border-slate-600 text-slate-200 hover:bg-slate-600"
+            title={!canEditAny ? '无权限编辑' : undefined}
+          >
+            <Pencil className="h-4 w-4 mr-2" />
+            {isEditing ? '退出编辑' : '编辑'}
+          </Button>
+          <Button
             onClick={openCreateDialog}
+            disabled={!canEditAny}
             className="bg-slate-700/50 border border-slate-600 text-slate-200 hover:bg-slate-600"
           >
             <Plus className="h-4 w-4 mr-2" />
@@ -246,6 +330,7 @@ export default function SiteDetailPage() {
           </Button>
           <Button
             onClick={openBindDialog}
+            disabled={!canEditAny}
             className="bg-slate-700/50 border border-slate-600 text-slate-200 hover:bg-slate-600"
           >
             <Link2 className="h-4 w-4 mr-2" />
@@ -253,7 +338,7 @@ export default function SiteDetailPage() {
           </Button>
           <Button
             onClick={onSave}
-            disabled={saving}
+            disabled={saving || !isEditing || !canEditSite}
             className="bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-700 hover:to-blue-700"
           >
             <Save className="h-4 w-4 mr-2" />
@@ -278,6 +363,7 @@ export default function SiteDetailPage() {
               <Input
                 value={editName}
                 onChange={(e) => setEditName(e.target.value)}
+                disabled={!isEditing || !canEditSite}
                 className="bg-slate-700/50 border-slate-600 text-slate-200"
               />
             </div>
@@ -287,6 +373,7 @@ export default function SiteDetailPage() {
                 value={editHours}
                 onChange={(e) => setEditHours(e.target.value)}
                 placeholder="例如：00:00-24:00"
+                disabled={!isEditing || !canEditSite}
                 className="bg-slate-700/50 border-slate-600 text-slate-200"
               />
             </div>
@@ -301,6 +388,7 @@ export default function SiteDetailPage() {
                   setEditLng(String(s.lon));
                 }}
                 placeholder="输入地址后选择建议，将自动填充经纬度"
+                disabled={!isEditing || !canEditSite}
                 className="bg-slate-700/50 border-slate-600 text-slate-200"
               />
             </div>
@@ -309,6 +397,7 @@ export default function SiteDetailPage() {
               <Input
                 value={editLat}
                 onChange={(e) => setEditLat(e.target.value)}
+                disabled={!isEditing || !canEditSite}
                 className="bg-slate-700/50 border-slate-600 text-slate-200"
               />
             </div>
@@ -317,13 +406,70 @@ export default function SiteDetailPage() {
               <Input
                 value={editLng}
                 onChange={(e) => setEditLng(e.target.value)}
+                disabled={!isEditing || !canEditSite}
                 className="bg-slate-700/50 border-slate-600 text-slate-200"
               />
             </div>
+            <div className="space-y-2 md:col-span-2">
+              <Label className="text-slate-300">站点定价（每kWh）</Label>
+              <div className="flex gap-2">
+                <Input
+                  value={editPrice}
+                  onChange={(e) => setEditPrice(e.target.value)}
+                  placeholder={site.price_per_kwh != null ? String(site.price_per_kwh) : '未设置'}
+                  disabled={!isEditing || !canEditTariff}
+                  className="bg-slate-700/50 border-slate-600 text-slate-200"
+                />
+                <Button
+                  onClick={onSavePricing}
+                  disabled={!isEditing || !canEditTariff || pricingSaving}
+                  className="bg-slate-700/50 border border-slate-600 text-slate-200 hover:bg-slate-600"
+                >
+                  {pricingSaving ? '保存中...' : '保存定价'}
+                </Button>
+              </div>
+              {!!pricingError && <div className="text-sm text-red-300">{pricingError}</div>}
+            </div>
           </div>
+          <div className="text-sm text-slate-400">当前生效电价：{site.price_per_kwh != null ? site.price_per_kwh : '未设置'}</div>
+        </CardContent>
+      </Card>
+
+      <Card className="bg-slate-800/80 backdrop-blur-sm border-slate-700">
+        <CardHeader>
+          <CardTitle className="text-white">地图</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3">
           <div className="text-sm text-slate-400">
-            站点定价（price_per_kwh）：{site.price_per_kwh != null ? site.price_per_kwh : '未设置'}
+            {isEditing && canEditSite
+              ? '点击地图可自动填充经纬度（lat/lng），用于站点定位。'
+              : '地图展示站点位置，点击"编辑"按钮后可修改位置。'}
           </div>
+          <GoogleMapView
+            height="320px"
+            zoom={15}
+            center={mapCenter}
+            markers={
+              mapCenter
+                ? [
+                    {
+                      lat: mapCenter.lat,
+                      lng: mapCenter.lng,
+                      title: site?.name || '站点',
+                    },
+                  ]
+                : []
+            }
+            onClick={
+              isEditing && canEditSite
+                ? (lat, lng) => {
+                    setEditLat(String(lat));
+                    setEditLng(String(lng));
+                  }
+                : undefined
+            }
+            disableInteraction={!isEditing || !canEditSite}
+          />
         </CardContent>
       </Card>
 
@@ -341,12 +487,21 @@ export default function SiteDetailPage() {
                     <th className="text-left py-3 px-4 text-slate-400 font-medium">厂商/型号</th>
                     <th className="text-left py-3 px-4 text-slate-400 font-medium">状态</th>
                     <th className="text-left py-3 px-4 text-slate-400 font-medium">最后在线</th>
+                    <th className="text-right py-3 px-4 text-slate-400 font-medium">操作</th>
                   </tr>
                 </thead>
                 <tbody>
                   {site.charge_points.map((cp) => (
                     <tr key={cp.id} className="border-b border-slate-700/50 hover:bg-slate-700/30">
-                      <td className="py-3 px-4 text-white font-mono text-sm">{cp.id}</td>
+                      <td className="py-3 px-4">
+                        <button
+                          onClick={() => router.push(`/chargers/${encodeURIComponent(cp.id)}`)}
+                          className="text-white font-mono text-sm hover:text-purple-400 hover:underline transition-colors cursor-pointer"
+                          title="点击查看详情"
+                        >
+                          {cp.id}
+                        </button>
+                      </td>
                       <td className="py-3 px-4 text-slate-300">
                         {(cp.vendor || 'Unknown') + ' ' + (cp.model || '')}
                       </td>
@@ -355,6 +510,35 @@ export default function SiteDetailPage() {
                       </td>
                       <td className="py-3 px-4 text-slate-300">
                         {cp.last_seen ? new Date(cp.last_seen).toLocaleString('zh-CN') : '-'}
+                      </td>
+                      <td className="py-3 px-4">
+                        <div className="flex items-center justify-end gap-2 flex-wrap">
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={() => router.push(`/chargers/${encodeURIComponent(cp.id)}`)}
+                            className="bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-700 hover:to-blue-700 text-white border-0"
+                          >
+                            查看详情
+                          </Button>
+                          {isEditing && canEditTariff && (
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              onClick={() => {
+                                setOverrideCpId(cp.id);
+                                setOverridePrice('');
+                                setOverrideError(null);
+                                setOverrideOpen(true);
+                              }}
+                              className="bg-slate-800 border-slate-600 text-slate-200 hover:bg-slate-600"
+                            >
+                              覆盖定价
+                            </Button>
+                          )}
+                        </div>
                       </td>
                     </tr>
                   ))}
@@ -366,6 +550,83 @@ export default function SiteDetailPage() {
           )}
         </CardContent>
       </Card>
+
+      <Dialog open={overrideOpen} onOpenChange={setOverrideOpen}>
+        <DialogContent className="bg-slate-900 border-slate-700 text-slate-100 max-w-md">
+          <DialogHeader>
+            <DialogTitle className="text-white">设置充电桩覆盖定价</DialogTitle>
+            <DialogDescription className="text-slate-400">
+              桩级覆盖价优先于站点默认价（用于少数桩特殊价格）。
+            </DialogDescription>
+          </DialogHeader>
+
+          {!!overrideError && (
+            <div className="p-3 text-sm text-red-300 bg-red-500/10 border border-red-500/20 rounded-md">
+              {overrideError}
+            </div>
+          )}
+
+          <div className="space-y-2">
+            <Label className="text-slate-300">充电桩ID</Label>
+            <div className="text-slate-200 font-mono text-sm">{overrideCpId || '-'}</div>
+          </div>
+          <div className="space-y-2">
+            <Label className="text-slate-300">覆盖电价（每kWh）</Label>
+            <Input
+              value={overridePrice}
+              onChange={(e) => setOverridePrice(e.target.value)}
+              placeholder="例如：1.50"
+              disabled={!canEditTariff || overrideSaving}
+              className="bg-slate-800 border-slate-600 text-slate-200"
+            />
+          </div>
+
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setOverrideOpen(false)}
+              className="bg-slate-800 border-slate-600 text-slate-200"
+              disabled={overrideSaving}
+            >
+              取消
+            </Button>
+            <Button
+              type="button"
+              onClick={async () => {
+                if (!overrideCpId) return;
+                if (!canEditTariff) {
+                  setOverrideError('无权限编辑定价');
+                  return;
+                }
+                const price = Number(overridePrice);
+                if (!Number.isFinite(price) || price <= 0) {
+                  setOverrideError('请填写正确的电价（>0）');
+                  return;
+                }
+                setOverrideError(null);
+                setOverrideSaving(true);
+                try {
+                  await apiPut(API_ENDPOINTS.CHARGER_PRICING(overrideCpId), {
+                    base_price_per_kwh: price,
+                    service_fee: 0,
+                  });
+                  setOverrideOpen(false);
+                  alert('覆盖定价已保存');
+                } catch (e) {
+                  setOverrideError(e instanceof Error ? e.message : '保存失败');
+                } finally {
+                  setOverrideSaving(false);
+                }
+              }}
+              className="bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-700 hover:to-blue-700"
+              disabled={!canEditTariff || overrideSaving || !overrideCpId}
+            >
+              {overrideSaving ? '保存中...' : '保存'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={bindOpen} onOpenChange={setBindOpen}>
         <DialogContent className="bg-slate-900 border-slate-700 text-slate-100 max-w-2xl">

@@ -18,6 +18,8 @@ from app.core.permissions import get_current_admin_user
 from app.database.base import get_db, tenant_id_context
 from app.database.models import ChargePoint, EVSE, EVSEStatus, Site, Tariff
 from datetime import datetime, timezone
+from app.core.permissions import has_permission
+from app.services.role_service import MembershipRoleService
 
 logger = get_logger("ocpp_csms")
 
@@ -82,6 +84,21 @@ class SiteDetailResponse(BaseModel):
     charge_points: List[SiteDetailChargePoint]
     created_at: str
     updated_at: str
+
+
+class SitePricingUpdateRequest(BaseModel):
+    """站点级基础电价（作为默认价）"""
+
+    base_price_per_kwh: float = Field(..., gt=0, description="基础电价（每kWh）")
+    service_fee: Optional[float] = Field(None, ge=0, description="服务费（可选）")
+
+
+class SitePricingResponse(BaseModel):
+    site_id: str
+    tariff_id: int
+    base_price_per_kwh: float
+    service_fee: float
+    valid_from: str
 
 
 def _require_tenant_id_for_create(current_user_obj) -> Optional[str]:
@@ -223,9 +240,17 @@ def get_site_detail(
         raise HTTPException(status_code=404, detail="Site not found")
 
     # 站点价格（站点级 tariff：取 active 的第一条）
+    now = datetime.now(timezone.utc)
     tariff = (
         db.query(Tariff)
-        .filter(Tariff.site_id == site.id, Tariff.is_active == True)  # noqa: E712
+        .filter(
+            Tariff.tenant_id == site.tenant_id,
+            Tariff.site_id == site.id,
+            Tariff.charge_point_id.is_(None),
+            Tariff.is_active == True,  # noqa: E712
+            Tariff.valid_from <= now,
+        )
+        .filter((Tariff.valid_until.is_(None)) | (Tariff.valid_until >= now))
         .order_by(Tariff.valid_from.desc())
         .first()
     )
@@ -322,6 +347,78 @@ def update_site(
 
     # 复用详情输出
     return get_site_detail(site_id=site.id, current_user_obj=current_user_obj, db=db)
+
+
+@router.put("/{site_id}/pricing", response_model=SitePricingResponse, summary="更新站点默认定价（Tariff）")
+def update_site_pricing(
+    site_id: str,
+    req: SitePricingUpdateRequest,
+    current_user_obj=Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+) -> SitePricingResponse:
+    """
+    站点级定价作为默认电价：
+    - 版本化：关闭旧 active tariff，新建一条 active tariff
+    - 租户隔离：仅允许更新当前租户下的站点
+    - 权限：tariffs.edit（super_admin 或 tenant.* 也可）
+    """
+    tenant_id = tenant_id_context.get()
+    if not tenant_id and not current_user_obj.is_super_admin:
+        raise HTTPException(status_code=403, detail="Tenant ID required")
+
+    perms = MembershipRoleService.get_user_permissions(db=db, admin_user_id=current_user_obj.id, tenant_id=tenant_id) if tenant_id else []
+    if not current_user_obj.is_super_admin and not has_permission(perms, "tariffs.edit"):
+        raise HTTPException(status_code=403, detail="Permission denied")
+
+    q = db.query(Site).filter(Site.id == site_id)
+    if tenant_id and not current_user_obj.is_super_admin:
+        q = q.filter(Site.tenant_id == tenant_id)
+    site = q.first()
+    if not site:
+        raise HTTPException(status_code=404, detail="Site not found")
+
+    now = datetime.now(timezone.utc)
+
+    # 关闭旧的 active site-level tariffs
+    old_tariffs = (
+        db.query(Tariff)
+        .filter(
+            Tariff.tenant_id == site.tenant_id,
+            Tariff.site_id == site.id,
+            Tariff.charge_point_id.is_(None),
+            Tariff.is_active == True,  # noqa: E712
+        )
+        .all()
+    )
+    for t in old_tariffs:
+        t.is_active = False
+        # 只在未设置有效期时补齐，避免覆盖历史数据
+        if t.valid_until is None:
+            t.valid_until = now
+
+    service_fee = float(req.service_fee) if req.service_fee is not None else 0.0
+    new_tariff = Tariff(
+        tenant_id=site.tenant_id,
+        site_id=site.id,
+        charge_point_id=None,
+        name="站点默认定价",
+        base_price_per_kwh=req.base_price_per_kwh,
+        service_fee=service_fee,
+        valid_from=now,
+        valid_until=None,
+        is_active=True,
+    )
+    db.add(new_tariff)
+    db.commit()
+    db.refresh(new_tariff)
+
+    return SitePricingResponse(
+        site_id=site.id,
+        tariff_id=new_tariff.id,
+        base_price_per_kwh=float(new_tariff.base_price_per_kwh),
+        service_fee=float(new_tariff.service_fee or 0),
+        valid_from=new_tariff.valid_from.isoformat() if new_tariff.valid_from else "",
+    )
 
 
 @router.delete("/{site_id}", summary="删除站点")
@@ -554,6 +651,32 @@ def create_charge_point_in_site(
 
     db.commit()
 
+    # 为每个connector生成二维码
+    qr_urls = []
+    try:
+        from app.services.qr_service import generate_qr_code, get_qr_code_url, get_qr_storage_dir
+        qr_storage_dir = get_qr_storage_dir()
+        
+        for evse_no in range(1, int(req.connector_count) + 1):
+            try:
+                generate_qr_code(
+                    charge_point_id=cp_id,
+                    connector_id=evse_no,
+                    output_dir=qr_storage_dir,
+                    payload_format="hash"
+                )
+                qr_url = get_qr_code_url(cp_id, evse_no)
+                qr_urls.append({
+                    "connector_id": evse_no,
+                    "qr_url": qr_url,
+                    "filename": f"{cp_id}_connector_{evse_no}.png"
+                })
+            except Exception as e:
+                logger.warning(f"生成充电桩 {cp_id} connector {evse_no} 的二维码失败: {e}")
+    except Exception as e:
+        logger.error(f"生成二维码时出错: {e}", exc_info=True)
+        # 二维码生成失败不影响充电桩创建
+
     return {
         "id": charge_point.id,
         "site_id": site.id,
@@ -562,5 +685,6 @@ def create_charge_point_in_site(
         "model": charge_point.model,
         "connector_count": int(req.connector_count),
         "connector_type": req.connector_type,
+        "qr_codes": qr_urls,  # 二维码URL列表
     }
 

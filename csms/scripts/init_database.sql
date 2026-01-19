@@ -504,12 +504,12 @@ ON CONFLICT DO NOTHING;
 
 INSERT INTO roles (id, tenant_id, name, permissions, scope) VALUES
     (gen_random_uuid(), NULL, 'tenant_admin', 
-     '["tenant.*", "users.*", "charge_points.*", "orders.*"]'::jsonb, 'system')
+     '["tenant.*", "users.*", "charge_points.*", "sites.*", "tariffs.*", "orders.*"]'::jsonb, 'system')
 ON CONFLICT DO NOTHING;
 
 INSERT INTO roles (id, tenant_id, name, permissions, scope) VALUES
     (gen_random_uuid(), NULL, 'operator', 
-     '["charge_points.view", "orders.view", "alerts.*"]'::jsonb, 'system')
+     '["sites.view", "charge_points.view", "tariffs.view", "orders.view", "alerts.*"]'::jsonb, 'system')
 ON CONFLICT DO NOTHING;
 
 INSERT INTO roles (id, tenant_id, name, permissions, scope) VALUES

@@ -11,6 +11,7 @@ from app.services.role_service import MembershipRoleService
 from app.database.base import get_db, tenant_id_context
 from sqlalchemy.orm import Session
 from uuid import UUID
+from fnmatch import fnmatchcase
 
 
 def require_permission(permission: str):
@@ -98,11 +99,38 @@ async def check_permission(
         tenant_id=tenant_id
     )
     
-    # 检查权限
+    return has_permission(permissions=permissions, required=permission)
+
+
+def has_permission(permissions: List[str], required: str) -> bool:
+    """
+    判断权限列表是否满足 required。
+
+    支持：
+    - 精确匹配：charge_points.view
+    - 通配符：orders.*、alerts.*、*.view
+    - 超级权限：*
+    - 兼容历史：tenant.* 视为租户内全权限（便于 tenant_admin 角色覆盖新权限域）
+    """
+    if not permissions:
+        return False
+
+    # 超级权限
     if "*" in permissions:
-        return True  # 超级权限
-    
-    return permission in permissions
+        return True
+
+    # 兼容：tenant.* 代表租户内全权限（历史系统角色里已有）
+    if "tenant.*" in permissions:
+        return True
+
+    # 精确匹配 + 通配符匹配（required 对 pattern 做 fnmatch）
+    for p in permissions:
+        if p == required:
+            return True
+        # p 可能是类似 orders.* / *.view
+        if "*" in p and fnmatchcase(required, p):
+            return True
+    return False
 
 
 def get_current_admin_user(

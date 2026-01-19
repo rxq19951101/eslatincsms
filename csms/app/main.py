@@ -14,7 +14,9 @@ from app.core.id_generator import generate_order_id, generate_invoice_id, genera
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from pathlib import Path
 import redis
 
 
@@ -237,11 +239,30 @@ except ImportError as e:
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    # 注意：allow_credentials=True 时不能用 "*"，否则 Starlette 不会下发 Access-Control-Allow-Origin
+    # 生产环境建议用精确域名；本地默认放行 admin dev 的 origin。
+    allow_origins=[
+        o.strip()
+        for o in os.getenv(
+            "CORS_ALLOW_ORIGINS",
+            "http://localhost:3000,http://127.0.0.1:3000,http://localhost:3001,http://127.0.0.1:3001",
+        ).split(",")
+        if o.strip()
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 挂载静态文件服务（二维码文件）
+try:
+    from app.services.qr_service import get_qr_storage_dir
+    qr_storage_dir = get_qr_storage_dir()
+    qr_storage_dir.mkdir(parents=True, exist_ok=True)
+    app.mount("/static/qr", StaticFiles(directory=str(qr_storage_dir)), name="qr_codes")
+    logger.info(f"二维码静态文件服务已挂载: /static/qr -> {qr_storage_dir}")
+except Exception as e:
+    logger.warning(f"无法挂载二维码静态文件服务: {e}")
 
 
 # ---- Redis Client ----

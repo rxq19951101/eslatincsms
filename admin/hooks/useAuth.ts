@@ -7,6 +7,7 @@ import { API_ENDPOINTS } from '@/lib/constants';
 import { AdminUser } from '@/types';
 import { useTenantStore } from '@/store/tenantStore';
 import { getTenantId } from '@/lib/tenant';
+import type { TenantRecord } from '@/types';
 
 /**
  * 认证 Hook
@@ -67,21 +68,38 @@ export function useAuth() {
   useEffect(() => {
     if (typeof window === 'undefined') return;
     if (!user) return;
-    // super_admin 允许不选租户
-    if (user.is_super_admin) {
-      if (currentTenant) setCurrentTenant(null);
-      return;
-    }
-    // 普通租户用户：优先按 getTenantId（URL/localStorage/default）选中
-    if (!currentTenant) {
-      const tid = getTenantId(user);
-      const selected =
-        (tid && user.tenant_list?.find((t) => t.id === tid)) ||
-        user.tenant_list?.find((t) => t.is_primary) ||
-        user.tenant_list?.[0] ||
-        null;
-      if (selected) setCurrentTenant(selected);
-    }
+    const initTenant = async () => {
+      // super_admin：仍然允许“可选租户”
+      // - 不选租户：用于全局聚合类接口
+      // - 选中租户：用于站点/桩等租户资产的写操作（需要 X-Tenant-Id）
+      if (user.is_super_admin) {
+        if (currentTenant) return;
+        const tid = getTenantId(user);
+        try {
+          const tenants = await apiGet<TenantRecord[]>(API_ENDPOINTS.TENANTS, { skipTenantId: true });
+          const selected =
+            (tid && tenants.find((t) => t.id === tid) && { id: tid, name: tenants.find((t) => t.id === tid)!.name, is_primary: false }) ||
+            (tenants[0] ? { id: tenants[0].id, name: tenants[0].name, is_primary: false } : null);
+          if (selected) setCurrentTenant(selected);
+        } catch {
+          // ignore: super_admin 仍可不选租户，仅写操作会在后端提示 Tenant ID required
+        }
+        return;
+      }
+
+      // 普通租户用户：优先按 getTenantId（URL/localStorage/default）选中
+      if (!currentTenant) {
+        const tid = getTenantId(user);
+        const selected =
+          (tid && user.tenant_list?.find((t) => t.id === tid)) ||
+          user.tenant_list?.find((t) => t.is_primary) ||
+          user.tenant_list?.[0] ||
+          null;
+        if (selected) setCurrentTenant(selected);
+      }
+    };
+
+    initTenant();
   }, [user, currentTenant, setCurrentTenant]);
 
   // 认证状态不要依赖 store 里单独存的 isAuthenticated（刷新后不一定能正确恢复），而是实时基于 token + user 计算

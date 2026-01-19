@@ -18,6 +18,7 @@ from app.core.auth import (
     verify_token
 )
 from app.core.permissions import get_current_admin_user
+from app.services.role_service import MembershipRoleService
 from app.services.token_service import (
     create_token_pair,
     save_refresh_token,
@@ -69,6 +70,10 @@ class UserInfoResponse(BaseModel):
     is_super_admin: bool
     default_tenant_id: Optional[str]
     tenant_list: list
+
+
+class PermissionsResponse(BaseModel):
+    permissions: list
 
 
 # ==================== 认证端点 ====================
@@ -312,6 +317,32 @@ async def get_current_user_info(
         return result
     finally:
         db.close()
+
+
+@router.get("/me/permissions", response_model=PermissionsResponse, summary="获取当前用户在当前租户下的权限列表")
+async def get_my_permissions(
+    current_user_obj=Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+):
+    """
+    返回当前管理员在“当前租户”（tenant_middleware 解析的 tenant_id_context）下的合并权限列表。
+
+    - super_admin：返回 ["*"]
+    - 普通管理员：必须存在 tenant_id_context，否则 403
+    """
+    if getattr(current_user_obj, "is_super_admin", False):
+        return PermissionsResponse(permissions=["*"])
+
+    from app.database.base import tenant_id_context
+
+    tenant_id = tenant_id_context.get()
+    if not tenant_id:
+        raise HTTPException(status_code=403, detail="Tenant ID required")
+
+    perms = MembershipRoleService.get_user_permissions(
+        db=db, admin_user_id=current_user_obj.id, tenant_id=tenant_id
+    )
+    return PermissionsResponse(permissions=perms)
 
 
 @router.put("/me/default-tenant", summary="设置默认租户")

@@ -9,19 +9,23 @@ export const API_ENDPOINTS = {
   AUTH_REFRESH: '/api/v1/admin/auth/refresh',
   AUTH_LOGOUT: '/api/v1/admin/auth/logout',
   AUTH_ME: '/api/v1/admin/auth/me',
+  AUTH_ME_PERMISSIONS: '/api/v1/admin/auth/me/permissions',
   AUTH_SET_DEFAULT_TENANT: '/api/v1/admin/auth/me/default-tenant',
   
   // Dashboard
   DASHBOARD_SUMMARY: '/api/v1/dashboard/summary',
   DASHBOARD_TRENDS: '/api/v1/dashboard/trends',
+  DASHBOARD_SITES: '/api/v1/dashboard/sites',
   
   // 充电桩
   CHARGERS: '/api/v1/chargers',
   CHARGER_DETAIL: (id: string) => `/api/v1/chargers/${id}`,
+  CHARGER_PRICING: (id: string) => `/api/v1/chargers/${id}/pricing`,
 
   // 站点（Site）
   SITES: '/api/v1/sites',
   SITE_DETAIL: (id: string) => `/api/v1/sites/${id}`,
+  SITE_PRICING: (id: string) => `/api/v1/sites/${id}/pricing`,
   SITE_BINDABLE_CHARGE_POINTS: (id: string) => `/api/v1/sites/${id}/bindable-charge-points`,
   SITE_BIND_CHARGE_POINTS: (id: string) => `/api/v1/sites/${id}/bind-charge-points`,
   SITE_CREATE_CHARGE_POINT: (id: string) => `/api/v1/sites/${id}/charge-points`,

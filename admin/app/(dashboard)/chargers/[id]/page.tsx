@@ -8,8 +8,10 @@ import { ChargePointDetail } from '@/types';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { ArrowLeft, Zap, Power, RotateCcw, Settings, Unlock, Play, Square } from 'lucide-react';
+import { ArrowLeft, Zap, Power, RotateCcw, Settings, Unlock, Play, Square, QrCode, Download, RefreshCw } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
+import { API_BASE_URL } from '@/lib/constants';
+import { useState } from 'react';
 
 const fetcher = (url: string) => apiGet<ChargePointDetail>(url);
 
@@ -25,6 +27,40 @@ export default function ChargerDetailPage() {
       refreshInterval: 30000, // 30 秒自动刷新
     }
   );
+
+  // 获取二维码列表
+  const { data: qrData, mutate: mutateQr } = useSWR<{ qr_codes: Array<{ connector_id: number; qr_url: string; filename: string; exists: boolean }> }>(
+    chargerId ? `${API_BASE_URL}/api/v1/chargers/${chargerId}/qr` : null,
+    (url: string) => apiGet<{ qr_codes: Array<{ connector_id: number; qr_url: string; filename: string; exists: boolean }> }>(url)
+  );
+
+  const [generating, setGenerating] = useState<string | null>(null); // connector_id or 'all'
+
+  const handleGenerateQr = async (connectorId?: number) => {
+    if (!chargerId) return;
+    
+    const isAll = connectorId === undefined;
+    setGenerating(isAll ? 'all' : String(connectorId));
+    
+    try {
+      if (isAll) {
+        // 生成所有connector的二维码
+        await apiPost(`${API_BASE_URL}/api/v1/chargers/${chargerId}/qr/generate-all`, {});
+        alert('所有二维码生成成功');
+      } else {
+        // 生成单个connector的二维码
+        await apiPost(`${API_BASE_URL}/api/v1/chargers/${chargerId}/qr/${connectorId}/generate`, {});
+        alert(`Connector ${connectorId} 的二维码生成成功`);
+      }
+      // 刷新二维码列表
+      mutateQr();
+    } catch (error) {
+      console.error('生成二维码失败:', error);
+      alert(isAll ? '生成二维码失败' : `Connector ${connectorId} 的二维码生成失败`);
+    } finally {
+      setGenerating(null);
+    }
+  };
 
   const handleRemoteStart = async () => {
     try {
@@ -194,6 +230,113 @@ export default function ChargerDetailPage() {
                 <div>
                   <label className="text-sm text-slate-400">定价</label>
                   <p className="text-white mt-1">¥{Number(charger.price_per_kwh).toFixed(2)}/kWh</p>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
+          {/* QR Codes */}
+          <Card className="bg-slate-800/80 backdrop-blur-sm border-slate-700">
+            <CardHeader>
+              <div className="flex items-center justify-between">
+                <CardTitle className="text-white flex items-center gap-2">
+                  <QrCode className="h-5 w-5" />
+                  二维码
+                </CardTitle>
+                {qrData && qrData.qr_codes && qrData.qr_codes.length > 0 && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => handleGenerateQr()}
+                    disabled={generating === 'all'}
+                    className="bg-slate-700/50 border-slate-600 text-slate-200 hover:bg-slate-600"
+                  >
+                    <RefreshCw className={`h-4 w-4 mr-2 ${generating === 'all' ? 'animate-spin' : ''}`} />
+                    {generating === 'all' ? '生成中...' : '生成所有二维码'}
+                  </Button>
+                )}
+              </div>
+            </CardHeader>
+            <CardContent>
+              <div className="text-sm text-slate-400 mb-4">
+                每个connector对应一个二维码，用户扫码后可启动充电
+              </div>
+              {qrData && qrData.qr_codes && qrData.qr_codes.length > 0 ? (
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                  {qrData.qr_codes.map((qr) => (
+                    <div
+                      key={qr.connector_id}
+                      className="p-4 rounded-lg bg-slate-700/30 border border-slate-600"
+                    >
+                      <div className="flex items-center justify-between mb-2">
+                        <div className="text-sm text-slate-400">Connector {qr.connector_id}</div>
+                        {!qr.exists && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => handleGenerateQr(qr.connector_id)}
+                            disabled={generating === String(qr.connector_id)}
+                            className="bg-purple-600/50 border-purple-500 text-white hover:bg-purple-600 h-7 text-xs"
+                          >
+                            {generating === String(qr.connector_id) ? (
+                              <>
+                                <RefreshCw className="h-3 w-3 mr-1 animate-spin" />
+                                生成中
+                              </>
+                            ) : (
+                              <>
+                                <QrCode className="h-3 w-3 mr-1" />
+                                生成
+                              </>
+                            )}
+                          </Button>
+                        )}
+                      </div>
+                      {qr.exists ? (
+                        <div className="space-y-2">
+                          <div className="relative w-full aspect-square bg-white rounded-lg p-2 flex items-center justify-center">
+                            <img
+                              src={`${API_BASE_URL}${qr.qr_url}`}
+                              alt={`QR Code for Connector ${qr.connector_id}`}
+                              className="w-full h-full object-contain"
+                            />
+                          </div>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="w-full bg-slate-700/50 border-slate-600 text-slate-200 hover:bg-slate-600"
+                            onClick={() => {
+                              const link = document.createElement('a');
+                              link.href = `${API_BASE_URL}${qr.qr_url}`;
+                              link.download = qr.filename;
+                              link.click();
+                            }}
+                          >
+                            <Download className="h-4 w-4 mr-2" />
+                            下载
+                          </Button>
+                        </div>
+                      ) : (
+                        <div className="text-sm text-slate-500 py-8 text-center">
+                          二维码未生成
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="text-center py-8">
+                  <div className="text-slate-400 mb-4">暂无connector信息</div>
+                  {charger?.evses && charger.evses.length > 0 && (
+                    <Button
+                      onClick={() => handleGenerateQr()}
+                      disabled={generating === 'all'}
+                      className="bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-700 hover:to-blue-700"
+                    >
+                      <RefreshCw className={`h-4 w-4 mr-2 ${generating === 'all' ? 'animate-spin' : ''}`} />
+                      {generating === 'all' ? '生成中...' : '生成所有二维码'}
+                    </Button>
+                  )}
                 </div>
               )}
             </CardContent>
