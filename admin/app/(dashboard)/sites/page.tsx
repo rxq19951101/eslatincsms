@@ -43,8 +43,8 @@ export default function SitesPage() {
 
   const [name, setName] = useState('');
   const [address, setAddress] = useState('');
-  const [latitude, setLatitude] = useState('22.5');
-  const [longitude, setLongitude] = useState('113.9');
+  const [latitude, setLatitude] = useState('4.6097');
+  const [longitude, setLongitude] = useState('-74.0817');
   const [operatingHours, setOperatingHours] = useState('');
 
   const { data: sites, error, isLoading, mutate } = useSWR<SiteListItem[]>(
