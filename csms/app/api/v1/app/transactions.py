@@ -12,30 +12,34 @@ from sqlalchemy.orm import Session
 from app.core.logging_config import get_logger
 from app.core.auth import get_current_user
 from app.database.base import get_db, tenant_id_context
-from app.database.models import EndUser, ChargingSession, ChargePoint, Site
+from app.database.models import AppUser, ChargingSession, ChargePoint, Site
+from uuid import UUID
 
 logger = get_logger("ocpp_csms")
 
 router = APIRouter()
 
 
-async def get_current_end_user(
+async def get_current_app_user(
     current_user_payload: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
-) -> EndUser:
+) -> AppUser:
     user_id = current_user_payload.get("user_id")
     if not user_id:
         raise HTTPException(status_code=401, detail="Invalid token")
 
-    end_user = db.query(EndUser).filter(EndUser.id == user_id).first()
-    if not end_user:
+    app_user = db.query(AppUser).filter(AppUser.id == UUID(str(user_id))).first()
+    if not app_user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    return end_user
+    return app_user
 
 
-def _end_user_id_tag(end_user: EndUser) -> str:
-    return (end_user.id_tag or end_user.email or str(end_user.id)).strip()
+def _app_user_id_tag(app_user: AppUser) -> str:
+    """
+    平台账号的 ChargingSession.id_tag 我们使用 APPUSER:{uuid}
+    """
+    return f"APPUSER:{app_user.id}"
 
 
 @router.get("", summary="获取充电记录列表（终端用户）")
@@ -43,14 +47,14 @@ def list_app_transactions(
     status: Optional[str] = Query(None, description="状态过滤（ongoing/completed/cancelled）"),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
-    current_user_obj: EndUser = Depends(get_current_end_user),
+    current_user_obj: AppUser = Depends(get_current_app_user),
     db: Session = Depends(get_db),
 ) -> List[dict]:
     """
     返回当前用户的 ChargingSession 列表。
     """
     tenant_id = tenant_id_context.get()
-    id_tag = _end_user_id_tag(current_user_obj)
+    id_tag = _app_user_id_tag(current_user_obj)
 
     query = db.query(ChargingSession).filter(ChargingSession.id_tag == id_tag)
     if tenant_id:
@@ -110,11 +114,11 @@ def list_app_transactions(
 @router.get("/{session_id}", summary="获取充电记录详情（终端用户）")
 def get_app_transaction_detail(
     session_id: int = Path(..., description="charging_sessions.id"),
-    current_user_obj: EndUser = Depends(get_current_end_user),
+    current_user_obj: AppUser = Depends(get_current_app_user),
     db: Session = Depends(get_db),
 ) -> dict:
     tenant_id = tenant_id_context.get()
-    id_tag = _end_user_id_tag(current_user_obj)
+    id_tag = _app_user_id_tag(current_user_obj)
 
     query = db.query(ChargingSession).filter(ChargingSession.id == session_id, ChargingSession.id_tag == id_tag)
     if tenant_id:

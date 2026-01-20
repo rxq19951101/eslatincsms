@@ -51,7 +51,7 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - DATABASE_URL=postgresql://local:local@db:5432/ocpp
       - PORT=9000
-      - CORS_ORIGINS=http://localhost:3000,http://localhost:3001,http://localhost:3002
+      - CORS_ORIGINS=*
       - DOCS_URL=/docs
       - REDOC_URL=/redoc
     depends_on:

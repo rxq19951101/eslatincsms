@@ -237,19 +237,23 @@ try:
 except ImportError as e:
     logger.warning(f"无法导入租户中间件: {e}")
 
+# CORS 配置：开发环境允许所有来源，生产环境限制具体域名
+cors_origins_env = os.getenv(
+    "CORS_ALLOW_ORIGINS",
+    "http://localhost:3000,http://127.0.0.1:3000,http://localhost:3001,http://127.0.0.1:3001",
+)
+# 如果环境变量包含 "*"，则允许所有来源（仅开发环境）
+if cors_origins_env.strip() == "*":
+    cors_origins = ["*"]
+    cors_credentials = False  # 使用 "*" 时不能设置 allow_credentials=True
+else:
+    cors_origins = [o.strip() for o in cors_origins_env.split(",") if o.strip()]
+    cors_credentials = True
+
 app.add_middleware(
     CORSMiddleware,
-    # 注意：allow_credentials=True 时不能用 "*"，否则 Starlette 不会下发 Access-Control-Allow-Origin
-    # 生产环境建议用精确域名；本地默认放行 admin dev 的 origin。
-    allow_origins=[
-        o.strip()
-        for o in os.getenv(
-            "CORS_ALLOW_ORIGINS",
-            "http://localhost:3000,http://127.0.0.1:3000,http://localhost:3001,http://127.0.0.1:3001",
-        ).split(",")
-        if o.strip()
-    ],
-    allow_credentials=True,
+    allow_origins=cors_origins,
+    allow_credentials=cors_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
 )

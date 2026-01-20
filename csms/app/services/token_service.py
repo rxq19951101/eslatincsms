@@ -128,7 +128,8 @@ async def refresh_token_pair(
             refresh_token,
             settings.secret_key,
             algorithms=[settings.algorithm],
-            options={"verify_signature": False}
+            # 仅用于读取 payload；不要触发 aud 校验（jose 在 verify_aud=True 时会要求传 audience 参数）
+            options={"verify_signature": False, "verify_aud": False}
         )
         token_audience = unverified_payload.get("aud")
         
@@ -207,7 +208,7 @@ async def refresh_token_pair(
             new_refresh_token,
             settings.secret_key,
             algorithms=[settings.algorithm],
-            options={"verify_signature": False}
+            options={"verify_signature": False, "verify_aud": False}
         )
         new_token_audience = unverified_payload.get("aud")
         new_payload = verify_token(new_refresh_token, audience=new_token_audience)

@@ -384,6 +384,10 @@ class OCPPMessageHandler:
             transaction_id = payload.get("transactionId") or int(datetime.now().timestamp())
             id_tag = str(payload.get("idTag", ""))
             meter_start = payload.get("meterStart", 0)
+            user_id = None
+            # 爆改测试版：RemoteStart 使用 APPUSER:{uuid} 作为 idTag，便于反推平台用户
+            if id_tag.startswith("APPUSER:"):
+                user_id = id_tag.replace("APPUSER:", "", 1).strip() or None
             
             # 开始会话
             session = self.session_service.start_session(
@@ -392,6 +396,7 @@ class OCPPMessageHandler:
                 evse_id=evse_id,
                 transaction_id=transaction_id,
                 id_tag=id_tag,
+                user_id=user_id,
                 meter_start=meter_start
             )
             

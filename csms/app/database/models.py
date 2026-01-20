@@ -532,6 +532,66 @@ class WalletTransaction(Base):
     )
 
 
+class AppWalletTransaction(Base):
+    """平台钱包流水（爆改测试版）
+
+    - 余额权威字段：AppUser.balance（平台统一钱包）
+    - operator_tenant_id：本次消费/业务归属的运营商租户，用于对账/分账
+    """
+    __tablename__ = "app_wallet_transactions"
+
+    id = Column(String(100), primary_key=True, index=True)
+    app_user_id = Column(UUID(as_uuid=True), ForeignKey("app_users.id", ondelete="CASCADE"), nullable=False, index=True)
+
+    operator_tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    charge_point_id = Column(String(100), ForeignKey("charge_points.id"), nullable=True, index=True)
+
+    # amount > 0 入账（top_up），amount < 0 扣费（charge）
+    type = Column(String(50), nullable=False)  # top_up / charge
+    amount = Column(Numeric(10, 2), nullable=False)
+    description = Column(Text, nullable=True)
+
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False, index=True)
+
+    app_user = relationship("AppUser")
+    operator_tenant = relationship("Tenant")
+    charge_point = relationship("ChargePoint")
+
+    __table_args__ = (
+        Index("idx_app_wallet_tx_user", "app_user_id", "created_at"),
+        Index("idx_app_wallet_tx_operator_tenant", "operator_tenant_id"),
+        Index("idx_app_wallet_tx_charge_point", "charge_point_id"),
+    )
+
+
+class QrToken(Base):
+    """二维码 token 映射（爆改测试版）
+
+    二维码 payload 只包含不可猜测 token（例如：qr:<token>），后端解析 token 得到：
+    - operator_tenant_id（运营商租户）
+    - charge_point_id（充电桩）
+    - connector_id（枪口/EVSE 编号）
+    """
+    __tablename__ = "qr_tokens"
+
+    token = Column(String(128), primary_key=True, index=True)
+    operator_tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    charge_point_id = Column(String(100), ForeignKey("charge_points.id", ondelete="CASCADE"), nullable=False, index=True)
+    connector_id = Column(Integer, nullable=False)
+
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False, index=True)
+    revoked_at = Column(DateTime(timezone=True), nullable=True)
+
+    operator_tenant = relationship("Tenant")
+    charge_point = relationship("ChargePoint")
+
+    __table_args__ = (
+        UniqueConstraint("charge_point_id", "connector_id", name="unique_qr_token_cp_connector"),
+        Index("idx_qr_tokens_operator_tenant", "operator_tenant_id"),
+        Index("idx_qr_tokens_charge_point", "charge_point_id"),
+    )
+
+
 # ==================== 事件和日志层 ====================
 
 class DeviceEvent(Base):
@@ -754,6 +814,40 @@ class EndUser(Base):
         Index('idx_end_users_phone', 'phone'),
         Index('idx_end_users_email', 'email'),  # 新增：邮箱索引
         Index('idx_end_users_id_tag', 'id_tag'),
+    )
+
+
+class AppUser(Base):
+    """平台级终端用户（爆改测试版）
+
+    目标：
+    - App 用户不再绑定单一 tenant，可跨多个运营商(tenant)充电。
+    - 钱包余额为平台统一钱包（见 AppWalletTransaction）。
+
+    说明：
+    - 现有 EndUser 作为旧实现保留，但在爆改流程中不再使用。
+    """
+    __tablename__ = "app_users"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+
+    email = Column(String(200), nullable=False, unique=True, index=True)
+    phone = Column(String(50), nullable=True, unique=True, index=True)
+    full_name = Column(String(200), nullable=True)
+
+    password_hash = Column(String(255), nullable=False)
+    email_verified = Column(Boolean, default=False)
+
+    balance = Column(Numeric(10, 2), nullable=False, default=0)
+    status = Column(String(50), nullable=False, default="active")  # active, suspended, deleted
+    last_login_at = Column(DateTime(timezone=True), nullable=True)
+
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        Index("idx_app_users_email", "email"),
+        Index("idx_app_users_phone", "phone"),
     )
 
 

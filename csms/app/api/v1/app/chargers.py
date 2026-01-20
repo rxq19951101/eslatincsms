@@ -8,32 +8,33 @@ from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import func, and_
 from app.database.base import get_db, tenant_id_context
-from app.database.models import ChargePoint, Site, EVSE, EVSEStatus, Tariff, EndUser
+from app.database.models import ChargePoint, Site, EVSE, EVSEStatus, Tariff, AppUser
 from app.core.logging_config import get_logger
 from app.core.auth import get_current_user
 from math import radians, cos, sin, asin, sqrt
+from uuid import UUID
 
 logger = get_logger("ocpp_csms")
 
 router = APIRouter()
 
 
-async def get_current_end_user(
+async def get_current_app_user(
     current_user_payload: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db)
-) -> EndUser:
+) -> AppUser:
     """
-    获取当前终端用户对象
+    获取当前 APP 平台用户对象（AppUser）
     """
     user_id = current_user_payload.get("user_id")
     if not user_id:
         raise HTTPException(status_code=401, detail="Invalid token")
-    
-    end_user = db.query(EndUser).filter(EndUser.id == user_id).first()
-    if not end_user:
+
+    app_user = db.query(AppUser).filter(AppUser.id == UUID(str(user_id))).first()
+    if not app_user:
         raise HTTPException(status_code=404, detail="User not found")
-    
-    return end_user
+
+    return app_user
 
 
 def calculate_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -62,7 +63,7 @@ async def list_chargers_for_app(
     longitude: Optional[float] = Query(None, description="当前经度"),
     radius: Optional[float] = Query(None, description="搜索半径（米）"),
     limit: Optional[int] = Query(100, description="返回数量限制"),
-    current_user_obj = Depends(get_current_end_user),
+    current_user_obj: AppUser = Depends(get_current_app_user),
     db: Session = Depends(get_db)
 ) -> List[dict]:
     """
@@ -181,7 +182,7 @@ async def list_chargers_for_app(
 @router.get("/{charge_point_id}", summary="获取充电站详情（普通用户）")
 async def get_charger_detail_for_app(
     charge_point_id: str,
-    current_user_obj = Depends(get_current_end_user),
+    current_user_obj: AppUser = Depends(get_current_app_user),
     db: Session = Depends(get_db)
 ) -> dict:
     """

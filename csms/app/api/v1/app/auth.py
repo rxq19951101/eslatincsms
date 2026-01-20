@@ -4,12 +4,12 @@
 #
 
 from fastapi import APIRouter, Depends, HTTPException, status, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from typing import Optional
 from uuid import UUID
 from app.database.base import get_db
-from app.database.models import EndUser
+from app.database.models import AppUser
 from app.core.auth import get_current_user, verify_password
 from app.services.token_service import (
     create_token_pair,
@@ -17,7 +17,6 @@ from app.services.token_service import (
     refresh_token_pair,
     revoke_refresh_token
 )
-from app.services.user_service import EndUserService
 from datetime import datetime, timezone
 from app.core.logging_config import get_logger
 
@@ -33,12 +32,12 @@ class RegisterRequest(BaseModel):
     id_tag: str
     email: Optional[str] = None
     full_name: Optional[str] = None
-    tenant_id: UUID  # 注册时需要指定租户
+    tenant_id: UUID  # 爆改阶段：不再支持（保留字段仅用于兼容历史调用）
 
 
 class LoginRequest(BaseModel):
     phone: str
-    tenant_id: UUID
+    tenant_id: UUID  # 爆改阶段：不再支持（保留字段仅用于兼容历史调用）
 
 
 class LoginResponse(BaseModel):
@@ -62,14 +61,13 @@ class RefreshTokenResponse(BaseModel):
 class EmailRegisterRequest(BaseModel):
     email: str
     password: str
-    full_name: str
-    tenant_id: UUID
+    full_name: Optional[str] = None
+    phone: Optional[str] = None
 
 
 class EmailLoginRequest(BaseModel):
     email: str
     password: str
-    tenant_id: UUID
     remember_me: bool = False
 
 
@@ -81,21 +79,11 @@ async def register(
     request: Request,
     db: Session = Depends(get_db)
 ):
-    """终端用户注册"""
-    # 创建终端用户
-    end_user = EndUserService.create_end_user(
-        db=db,
-        tenant_id=request_data.tenant_id,
-        phone=request_data.phone,
-        id_tag=request_data.id_tag,
-        email=request_data.email,
-        full_name=request_data.full_name
+    """爆改阶段：禁用旧手机号/租户注册入口（强制使用邮箱注册）"""
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail="Deprecated endpoint. Use /api/v1/app/auth/register-email"
     )
-    
-    return {
-        "message": "User registered successfully",
-        "user_id": str(end_user.id)
-    }
 
 
 @router.post("/login", response_model=LoginResponse, summary="终端用户登录")
@@ -104,81 +92,10 @@ async def login(
     request: Request,
     db: Session = Depends(get_db)
 ):
-    """终端用户登录（基于手机号和租户）"""
-    # 查找用户
-    end_user = EndUserService.get_end_user_by_phone(
-        db=db,
-        tenant_id=request_data.tenant_id,
-        phone=request_data.phone
-    )
-    
-    if not end_user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid phone or tenant"
-        )
-    
-    if end_user.status != "active":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="User account is not active"
-        )
-    
-    # 更新最后登录时间
-    end_user.last_login_at = datetime.now(timezone.utc)
-    db.commit()
-    
-    # 生成 token pair
-    access_token, refresh_token = await create_token_pair(
-        user_id=end_user.id,
-        user_type="end_user",
-        audience="app",
-        is_super_admin=False,
-        request=request
-    )
-    
-    # 保存 refresh token
-    # 说明：refresh_token 刚生成，没必要再做一次严格 verify（尤其是 jose 的 aud 处理在不同环境会导致误判）。
-    # 这里仿照 admin 登录实现：仅解析 payload 读取 jti/exp 后存表即可。
-    from jose import jwt
-    from app.core.config import get_settings
-    settings = get_settings()
-
-    try:
-        unverified_payload = jwt.decode(
-            refresh_token,
-            settings.secret_key,
-            algorithms=[settings.algorithm],
-            options={"verify_signature": False, "verify_aud": False}
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to parse refresh token: {e}")
-
-    refresh_jti = unverified_payload.get("jti")
-    refresh_expires_at = datetime.fromtimestamp(unverified_payload.get("exp"), tz=timezone.utc)
-    if not refresh_jti:
-        raise HTTPException(status_code=500, detail="Failed to parse refresh token jti")
-    
-    await save_refresh_token(
-        jti=refresh_jti,
-        user_id=end_user.id,
-        user_type="end_user",
-        refresh_token=refresh_token,
-        expires_at=refresh_expires_at,
-        db=db,
-        request=request
-    )
-    
-    return LoginResponse(
-        access_token=access_token,
-        refresh_token=refresh_token,
-        user={
-            "id": str(end_user.id),
-            "phone": end_user.phone,
-            "email": end_user.email,
-            "full_name": end_user.full_name,
-            "tenant_id": str(end_user.tenant_id)
-        }
+    """爆改阶段：禁用旧手机号/租户登录入口（强制使用邮箱登录）"""
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail="Deprecated endpoint. Use /api/v1/app/auth/login-email"
     )
 
 
@@ -222,23 +139,23 @@ async def get_current_user_info(
     current_user: dict = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """获取当前终端用户信息"""
+    """获取当前平台终端用户信息（AppUser）"""
     user_id = UUID(current_user["user_id"])
-    
-    end_user = EndUserService.get_end_user_by_id(db, user_id)
-    if not end_user:
+
+    app_user = db.query(AppUser).filter(AppUser.id == user_id).first()
+    if not app_user:
         raise HTTPException(status_code=404, detail="User not found")
     
     return {
-        "id": str(end_user.id),
-        "phone": end_user.phone,
-        "email": end_user.email,
-        "full_name": end_user.full_name,
-        "id_tag": end_user.id_tag,
-        "balance": float(end_user.balance),
-        "tenant_id": str(end_user.tenant_id),
-        "status": end_user.status,
-        "email_verified": end_user.email_verified if hasattr(end_user, 'email_verified') else False
+        "id": str(app_user.id),
+        "phone": app_user.phone,
+        "email": app_user.email,
+        "full_name": app_user.full_name,
+        "balance": float(app_user.balance or 0),
+        "status": app_user.status,
+        "email_verified": bool(app_user.email_verified),
+        "created_at": app_user.created_at.isoformat() if app_user.created_at else None,
+        "updated_at": app_user.updated_at.isoformat() if app_user.updated_at else None,
     }
 
 
@@ -250,14 +167,11 @@ async def register_with_email(
     request: Request,
     db: Session = Depends(get_db)
 ):
-    """使用邮箱和密码注册"""
+    """使用邮箱和密码注册（平台用户 AppUser）"""
     from app.core.auth import get_password_hash
     
     # 检查邮箱是否已被注册
-    existing_user = db.query(EndUser).filter(
-        EndUser.tenant_id == request_data.tenant_id,
-        EndUser.email == request_data.email
-    ).first()
+    existing_user = db.query(AppUser).filter(AppUser.email == request_data.email).first()
     
     if existing_user:
         raise HTTPException(
@@ -265,17 +179,23 @@ async def register_with_email(
             detail="Email already registered"
         )
     
-    # 创建新用户
-    new_user = EndUser()
-    new_user.tenant_id = request_data.tenant_id
-    new_user.email = request_data.email
-    new_user.full_name = request_data.full_name
-    new_user.password_hash = get_password_hash(request_data.password)
-    new_user.email_verified = False
-    new_user.status = "active"
-    new_user.balance = 0
-    new_user.created_at = datetime.now(timezone.utc)
-    new_user.updated_at = datetime.now(timezone.utc)
+    if request_data.phone:
+        existing_phone = db.query(AppUser).filter(AppUser.phone == request_data.phone).first()
+        if existing_phone:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Phone already registered")
+
+    # 创建新平台用户
+    new_user = AppUser(
+        email=request_data.email,
+        phone=request_data.phone,
+        full_name=request_data.full_name,
+        password_hash=get_password_hash(request_data.password),
+        email_verified=False,
+        status="active",
+        balance=0,
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
     
     db.add(new_user)
     db.commit()
@@ -294,33 +214,28 @@ async def login_with_email(
     request: Request,
     db: Session = Depends(get_db)
 ):
-    """使用邮箱和密码登录"""
-    logger.info(f"Login attempt for email: {request_data.email}, tenant: {request_data.tenant_id}")
-    
-    # 查找用户
-    end_user = db.query(EndUser).filter(
-        EndUser.tenant_id == request_data.tenant_id,
-        EndUser.email == request_data.email
-    ).first()
-    
-    if not end_user:
+    """使用邮箱和密码登录（平台用户 AppUser）"""
+    logger.info(f"Login attempt for email: {request_data.email}")
+
+    app_user = db.query(AppUser).filter(AppUser.email == request_data.email).first()
+    if not app_user:
         logger.warning(f"User not found: {request_data.email}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password"
         )
     
-    logger.info(f"User found: {end_user.email}, password_hash exists: {bool(end_user.password_hash)}")
+    logger.info(f"User found: {app_user.email}, password_hash exists: {bool(app_user.password_hash)}")
     
     # 验证密码
-    if not end_user.password_hash:
+    if not app_user.password_hash:
         logger.warning("Password hash is empty")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password"
         )
     
-    password_valid = verify_password(request_data.password, end_user.password_hash)
+    password_valid = verify_password(request_data.password, app_user.password_hash)
     logger.info(f"Password verification result: {password_valid}")
     
     if not password_valid:
@@ -330,19 +245,19 @@ async def login_with_email(
             detail="Invalid email or password"
         )
     
-    if end_user.status != "active":
+    if app_user.status != "active":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="User account is not active"
         )
     
     # 更新最后登录时间
-    end_user.last_login_at = datetime.now(timezone.utc)
+    app_user.last_login_at = datetime.now(timezone.utc)
     db.commit()
     
     # 生成 token pair
     access_token, refresh_token = await create_token_pair(
-        user_id=end_user.id,
+        user_id=app_user.id,
         user_type="end_user",
         audience="app",
         is_super_admin=False,
@@ -366,7 +281,7 @@ async def login_with_email(
     
     await save_refresh_token(
         jti=refresh_jti,
-        user_id=end_user.id,
+        user_id=app_user.id,
         user_type="end_user",
         refresh_token=refresh_token,
         expires_at=refresh_expires_at,
@@ -378,11 +293,12 @@ async def login_with_email(
         access_token=access_token,
         refresh_token=refresh_token,
         user={
-            "id": str(end_user.id),
-            "phone": end_user.phone,
-            "email": end_user.email,
-            "full_name": end_user.full_name,
-            "email_verified": end_user.email_verified if hasattr(end_user, 'email_verified') else False,
-            "tenant_id": str(end_user.tenant_id)
+            "id": str(app_user.id),
+            "phone": app_user.phone,
+            "email": app_user.email,
+            "full_name": app_user.full_name,
+            "email_verified": bool(app_user.email_verified),
+            "created_at": app_user.created_at.isoformat() if app_user.created_at else None,
+            "updated_at": app_user.updated_at.isoformat() if app_user.updated_at else None,
         }
     )

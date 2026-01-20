@@ -651,23 +651,25 @@ def create_charge_point_in_site(
 
     db.commit()
 
-    # 为每个connector生成二维码
+    # 为每个connector生成二维码（爆改：token-only）
     qr_urls = []
     try:
-        from app.services.qr_service import generate_qr_code, get_qr_code_url, get_qr_storage_dir
+        from app.services.qr_service import generate_qr_code, get_qr_code_url, get_qr_storage_dir, ensure_qr_token
         qr_storage_dir = get_qr_storage_dir()
         
         for evse_no in range(1, int(req.connector_count) + 1):
             try:
                 generate_qr_code(
+                    db=db,
                     charge_point_id=cp_id,
                     connector_id=evse_no,
                     output_dir=qr_storage_dir,
-                    payload_format="hash"
                 )
+                token_rec = ensure_qr_token(db, cp_id, evse_no)
                 qr_url = get_qr_code_url(cp_id, evse_no)
                 qr_urls.append({
                     "connector_id": evse_no,
+                    "qr_token": token_rec.token,
                     "qr_url": qr_url,
                     "filename": f"{cp_id}_connector_{evse_no}.png"
                 })

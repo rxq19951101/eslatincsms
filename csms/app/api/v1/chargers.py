@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy import or_, func
 from app.database.base import get_db, tenant_id_context
-from app.database.models import ChargePoint, Site, EVSE, EVSEStatus, Tariff
+from app.database.models import ChargePoint, Site, EVSE, EVSEStatus, Tariff, QrToken
 from app.core.logging_config import get_logger
 from app.core.permissions import get_current_admin_user
 from app.core.permissions import has_permission
@@ -290,10 +290,10 @@ def create_charger(
     db.commit()
     db.refresh(charge_point)
     
-    # 为已存在的EVSE生成二维码（如果有）
+    # 为已存在的EVSE生成二维码（爆改：token-only）
     qr_urls = []
     try:
-        from app.services.qr_service import generate_qr_code, get_qr_code_url, get_qr_storage_dir
+        from app.services.qr_service import generate_qr_code, get_qr_code_url, get_qr_storage_dir, ensure_qr_token
         qr_storage_dir = get_qr_storage_dir()
         
         # 查询该充电桩的所有EVSE
@@ -301,14 +301,16 @@ def create_charger(
         for evse in evses:
             try:
                 generate_qr_code(
+                    db=db,
                     charge_point_id=req.id,
                     connector_id=evse.evse_id,
                     output_dir=qr_storage_dir,
-                    payload_format="hash"
                 )
+                token_rec = ensure_qr_token(db, req.id, evse.evse_id)
                 qr_url = get_qr_code_url(req.id, evse.evse_id)
                 qr_urls.append({
                     "connector_id": evse.evse_id,
+                    "qr_token": token_rec.token,
                     "qr_url": qr_url,
                     "filename": f"{req.id}_connector_{evse.evse_id}.png"
                 })
@@ -486,7 +488,6 @@ def get_charger_qr_codes(
     evses = db.query(EVSE).filter(EVSE.charge_point_id == charge_point_id).order_by(EVSE.evse_id).all()
     
     from app.services.qr_service import get_qr_code_url, get_qr_code_path, get_qr_storage_dir
-    from pathlib import Path
     
     qr_storage_dir = get_qr_storage_dir()
     qr_list = []
@@ -497,9 +498,19 @@ def get_charger_qr_codes(
         
         # 检查文件是否存在
         exists = qr_path.exists()
+        token_rec = (
+            db.query(QrToken)
+            .filter(
+                QrToken.charge_point_id == charge_point_id,
+                QrToken.connector_id == evse.evse_id,
+                QrToken.revoked_at.is_(None),
+            )
+            .first()
+        )
         
         qr_list.append({
             "connector_id": evse.evse_id,
+            "qr_token": token_rec.token if token_rec else None,
             "qr_url": qr_url,
             "filename": qr_path.name,
             "exists": exists,
@@ -538,16 +549,25 @@ def get_charger_qr_code(
         raise HTTPException(status_code=404, detail=f"Connector {connector_id} 未找到")
     
     from app.services.qr_service import get_qr_code_url, get_qr_code_path, get_qr_storage_dir, build_qr_payload
-    from pathlib import Path
     
     qr_storage_dir = get_qr_storage_dir()
     qr_path = get_qr_code_path(charge_point_id, connector_id, qr_storage_dir)
     qr_url = get_qr_code_url(charge_point_id, connector_id)
-    payload = build_qr_payload(charge_point_id, connector_id, "hash")
+    token_rec = (
+        db.query(QrToken)
+        .filter(
+            QrToken.charge_point_id == charge_point_id,
+            QrToken.connector_id == connector_id,
+            QrToken.revoked_at.is_(None),
+        )
+        .first()
+    )
+    payload = build_qr_payload(token_rec.token) if token_rec else None
     
     return {
         "charge_point_id": charge_point_id,
         "connector_id": connector_id,
+        "qr_token": token_rec.token if token_rec else None,
         "qr_url": qr_url,
         "filename": qr_path.name,
         "payload": payload,  # 二维码内容（用于调试）
@@ -581,16 +601,17 @@ def generate_charger_qr_code(
     if not evse:
         raise HTTPException(status_code=404, detail=f"Connector {connector_id} 未找到")
     
-    from app.services.qr_service import generate_qr_code, get_qr_code_url, get_qr_storage_dir
+    from app.services.qr_service import generate_qr_code, get_qr_code_url, get_qr_storage_dir, ensure_qr_token
     
     try:
         qr_storage_dir = get_qr_storage_dir()
         qr_path = generate_qr_code(
+            db=db,
             charge_point_id=charge_point_id,
             connector_id=connector_id,
             output_dir=qr_storage_dir,
-            payload_format="hash"
         )
+        token_rec = ensure_qr_token(db, charge_point_id, connector_id)
         qr_url = get_qr_code_url(charge_point_id, connector_id)
         
         logger.info(f"[API] 成功生成二维码: {charge_point_id} connector {connector_id} -> {qr_path}")
@@ -598,6 +619,7 @@ def generate_charger_qr_code(
         return {
             "charge_point_id": charge_point_id,
             "connector_id": connector_id,
+            "qr_token": token_rec.token,
             "qr_url": qr_url,
             "filename": qr_path.name,
             "message": "二维码生成成功",
@@ -629,7 +651,7 @@ def generate_all_charger_qr_codes(
     if not evses:
         raise HTTPException(status_code=404, detail=f"充电桩 {charge_point_id} 没有找到任何connector")
     
-    from app.services.qr_service import generate_qr_code, get_qr_code_url, get_qr_storage_dir
+    from app.services.qr_service import generate_qr_code, get_qr_code_url, get_qr_storage_dir, ensure_qr_token
     
     qr_storage_dir = get_qr_storage_dir()
     results = []
@@ -638,14 +660,16 @@ def generate_all_charger_qr_codes(
     for evse in evses:
         try:
             qr_path = generate_qr_code(
+                db=db,
                 charge_point_id=charge_point_id,
                 connector_id=evse.evse_id,
                 output_dir=qr_storage_dir,
-                payload_format="hash"
             )
+            token_rec = ensure_qr_token(db, charge_point_id, evse.evse_id)
             qr_url = get_qr_code_url(charge_point_id, evse.evse_id)
             results.append({
                 "connector_id": evse.evse_id,
+                "qr_token": token_rec.token,
                 "qr_url": qr_url,
                 "filename": qr_path.name,
                 "success": True,
