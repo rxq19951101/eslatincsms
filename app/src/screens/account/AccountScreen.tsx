@@ -8,16 +8,19 @@ import {
   Text,
   StyleSheet,
   StatusBar,
-  TouchableOpacity,
   Alert,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useNavigation } from '@react-navigation/native';
 import type { StackNavigationProp } from '@react-navigation/stack';
 import type { RootStackParamList } from '../../types';
-import { COLORS } from '../../constants/config';
+import { COLORS, IOS_STYLES } from '../../constants/config';
 import { useAppDispatch, useAppSelector } from '../../hooks/useRedux';
 import { logout } from '../../store/slices/authSlice';
+import Icon from '../../components/ui/Icon';
+import Button from '../../components/ui/Button';
+import ListItem from '../../components/ui/ListItem';
+import Card from '../../components/ui/Card';
 
 type AccountScreenNavigationProp = StackNavigationProp<RootStackParamList>;
 
@@ -53,7 +56,7 @@ const AccountScreen = () => {
       </View>
 
       {/* User Profile */}
-      <View style={styles.profileSection}>
+      <Card style={styles.profileCard}>
         <View style={styles.avatar}>
           <Text style={styles.avatarText}>
             {user?.full_name?.charAt(0).toUpperCase() || '?'}
@@ -61,50 +64,76 @@ const AccountScreen = () => {
         </View>
         <Text style={styles.userName}>{user?.full_name || 'User'}</Text>
         <Text style={styles.userEmail}>{user?.email || 'No email'}</Text>
-      </View>
+      </Card>
 
       {/* Menu Items */}
-      <View style={styles.menuSection}>
-        <MenuItem
-          icon="🧾"
+      <Card style={styles.menuSection}>
+        <ListItem
+          icon={{ name: 'document-text', library: 'Ionicons' }}
           label="Charging History"
           onPress={() => navigation.navigate('ChargingHistory')}
+          index={0}
         />
-        <MenuItem icon="👤" label="Personal Information" onPress={() => navigation.navigate('PersonalInfo')} />
-        <MenuItem icon="💳" label="Payment Methods" onPress={() => navigation.navigate('PaymentMethods')} />
-        <MenuItem icon="🔔" label="Notifications" onPress={() => {}} />
-        <MenuItem icon="🌐" label="Language" onPress={() => navigation.navigate('Language')} />
-        <MenuItem icon="❓" label="Help & Support" onPress={() => navigation.navigate('HelpCenter')} />
-        <MenuItem icon="📄" label="Privacy Policy" onPress={() => navigation.navigate('PrivacyPolicy')} />
-        <MenuItem icon="ℹ️" label="About" onPress={() => navigation.navigate('About')} />
-      </View>
+        <ListItem
+          icon={{ name: 'person', library: 'Ionicons' }}
+          label="Personal Information"
+          onPress={() => navigation.navigate('PersonalInfo')}
+          index={1}
+        />
+        <ListItem
+          icon={{ name: 'card', library: 'Ionicons' }}
+          label="Payment Methods"
+          onPress={() => navigation.navigate('PaymentMethods')}
+          index={2}
+        />
+        <ListItem
+          icon={{ name: 'notifications', library: 'Ionicons' }}
+          label="Notifications"
+          onPress={() => {}}
+          index={3}
+        />
+        <ListItem
+          icon={{ name: 'globe', library: 'Ionicons' }}
+          label="Language"
+          onPress={() => navigation.navigate('Language')}
+          index={4}
+        />
+        <ListItem
+          icon={{ name: 'help-circle', library: 'Ionicons' }}
+          label="Help & Support"
+          onPress={() => navigation.navigate('HelpCenter')}
+          index={5}
+        />
+        <ListItem
+          icon={{ name: 'document', library: 'Ionicons' }}
+          label="Privacy Policy"
+          onPress={() => navigation.navigate('PrivacyPolicy')}
+          index={6}
+        />
+        <ListItem
+          icon={{ name: 'information-circle', library: 'Ionicons' }}
+          label="About"
+          onPress={() => navigation.navigate('About')}
+          index={7}
+          showArrow={false}
+        />
+      </Card>
 
       {/* Logout Button */}
-      <TouchableOpacity style={styles.logoutButton} onPress={handleLogout}>
-        <Text style={styles.logoutText}>Logout</Text>
-      </TouchableOpacity>
+      <View style={styles.logoutContainer}>
+        <Button
+          title="Logout"
+          onPress={handleLogout}
+          variant="outline"
+          size="large"
+          style={styles.logoutButton}
+          textStyle={styles.logoutText}
+        />
+      </View>
     </SafeAreaView>
   );
 };
 
-// Menu Item Component
-const MenuItem = ({
-  icon,
-  label,
-  onPress,
-}: {
-  icon: string;
-  label: string;
-  onPress: () => void;
-}) => (
-  <TouchableOpacity style={styles.menuItem} onPress={onPress}>
-    <View style={styles.menuItemLeft}>
-      <Text style={styles.menuIcon}>{icon}</Text>
-      <Text style={styles.menuLabel}>{label}</Text>
-    </View>
-    <Text style={styles.menuArrow}>›</Text>
-  </TouchableOpacity>
-);
 
 const styles = StyleSheet.create({
   container: {
@@ -120,10 +149,11 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     color: COLORS.TEXT_PRIMARY,
   },
-  profileSection: {
+  profileCard: {
     alignItems: 'center',
-    paddingVertical: 24,
-    marginBottom: 16,
+    paddingVertical: IOS_STYLES.SPACING.LG,
+    marginBottom: IOS_STYLES.SPACING.MD,
+    marginHorizontal: IOS_STYLES.SPACING.MD,
   },
   avatar: {
     width: 80,
@@ -150,50 +180,18 @@ const styles = StyleSheet.create({
     color: COLORS.TEXT_SECONDARY,
   },
   menuSection: {
-    backgroundColor: '#FFFFFF',
-    marginHorizontal: 20,
-    borderRadius: 12,
-    marginBottom: 24,
+    marginHorizontal: IOS_STYLES.SPACING.MD,
+    marginBottom: IOS_STYLES.SPACING.LG,
     overflow: 'hidden',
   },
-  menuItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-    borderBottomWidth: 1,
-    borderBottomColor: COLORS.BORDER,
-  },
-  menuItemLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flex: 1,
-  },
-  menuIcon: {
-    fontSize: 20,
-    marginRight: 12,
-  },
-  menuLabel: {
-    fontSize: 16,
-    color: COLORS.TEXT_PRIMARY,
-  },
-  menuArrow: {
-    fontSize: 24,
-    color: COLORS.TEXT_SECONDARY,
+  logoutContainer: {
+    marginHorizontal: IOS_STYLES.SPACING.MD,
+    marginBottom: IOS_STYLES.SPACING.XL,
   },
   logoutButton: {
-    backgroundColor: '#FFFFFF',
-    marginHorizontal: 20,
-    paddingVertical: 16,
-    borderRadius: 12,
-    alignItems: 'center',
-    borderWidth: 1,
     borderColor: COLORS.ERROR,
   },
   logoutText: {
-    fontSize: 16,
-    fontWeight: '600',
     color: COLORS.ERROR,
   },
 });

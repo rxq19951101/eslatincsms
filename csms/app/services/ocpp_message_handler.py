@@ -385,9 +385,28 @@ class OCPPMessageHandler:
             id_tag = str(payload.get("idTag", ""))
             meter_start = payload.get("meterStart", 0)
             user_id = None
-            # 爆改测试版：RemoteStart 使用 APPUSER:{uuid} 作为 idTag，便于反推平台用户
-            if id_tag.startswith("APPUSER:"):
-                user_id = id_tag.replace("APPUSER:", "", 1).strip() or None
+            # 爆改测试版：RemoteStart 使用 APP + UUID前17字符 作为 idTag (共20字符)
+            # OCPP 1.6J 规定 idTag 最大长度为 20 个字符
+            # 格式：APP + UUID去掉连字符后的前17个字符
+            if id_tag.startswith("APP") and len(id_tag) == 20:
+                # 提取 UUID 前缀（17个字符），然后查找匹配的 AppUser
+                uuid_prefix = id_tag[3:]  # 去掉 "APP" 前缀
+                # 在数据库中查找 UUID 前17个字符匹配的用户
+                # UUID 格式：xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx (32个字符，去掉连字符)
+                # 我们需要查找所有以这个前缀开头的 UUID
+                from app.database.models import AppUser
+                from sqlalchemy import func
+                # 查找 UUID 字符串表示的前17个字符匹配的用户
+                # 注意：UUID 在 PostgreSQL 中是二进制格式，需要转换为字符串比较
+                from sqlalchemy import String
+                matching_users = db.query(AppUser).filter(
+                    func.replace(func.cast(AppUser.id, String), "-", "").like(f"{uuid_prefix}%")
+                ).limit(1).all()
+                if matching_users:
+                    user_id = str(matching_users[0].id)
+                    logger.info(f"[{charge_point_id}] Parsed AppUser ID from idTag {id_tag}: {user_id}")
+                else:
+                    logger.warning(f"[{charge_point_id}] Could not find AppUser for idTag prefix: {uuid_prefix}")
             
             # 开始会话
             session = self.session_service.start_session(

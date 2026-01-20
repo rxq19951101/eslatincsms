@@ -280,19 +280,28 @@ def get_site_detail(
         for r in latest_rows:
             status_map[r.charge_point_id] = {
                 "status": r.status or "Unknown",
-                "last_seen": r.last_seen.isoformat() if r.last_seen else None,
+                "last_seen": r.last_seen,  # 保持 datetime 对象，后面再转换
             }
 
     charge_points: List[SiteDetailChargePoint] = []
     for cp in cps:
         st = status_map.get(cp.id) or {"status": "Unknown", "last_seen": None}
+        
+        # 根据 last_seen 判断是否真正在线（超过5分钟未更新则认为离线）
+        status_to_use = st["status"]
+        last_seen_dt = st["last_seen"]
+        if last_seen_dt:
+            time_diff = datetime.now(timezone.utc) - last_seen_dt.replace(tzinfo=timezone.utc) if last_seen_dt.tzinfo is None else datetime.now(timezone.utc) - last_seen_dt
+            if time_diff.total_seconds() >= 300:  # 超过5分钟未更新则认为离线
+                status_to_use = "Offline"
+        
         charge_points.append(
             SiteDetailChargePoint(
                 id=cp.id,
                 vendor=cp.vendor,
                 model=cp.model,
-                status=st["status"],
-                last_seen=st["last_seen"],
+                status=status_to_use,
+                last_seen=last_seen_dt.isoformat() if last_seen_dt else None,
                 site_id=site.id,
                 site_name=site.name,
             )

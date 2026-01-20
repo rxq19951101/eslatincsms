@@ -97,6 +97,7 @@ export const API_ENDPOINTS = {
   // 充电控制
   CHARGING: {
     // 仅支持扫码充电：走 APP 专用接口（后端会内部调用 OCPP RemoteStart/Stop）
+    CHECK: '/api/v1/app/charging/check',
     START: '/api/v1/app/charging/start',
     ACTIVE: '/api/v1/app/charging/active',
     STOP: '/api/v1/app/charging/stop',
@@ -182,4 +183,75 @@ export const COLORS = {
   TEXT_SECONDARY: '#6B7280',
   BORDER: '#E5E7EB',
   DISABLED: '#D1D5DB',
+  // iOS 风格颜色
+  IOS_BLUE: '#007AFF',
+  IOS_GRAY: '#8E8E93',
+  IOS_LIGHT_GRAY: '#F2F2F7',
+  IOS_SEPARATOR: '#C6C6C8',
+  IOS_WHITE: '#FFFFFF',
+  IOS_BLACK: '#000000',
+} as const;
+
+// iOS 风格样式常量
+export const IOS_STYLES = {
+  // 圆角
+  RADIUS: {
+    SMALL: 8,
+    MEDIUM: 12,
+    LARGE: 16,
+    XLARGE: 20,
+    ROUND: 9999,
+  },
+  // 间距（8px 基准）
+  SPACING: {
+    XS: 4,
+    SM: 8,
+    MD: 16,
+    LG: 24,
+    XL: 32,
+    XXL: 48,
+  },
+  // 阴影（iOS 风格）
+  SHADOW: {
+    SMALL: {
+      shadowColor: '#000',
+      shadowOffset: { width: 0, height: 1 },
+      shadowOpacity: 0.08,
+      shadowRadius: 3,
+      elevation: 2,
+    },
+    MEDIUM: {
+      shadowColor: '#000',
+      shadowOffset: { width: 0, height: 2 },
+      shadowOpacity: 0.12,
+      shadowRadius: 8,
+      elevation: 4,
+    },
+    LARGE: {
+      shadowColor: '#000',
+      shadowOffset: { width: 0, height: 4 },
+      shadowOpacity: 0.16,
+      shadowRadius: 16,
+      elevation: 8,
+    },
+  },
+  // 字体大小
+  FONT_SIZE: {
+    TINY: 10,
+    SMALL: 12,
+    BODY: 14,
+    MEDIUM: 16,
+    LARGE: 18,
+    XLARGE: 20,
+    TITLE: 24,
+    HEADLINE: 28,
+  },
+  // 字体权重
+  FONT_WEIGHT: {
+    REGULAR: '400' as const,
+    MEDIUM: '500' as const,
+    SEMIBOLD: '600' as const,
+    BOLD: '700' as const,
+    HEAVY: '800' as const,
+  },
 } as const;

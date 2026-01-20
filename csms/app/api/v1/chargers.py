@@ -130,8 +130,19 @@ def list_chargers(
         evse_status = db.query(EVSEStatus).filter(
             EVSEStatus.charge_point_id == cp.id
         ).first()
-        status = evse_status.status if evse_status else "Unknown"
         last_seen = evse_status.last_seen if evse_status else None
+        
+        # 根据 last_seen 判断是否真正在线（超过5分钟未更新则认为离线）
+        is_online = False
+        if last_seen:
+            time_diff = datetime.now(timezone.utc) - last_seen
+            is_online = time_diff.total_seconds() < 300  # 5分钟内更新过才认为在线
+        
+        # 如果充电桩离线，即使status是Available也标记为Offline
+        if not is_online:
+            status = "Offline"
+        else:
+            status = evse_status.status if evse_status else "Unknown"
         
         is_configured = has_location and has_pricing
         
@@ -211,8 +222,19 @@ def get_charger(
     evse_status = db.query(EVSEStatus).filter(
         EVSEStatus.charge_point_id == charge_point.id
     ).first()
-    status = evse_status.status if evse_status else "Unknown"
     last_seen = evse_status.last_seen if evse_status else None
+    
+    # 根据 last_seen 判断是否真正在线（超过5分钟未更新则认为离线）
+    is_online_detail = False
+    if last_seen:
+        time_diff = datetime.now(timezone.utc) - last_seen
+        is_online_detail = time_diff.total_seconds() < 300  # 5分钟内更新过才认为在线
+    
+    # 如果充电桩离线，即使status是Available也标记为Offline
+    if not is_online_detail:
+        status = "Offline"
+    else:
+        status = evse_status.status if evse_status else "Unknown"
     
     # 获取EVSE列表（包含 connector_type）
     evses = db.query(EVSE).filter(EVSE.charge_point_id == charge_point.id).all()

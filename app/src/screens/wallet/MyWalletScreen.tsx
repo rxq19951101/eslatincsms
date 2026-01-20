@@ -3,12 +3,16 @@
  */
 
 import React, { useEffect } from 'react';
-import { View, Text, StyleSheet, StatusBar, TouchableOpacity, FlatList, ActivityIndicator } from 'react-native';
+import { View, Text, StyleSheet, StatusBar, FlatList } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { COLORS } from '../../constants/config';
+import { COLORS, IOS_STYLES } from '../../constants/config';
 import { useAppDispatch, useAppSelector } from '../../hooks/useRedux';
 import { fetchWalletBalance, fetchWalletTransactions, topUp } from '../../store/slices/walletSlice';
 import type { WalletTransaction } from '../../types';
+import Icon from '../../components/ui/Icon';
+import Button from '../../components/ui/Button';
+import Card from '../../components/ui/Card';
+import LoadingSpinner from '../../components/ui/LoadingSpinner';
 
 const MyWalletScreen = () => {
   const dispatch = useAppDispatch();
@@ -24,17 +28,28 @@ const MyWalletScreen = () => {
     return `${sign}$${Math.abs(amount).toFixed(2)}`;
   };
 
-  const renderTx = ({ item }: { item: WalletTransaction }) => {
+  const renderTx = ({ item, index }: { item: WalletTransaction; index: number }) => {
     const isTopUp = item.type === 'top_up';
     const color = isTopUp ? COLORS.SUCCESS : COLORS.ERROR;
     return (
-      <View style={styles.txRow}>
+      <Card
+        key={item.id}
+        style={[styles.txRow, { marginBottom: index < transactions.length - 1 ? IOS_STYLES.SPACING.SM : 0 }]}
+      >
         <View style={styles.txLeft}>
-          <Text style={styles.txTitle}>{item.description || (isTopUp ? '充值' : '充电扣费')}</Text>
+          <View style={styles.txIconContainer}>
+            <Icon
+              name={isTopUp ? 'add-circle' : 'remove-circle'}
+              library="Ionicons"
+              size={20}
+              color={color}
+            />
+            <Text style={styles.txTitle}>{item.description || (isTopUp ? '充值' : '充电扣费')}</Text>
+          </View>
           <Text style={styles.txTime}>{item.created_at}</Text>
         </View>
         <Text style={[styles.txAmount, { color }]}>{amountText(item.amount)}</Text>
-      </View>
+      </Card>
     );
   };
 
@@ -47,7 +62,7 @@ const MyWalletScreen = () => {
       </View>
 
       {/* Balance Card */}
-      <View style={styles.balanceCard}>
+      <Card style={styles.balanceCard}>
         <Text style={styles.balanceLabel}>可用余额</Text>
         <Text style={styles.balanceAmount}>
           {loadingBalance && !balance ? '—' : `$${(balance?.balance ?? 0).toFixed(2)}`}
@@ -55,10 +70,9 @@ const MyWalletScreen = () => {
         
         <View style={styles.topUpRow}>
           {[10, 20, 50].map((amt) => (
-            <TouchableOpacity
+            <Button
               key={amt}
-              style={[styles.topUpButton, toppingUp && styles.disabled]}
-              disabled={toppingUp}
+              title={`充值 $${amt}`}
               onPress={async () => {
                 try {
                   await dispatch(topUp(amt)).unwrap();
@@ -67,32 +81,36 @@ const MyWalletScreen = () => {
                   // 错误已进入 slice.error
                 }
               }}
-            >
-              <Text style={styles.topUpButtonText}>充值 ${amt}</Text>
-            </TouchableOpacity>
+              variant="secondary"
+              size="small"
+              disabled={toppingUp}
+              style={{ marginRight: IOS_STYLES.SPACING.SM }}
+            />
           ))}
         </View>
-      </View>
+      </Card>
 
       {/* Transactions */}
       <View style={styles.transactionsSection}>
         <View style={styles.txHeader}>
           <Text style={styles.sectionTitle}>交易记录</Text>
-          {(loadingTx || toppingUp) && <ActivityIndicator size="small" color={COLORS.PRIMARY} />}
+          {(loadingTx || toppingUp) && (
+            <LoadingSpinner size="small" color={COLORS.IOS_BLUE} />
+          )}
         </View>
 
         {!!error && <Text style={styles.errorText}>{error}</Text>}
 
         {transactions.length === 0 && !loadingTx ? (
           <View style={styles.emptyState}>
-            <Text style={styles.emptyIcon}>💰</Text>
+            <Icon name="wallet" library="Ionicons" size={60} color={COLORS.TEXT_SECONDARY} />
             <Text style={styles.emptyText}>暂无交易记录</Text>
           </View>
         ) : (
           <FlatList
             data={transactions}
             keyExtractor={(item) => item.id}
-            renderItem={renderTx}
+            renderItem={({ item, index }) => renderTx({ item, index })}
             contentContainerStyle={{ paddingBottom: 20 }}
           />
         )}
@@ -117,10 +135,10 @@ const styles = StyleSheet.create({
   },
   balanceCard: {
     backgroundColor: COLORS.PRIMARY,
-    marginHorizontal: 20,
-    marginBottom: 24,
-    padding: 24,
-    borderRadius: 16,
+    marginHorizontal: IOS_STYLES.SPACING.MD,
+    marginBottom: IOS_STYLES.SPACING.LG,
+    padding: IOS_STYLES.SPACING.LG,
+    borderRadius: IOS_STYLES.RADIUS.LARGE,
   },
   balanceLabel: {
     fontSize: 14,
@@ -134,23 +152,10 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     marginBottom: 16,
   },
-  topUpButton: {
-    backgroundColor: '#FFFFFF',
-    paddingVertical: 10,
-    paddingHorizontal: 14,
-    borderRadius: 10,
-    marginRight: 10,
-    marginTop: 6,
-  },
-  topUpButtonText: {
-    color: COLORS.PRIMARY,
-    fontSize: 14,
-    fontWeight: '600',
-  },
   topUpRow: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    marginTop: 6,
+    marginTop: IOS_STYLES.SPACING.SM,
   },
   transactionsSection: {
     flex: 1,
@@ -167,36 +172,27 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     color: COLORS.TEXT_PRIMARY,
   },
-  emptyState: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  emptyIcon: {
-    fontSize: 60,
-    marginBottom: 12,
-  },
-  emptyText: {
-    fontSize: 14,
-    color: COLORS.TEXT_SECONDARY,
-  },
   txRow: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 12,
-    padding: 12,
-    borderWidth: 1,
-    borderColor: COLORS.BORDER,
+    padding: IOS_STYLES.SPACING.MD,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    marginBottom: 10,
   },
-  txLeft: { flex: 1, paddingRight: 10 },
-  txTitle: { fontWeight: '800', color: COLORS.TEXT_PRIMARY },
-  txTime: { marginTop: 6, color: COLORS.TEXT_SECONDARY, fontSize: 12 },
-  txAmount: { fontWeight: '900' },
-  errorText: { color: COLORS.ERROR, fontWeight: '700', marginBottom: 10 },
-  disabled: { opacity: 0.6 },
+  txLeft: { flex: 1, paddingRight: IOS_STYLES.SPACING.MD },
+  txIconContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: IOS_STYLES.SPACING.SM,
+  },
+  txTitle: { fontWeight: IOS_STYLES.FONT_WEIGHT.HEAVY, color: COLORS.TEXT_PRIMARY },
+  txTime: { marginTop: IOS_STYLES.SPACING.SM, color: COLORS.TEXT_SECONDARY, fontSize: IOS_STYLES.FONT_SIZE.SMALL },
+  txAmount: { fontWeight: IOS_STYLES.FONT_WEIGHT.HEAVY },
+  errorText: { color: COLORS.ERROR, fontWeight: IOS_STYLES.FONT_WEIGHT.BOLD, marginBottom: IOS_STYLES.SPACING.MD },
+  emptyState: {
+    padding: IOS_STYLES.SPACING.XL,
+    alignItems: 'center',
+    gap: IOS_STYLES.SPACING.MD,
+  },
 });
 
 export default MyWalletScreen;

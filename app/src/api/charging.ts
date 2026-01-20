@@ -24,11 +24,40 @@ export interface ActiveChargingSession {
   meter_stop: number | null;
 }
 
+export interface ChargerStatusCheck {
+  charger_id: string;
+  connector_id: number;
+  status: 'offline' | 'charging' | 'available';
+  is_online: boolean;
+  last_seen?: string;
+  connector_status: string;
+  active_session?: {
+    session_id: number;
+    user_id: string;
+    is_current_user: boolean;
+    start_time: string;
+  };
+  charger_info?: {
+    vendor?: string;
+    model?: string;
+    site_name?: string;
+    site_address?: string;
+    price_per_kwh?: number;
+  };
+}
+
 export async function startChargingByScan(params: {
   qrToken: string;
 }): Promise<RemoteResponse> {
   const res = await apiClient.post<RemoteResponse>(API_ENDPOINTS.CHARGING.START, {
     qr_token: params.qrToken,
+  });
+  return res.data;
+}
+
+export async function checkChargerStatus(qrToken: string): Promise<ChargerStatusCheck> {
+  const res = await apiClient.get<ChargerStatusCheck>(API_ENDPOINTS.CHARGING.CHECK, {
+    params: { qr_token: qrToken },
   });
   return res.data;
 }

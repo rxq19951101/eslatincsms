@@ -108,6 +108,8 @@ export interface PaymentMethod {
 
 // ==================== 导航相关 ====================
 
+import type { NavigatorScreenParams } from '@react-navigation/native';
+
 export type RootStackParamList = {
   // Auth
   Welcome: undefined;
@@ -120,7 +122,7 @@ export type RootStackParamList = {
   SocialAuthCallback: { provider: string; token: string };
   
   // Main App
-  MainTabs: undefined;
+  MainTabs: NavigatorScreenParams<MainTabsParamList>;
   LocationPermission: undefined;
   StationDetail: { chargePointId: string };
   // 仅支持扫码充电：不再实现预订模块（BookingDetail 等路由移除）

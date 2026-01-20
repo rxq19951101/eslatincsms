@@ -124,7 +124,22 @@ async def list_chargers_for_app(
             .filter(EVSEStatus.charge_point_id == charger.id)
             .all()
         ]
-        if "Charging" in statuses:
+        
+        last_seen = db.query(func.max(EVSEStatus.last_seen)).filter(
+            EVSEStatus.charge_point_id == charger.id
+        ).scalar()
+        
+        # 根据 last_seen 判断是否真正在线（超过5分钟未更新则认为离线）
+        from datetime import datetime, timedelta, timezone
+        is_online = False
+        if last_seen:
+            time_diff = datetime.now(timezone.utc) - last_seen
+            is_online = time_diff.total_seconds() < 300  # 5分钟内更新过才认为在线
+        
+        # 如果充电桩离线，即使status是Available也标记为Offline
+        if not is_online:
+            overall_status = "Offline"
+        elif "Charging" in statuses:
             overall_status = "Charging"
         elif "Available" in statuses:
             overall_status = "Available"
@@ -132,10 +147,6 @@ async def list_chargers_for_app(
             overall_status = statuses[0] or "Unknown"
         else:
             overall_status = "Unknown"
-
-        last_seen = db.query(func.max(EVSEStatus.last_seen)).filter(
-            EVSEStatus.charge_point_id == charger.id
-        ).scalar()
         
         charger_data = {
             "id": charger.id,
@@ -213,7 +224,22 @@ async def get_charger_detail_for_app(
         row.evse_id: row.status
         for row in db.query(EVSEStatus).filter(EVSEStatus.charge_point_id == charger.id).all()
     }
+    
+    # 检查最后更新时间判断是否在线
+    last_seen_detail = db.query(func.max(EVSEStatus.last_seen)).filter(
+        EVSEStatus.charge_point_id == charger.id
+    ).scalar()
+    
+    from datetime import datetime, timedelta, timezone
+    is_online_detail = False
+    if last_seen_detail:
+        time_diff = datetime.now(timezone.utc) - last_seen_detail
+        is_online_detail = time_diff.total_seconds() < 300  # 5分钟内更新过才认为在线
+    
     available_count = sum(1 for e in evses if status_map.get(e.id) == "Available")
+    
+    # 如果离线，状态为Offline；否则根据available数量判断
+    detail_status = "Offline" if not is_online_detail else ("Available" if available_count > 0 else "Unknown")
     
     return {
         "id": charger.id,
@@ -225,11 +251,11 @@ async def get_charger_detail_for_app(
         "site_address": site.address if site else None,
         "latitude": float(site.latitude) if site and site.latitude else None,
         "longitude": float(site.longitude) if site and site.longitude else None,
-        "status": "Available" if available_count > 0 else "Unknown",
+        "status": detail_status,
         "price_per_kwh": float(tariff.base_price_per_kwh) if tariff else None,
         "available_connectors": available_count,
         "total_connectors": len(evses),
-        "last_seen": None,
+        "last_seen": last_seen_detail.isoformat() if last_seen_detail else None,
         "connectors": [
             {
                 "id": evse.id,

@@ -22,11 +22,13 @@ import { useNavigation, useRoute } from '@react-navigation/native';
 import type { RouteProp } from '@react-navigation/native';
 import type { StackNavigationProp } from '@react-navigation/stack';
 
-import { COLORS } from '../../constants/config';
+import { COLORS, IOS_STYLES } from '../../constants/config';
 import type { RootStackParamList } from '../../types';
 import { useAppDispatch, useAppSelector } from '../../hooks/useRedux';
 import { fetchChargerById } from '../../store/slices/chargerSlice';
 import GoogleMapView from '../../components/GoogleMapView';
+import Icon from '../../components/ui/Icon';
+import Button from '../../components/ui/Button';
 
 type StationDetailRouteProp = RouteProp<RootStackParamList, 'StationDetail'>;
 type StationDetailNavProp = StackNavigationProp<RootStackParamList, 'StationDetail'>;
@@ -99,7 +101,8 @@ const StationDetailScreen = () => {
 
   const handleStartCharging = () => {
     // 爆改测试版：启动充电必须扫码获取 qr_token
-    navigation.navigate('Scan');
+    // Scan 在 Tab 导航器中，需要通过 MainTabs 导航
+    navigation.navigate('MainTabs', { screen: 'Scan' });
   };
 
   return (
@@ -109,7 +112,7 @@ const StationDetailScreen = () => {
       {/* Header */}
       <View style={styles.header}>
         <TouchableOpacity style={styles.backButton} onPress={() => navigation.goBack()}>
-          <Text style={styles.backText}>←</Text>
+          <Icon name="arrow-back" library="Ionicons" size={24} color={COLORS.TEXT_PRIMARY} />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>充电站详情</Text>
         <View style={styles.headerRight} />
@@ -142,12 +145,10 @@ const StationDetailScreen = () => {
         {/* Empty */}
         {!loading && !error && !charger && (
           <View style={styles.emptyContainer}>
-            <Text style={styles.emptyIcon}>🔎</Text>
+            <Icon name="search" library="Ionicons" size={56} color={COLORS.TEXT_SECONDARY} />
             <Text style={styles.emptyTitle}>未找到充电站</Text>
             <Text style={styles.emptyText}>该充电站可能已被删除或暂无权限查看。</Text>
-            <TouchableOpacity style={styles.retryButton} onPress={loadDetail}>
-              <Text style={styles.retryText}>重新加载</Text>
-            </TouchableOpacity>
+            <Button title="重新加载" onPress={loadDetail} variant="primary" size="medium" />
           </View>
         )}
 
@@ -259,20 +260,23 @@ const StationDetailScreen = () => {
 
       {/* Bottom actions */}
       <View style={styles.bottomBar}>
-        <TouchableOpacity style={[styles.actionBtn, styles.secondaryBtn]} onPress={handleNavigate}>
-          <Text style={styles.secondaryBtnText}>导航</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={[
-            styles.actionBtn,
-            styles.primaryBtn,
-            !isAvailable && styles.disabledBtn,
-          ]}
-          disabled={!isAvailable}
+        <Button
+          title="导航"
+          onPress={handleNavigate}
+          variant="secondary"
+          size="large"
+          icon={{ name: 'navigate', library: 'Ionicons' }}
+          style={{ flex: 1, marginRight: 10 }}
+        />
+        <Button
+          title={isAvailable ? '开始充电' : '暂无可用接口'}
           onPress={handleStartCharging}
-        >
-          <Text style={styles.primaryBtnText}>{isAvailable ? '开始充电' : '暂无可用接口'}</Text>
-        </TouchableOpacity>
+          variant="primary"
+          size="large"
+          disabled={!isAvailable}
+          icon={{ name: 'flash', library: 'Ionicons' }}
+          style={{ flex: 1 }}
+        />
       </View>
     </SafeAreaView>
   );
@@ -290,7 +294,6 @@ const styles = StyleSheet.create({
     borderBottomColor: COLORS.BORDER,
   },
   backButton: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
-  backText: { fontSize: 22, color: COLORS.TEXT_PRIMARY },
   headerTitle: { flex: 1, textAlign: 'center', fontSize: 16, fontWeight: '700', color: COLORS.TEXT_PRIMARY },
   headerRight: { width: 44 },
 
@@ -303,13 +306,10 @@ const styles = StyleSheet.create({
   errorTitle: { fontSize: 16, fontWeight: '700', color: COLORS.ERROR, marginBottom: 8 },
   errorText: { color: COLORS.TEXT_SECONDARY, textAlign: 'center', marginBottom: 16 },
 
-  emptyContainer: { paddingVertical: 32, alignItems: 'center' },
-  emptyIcon: { fontSize: 56, marginBottom: 12 },
+  emptyContainer: { paddingVertical: 32, alignItems: 'center', gap: IOS_STYLES.SPACING.MD },
   emptyTitle: { fontSize: 16, fontWeight: '700', color: COLORS.TEXT_PRIMARY, marginBottom: 6 },
   emptyText: { color: COLORS.TEXT_SECONDARY, textAlign: 'center', marginBottom: 16 },
 
-  retryButton: { paddingHorizontal: 20, paddingVertical: 10, borderRadius: 10, backgroundColor: COLORS.PRIMARY },
-  retryText: { color: '#FFFFFF', fontWeight: '700' },
 
   card: {
     backgroundColor: '#FFFFFF',
@@ -360,17 +360,11 @@ const styles = StyleSheet.create({
 
   bottomBar: {
     flexDirection: 'row',
-    padding: 12,
-    backgroundColor: '#FFFFFF',
-    borderTopWidth: 1,
-    borderTopColor: COLORS.BORDER,
+    padding: IOS_STYLES.SPACING.MD,
+    backgroundColor: COLORS.IOS_WHITE,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: COLORS.IOS_SEPARATOR,
   },
-  actionBtn: { flex: 1, paddingVertical: 14, borderRadius: 12, alignItems: 'center' },
-  secondaryBtn: { backgroundColor: '#E5E7EB', marginRight: 10 },
-  secondaryBtnText: { color: COLORS.TEXT_PRIMARY, fontWeight: '800' },
-  primaryBtn: { backgroundColor: COLORS.PRIMARY },
-  primaryBtnText: { color: '#FFFFFF', fontWeight: '800' },
-  disabledBtn: { backgroundColor: COLORS.DISABLED },
 });
 
 export default StationDetailScreen;

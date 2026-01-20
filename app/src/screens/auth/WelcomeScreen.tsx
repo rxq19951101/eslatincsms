@@ -16,7 +16,9 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useNavigation } from '@react-navigation/native';
 import type { StackNavigationProp } from '@react-navigation/stack';
 import type { RootStackParamList } from '../../types';
-import { COLORS } from '../../constants/config';
+import { COLORS, IOS_STYLES } from '../../constants/config';
+import Icon from '../../components/ui/Icon';
+import Button from '../../components/ui/Button';
 
 type WelcomeScreenNavigationProp = StackNavigationProp<RootStackParamList, 'Welcome'>;
 

@@ -37,9 +37,11 @@ async def get_current_app_user(
 
 def _app_user_id_tag(app_user: AppUser) -> str:
     """
-    平台账号的 ChargingSession.id_tag 我们使用 APPUSER:{uuid}
+    平台账号的 ChargingSession.id_tag 我们使用 APP + UUID前17字符 (共20字符)
+    OCPP 1.6J 规定 idTag 最大长度为 20 个字符
     """
-    return f"APPUSER:{app_user.id}"
+    user_uuid_str = str(app_user.id).replace("-", "")
+    return f"APP{user_uuid_str[:17]}"
 
 
 @router.get("", summary="获取充电记录列表（终端用户）")

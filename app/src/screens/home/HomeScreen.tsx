@@ -11,12 +11,11 @@ import {
   TextInput,
   FlatList,
   StatusBar,
-  ActivityIndicator,
   Alert,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as Location from 'expo-location';
-import { COLORS, MAP_CONFIG } from '../../constants/config';
+import { COLORS, MAP_CONFIG, IOS_STYLES } from '../../constants/config';
 import { useAppDispatch, useAppSelector } from '../../hooks/useRedux';
 import { fetchChargers, fetchNearbyChargers } from '../../store/slices/chargerSlice';
 import { Charger } from '../../api/chargers';
@@ -25,6 +24,12 @@ import type { StackNavigationProp } from '@react-navigation/stack';
 import type { RootStackParamList } from '../../types';
 import { Platform } from 'react-native';
 import GoogleMapView, { type MapMarker } from '../../components/GoogleMapView';
+import Icon from '../../components/ui/Icon';
+import Card from '../../components/ui/Card';
+import Button from '../../components/ui/Button';
+import LoadingSpinner from '../../components/ui/LoadingSpinner';
+import { SkeletonCard } from '../../components/ui/Skeleton';
+import { formatDistance } from '../../utils/formatDistance';
 
 const HomeScreen = () => {
   const dispatch = useAppDispatch();
@@ -34,6 +39,7 @@ const HomeScreen = () => {
   const [viewMode, setViewMode] = useState<'list' | 'map'>('list');
   const [searchQuery, setSearchQuery] = useState('');
   const [userLocation, setUserLocation] = useState<[number, number] | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
 
   // 获取用户位置并加载附近充电站
   useEffect(() => {
@@ -72,8 +78,10 @@ const HomeScreen = () => {
     }
   };
 
-  const handleRefresh = () => {
-    loadChargers();
+  const handleRefresh = async () => {
+    setRefreshing(true);
+    await loadChargers();
+    setRefreshing(false);
   };
 
   const handleMarkerPress = (charger: Charger) => {
@@ -81,16 +89,17 @@ const HomeScreen = () => {
     navigation.navigate('StationDetail', { chargePointId: charger.id });
   };
 
-  const renderStationCard = ({ item }: { item: Charger }) => {
+  const renderStationCard = ({ item, index }: { item: Charger; index: number }) => {
     const available = item.available_connectors || 0;
     const total = item.total_connectors || 0;
     const isAvailable = available > 0;
 
     return (
-      <TouchableOpacity
-        style={styles.stationCard}
-        activeOpacity={0.7}
+      <Card
+        key={item.id}
         onPress={() => handleMarkerPress(item)}
+        interactive={true}
+        style={[styles.stationCard, { marginBottom: index < filteredChargers.length - 1 ? IOS_STYLES.SPACING.MD : 0 }]}
       >
         <View style={styles.cardHeader}>
           <Text style={styles.stationName}>
@@ -112,13 +121,23 @@ const HomeScreen = () => {
           </View>
         </View>
 
-        <Text style={styles.stationAddress}>
-          {item.site_address || '地址未知'}
-        </Text>
+        <View style={styles.addressRow}>
+          <Text style={styles.stationAddress}>
+            {item.site_address || '地址未知'}
+          </Text>
+          {item.distance_km !== undefined && (
+            <View style={styles.distanceItem}>
+              <Icon name="location" library="Ionicons" size={14} color={COLORS.TEXT_SECONDARY} />
+              <Text style={styles.distanceText}>
+                {formatDistance(item.distance_km)}
+              </Text>
+            </View>
+          )}
+        </View>
 
         <View style={styles.cardFooter}>
           <View style={styles.infoItem}>
-            <Text style={styles.infoIcon}>⚡</Text>
+            <Icon name="flash" library="Ionicons" size={16} color={COLORS.TEXT_PRIMARY} />
             <Text
               style={[styles.infoText, !isAvailable && styles.unavailableText]}
             >
@@ -128,7 +147,7 @@ const HomeScreen = () => {
 
           {item.price_per_kwh && (
             <View style={styles.infoItem}>
-              <Text style={styles.infoIcon}>💵</Text>
+              <Icon name="cash" library="Ionicons" size={16} color={COLORS.TEXT_PRIMARY} />
               <Text style={styles.infoText}>
                 ${item.price_per_kwh.toFixed(2)}/kWh
               </Text>
@@ -136,11 +155,11 @@ const HomeScreen = () => {
           )}
 
           <View style={styles.infoItem}>
-            <Text style={styles.infoIcon}>📡</Text>
+            <Icon name="radio" library="Ionicons" size={16} color={COLORS.TEXT_PRIMARY} />
             <Text style={styles.infoText}>{item.status}</Text>
           </View>
         </View>
-      </TouchableOpacity>
+      </Card>
     );
   };
 
@@ -184,17 +203,24 @@ const HomeScreen = () => {
         <Text style={styles.headerTitle}>充电站</Text>
         <View style={styles.headerActions}>
           <TouchableOpacity style={styles.refreshButton} onPress={handleRefresh}>
-            <Text style={styles.refreshIcon}>🔄</Text>
+            <Icon
+              name="refresh"
+              library="Ionicons"
+              size={24}
+              color={COLORS.IOS_BLUE}
+              animation="spin"
+              animating={refreshing}
+            />
           </TouchableOpacity>
           <TouchableOpacity style={styles.filterButton}>
-            <Text style={styles.filterIcon}>⚙️</Text>
+            <Icon name="settings" library="Ionicons" size={24} color={COLORS.IOS_BLUE} />
           </TouchableOpacity>
         </View>
       </View>
 
       {/* Search Bar */}
       <View style={styles.searchContainer}>
-        <Text style={styles.searchIcon}>🔍</Text>
+        <Icon name="search" library="Ionicons" size={20} color={COLORS.TEXT_SECONDARY} />
         <TextInput
           style={styles.searchInput}
           placeholder="搜索充电站..."
@@ -207,17 +233,15 @@ const HomeScreen = () => {
       {/* 加载和错误状态 */}
       {loading && viewMode === 'list' && (
         <View style={styles.loadingContainer}>
-          <ActivityIndicator size="large" color={COLORS.PRIMARY} />
-          <Text style={styles.loadingText}>加载中...</Text>
+          <SkeletonCard count={3} />
         </View>
       )}
 
       {error && (
         <View style={styles.errorContainer}>
-          <Text style={styles.errorText}>❌ {error}</Text>
-          <TouchableOpacity style={styles.retryButton} onPress={handleRefresh}>
-            <Text style={styles.retryText}>重试</Text>
-          </TouchableOpacity>
+          <Icon name="alert-circle" library="Ionicons" size={48} color={COLORS.ERROR} />
+          <Text style={styles.errorText}>{error}</Text>
+          <Button title="重试" onPress={handleRefresh} variant="primary" size="medium" />
         </View>
       )}
 
@@ -265,30 +289,25 @@ const HomeScreen = () => {
           {viewMode === 'list' ? (
             <FlatList
               data={filteredChargers}
-              renderItem={renderStationCard}
+              renderItem={({ item, index }) => renderStationCard({ item, index })}
               keyExtractor={(item) => item.id}
               contentContainerStyle={styles.listContent}
               showsVerticalScrollIndicator={false}
               ListEmptyComponent={
                 <View style={styles.emptyContainer}>
-                  <Text style={styles.emptyIcon}>🔍</Text>
+                  <Icon name="search" library="Ionicons" size={60} color={COLORS.TEXT_SECONDARY} />
                   <Text style={styles.emptyText}>
                     {searchQuery ? '未找到匹配的充电站' : '暂无充电站数据'}
                   </Text>
                   {!searchQuery && (
-                    <TouchableOpacity
-                      style={styles.emptyButton}
-                      onPress={handleRefresh}
-                    >
-                      <Text style={styles.emptyButtonText}>刷新</Text>
-                    </TouchableOpacity>
+                    <Button title="刷新" onPress={handleRefresh} variant="primary" size="medium" />
                   )}
                 </View>
               }
             />
-          ) : Platform.OS === 'web' || !CustomMapView ? (
+          ) : Platform.OS === 'web' || !GoogleMapView ? (
             <View style={styles.mapPlaceholder}>
-              <Text style={styles.placeholderIcon}>🗺️</Text>
+              <Icon name="map" library="Ionicons" size={80} color={COLORS.TEXT_SECONDARY} />
               <Text style={styles.placeholderText}>地图视图</Text>
               <Text style={styles.placeholderSubtext}>
                 地图功能在Web平台受限{'\n'}
@@ -340,10 +359,7 @@ const styles = StyleSheet.create({
     height: 40,
     justifyContent: 'center',
     alignItems: 'center',
-    marginRight: 8,
-  },
-  refreshIcon: {
-    fontSize: 20,
+    marginRight: IOS_STYLES.SPACING.SM,
   },
   filterButton: {
     width: 40,
@@ -351,24 +367,18 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
   },
-  filterIcon: {
-    fontSize: 20,
-  },
   searchContainer: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#FFFFFF',
-    marginHorizontal: 20,
-    marginBottom: 16,
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    borderRadius: 12,
+    backgroundColor: COLORS.IOS_WHITE,
+    marginHorizontal: IOS_STYLES.SPACING.MD,
+    marginBottom: IOS_STYLES.SPACING.MD,
+    paddingHorizontal: IOS_STYLES.SPACING.MD,
+    paddingVertical: IOS_STYLES.SPACING.MD,
+    borderRadius: IOS_STYLES.RADIUS.MEDIUM,
     borderWidth: 1,
     borderColor: COLORS.BORDER,
-  },
-  searchIcon: {
-    fontSize: 20,
-    marginRight: 8,
+    gap: IOS_STYLES.SPACING.SM,
   },
   searchInput: {
     flex: 1,
@@ -407,12 +417,7 @@ const styles = StyleSheet.create({
     paddingBottom: 20,
   },
   stationCard: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 12,
-    padding: 16,
-    marginBottom: 12,
-    borderWidth: 1,
-    borderColor: COLORS.BORDER,
+    padding: IOS_STYLES.SPACING.MD,
   },
   cardHeader: {
     flexDirection: 'row',
@@ -447,10 +452,27 @@ const styles = StyleSheet.create({
     height: 8,
     borderRadius: 4,
   },
+  addressRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: IOS_STYLES.SPACING.MD,
+  },
   stationAddress: {
-    fontSize: 14,
+    fontSize: IOS_STYLES.FONT_SIZE.BODY,
     color: COLORS.TEXT_SECONDARY,
-    marginBottom: 12,
+    flex: 1,
+    marginRight: IOS_STYLES.SPACING.SM,
+  },
+  distanceItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  distanceText: {
+    fontSize: IOS_STYLES.FONT_SIZE.SMALL,
+    color: COLORS.TEXT_SECONDARY,
+    fontWeight: IOS_STYLES.FONT_WEIGHT.MEDIUM,
   },
   cardFooter: {
     flexDirection: 'row',
@@ -459,73 +481,39 @@ const styles = StyleSheet.create({
   infoItem: {
     flexDirection: 'row',
     alignItems: 'center',
-  },
-  infoIcon: {
-    fontSize: 14,
-    marginRight: 4,
+    gap: 4,
   },
   infoText: {
-    fontSize: 12,
+    fontSize: IOS_STYLES.FONT_SIZE.SMALL,
     color: COLORS.TEXT_PRIMARY,
-    fontWeight: '500',
+    fontWeight: IOS_STYLES.FONT_WEIGHT.MEDIUM,
   },
   unavailableText: {
     color: COLORS.ERROR,
   },
   loadingContainer: {
-    padding: 40,
-    alignItems: 'center',
-  },
-  loadingText: {
-    marginTop: 12,
-    fontSize: 14,
-    color: COLORS.TEXT_SECONDARY,
+    padding: IOS_STYLES.SPACING.XL,
+    paddingHorizontal: IOS_STYLES.SPACING.MD,
   },
   errorContainer: {
-    padding: 20,
+    padding: IOS_STYLES.SPACING.XL,
     alignItems: 'center',
+    gap: IOS_STYLES.SPACING.MD,
   },
   errorText: {
-    fontSize: 14,
+    fontSize: IOS_STYLES.FONT_SIZE.MEDIUM,
     color: COLORS.ERROR,
     textAlign: 'center',
-    marginBottom: 12,
-  },
-  retryButton: {
-    paddingHorizontal: 24,
-    paddingVertical: 10,
-    backgroundColor: COLORS.PRIMARY,
-    borderRadius: 8,
-  },
-  retryText: {
-    color: '#FFFFFF',
-    fontSize: 14,
-    fontWeight: '600',
   },
   emptyContainer: {
-    padding: 40,
+    padding: IOS_STYLES.SPACING.XL,
     alignItems: 'center',
-  },
-  emptyIcon: {
-    fontSize: 60,
-    marginBottom: 16,
+    gap: IOS_STYLES.SPACING.MD,
   },
   emptyText: {
-    fontSize: 16,
+    fontSize: IOS_STYLES.FONT_SIZE.MEDIUM,
     color: COLORS.TEXT_SECONDARY,
     textAlign: 'center',
-    marginBottom: 16,
-  },
-  emptyButton: {
-    paddingHorizontal: 24,
-    paddingVertical: 10,
-    backgroundColor: COLORS.PRIMARY,
-    borderRadius: 8,
-  },
-  emptyButtonText: {
-    color: '#FFFFFF',
-    fontSize: 14,
-    fontWeight: '600',
   },
   mapContainer: {
     flex: 1,
@@ -535,10 +523,6 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     backgroundColor: '#E5E7EB',
-  },
-  placeholderIcon: {
-    fontSize: 80,
-    marginBottom: 16,
   },
   placeholderText: {
     fontSize: 20,

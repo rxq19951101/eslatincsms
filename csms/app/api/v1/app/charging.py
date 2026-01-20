@@ -8,13 +8,14 @@ from typing import Dict, Any, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
-from datetime import datetime, timezone
+from sqlalchemy import func, and_
+from datetime import datetime, timezone, timedelta
 from decimal import Decimal
 
 from app.core.logging_config import get_logger
 from app.core.auth import get_current_user
 from app.database.base import get_db, tenant_id_context, SuperSessionLocal
-from app.database.models import AppUser, ChargingSession, MeterValue, AppWalletTransaction, Tariff, ChargePoint
+from app.database.models import AppUser, ChargingSession, MeterValue, AppWalletTransaction, Tariff, ChargePoint, EVSEStatus, EVSE, Site
 from app.services.qr_service import resolve_qr_token
 
 from app.api.v1.ocpp_control import (
@@ -76,10 +77,14 @@ async def start_charging_by_scan(
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Invalid QR token: {e}")
 
-    id_tag = f"APPUSER:{current_user_obj.id}"
+    # OCPP 1.6J 规定 idTag 最大长度为 20 个字符
+    # 使用 APP (3字符) + UUID去掉连字符后的前17个字符 = 20字符
+    user_uuid_str = str(current_user_obj.id).replace("-", "")
+    id_tag = f"APP{user_uuid_str[:17]}"
     logger.info(
         f"[APP API] POST /api/v1/app/charging/start | user={current_user_obj.id} "
-        f"charge_point_id={token_rec.charge_point_id} connector_id={token_rec.connector_id} token={req.qr_token}"
+        f"charge_point_id={token_rec.charge_point_id} connector_id={token_rec.connector_id} token={req.qr_token} "
+        f"idTag={id_tag} (length={len(id_tag)})"
     )
 
     # 复用 ocpp_control 的实现
@@ -90,6 +95,159 @@ async def start_charging_by_scan(
             connectorId=token_rec.connector_id,
         )
     )
+
+
+@router.get("/check", summary="检查充电桩状态（扫码后）")
+def check_charger_status(
+    qr_token: str = Query(..., description="二维码 token"),
+    current_user_obj: AppUser = Depends(get_current_app_user),
+):
+    """
+    扫码后检查充电桩状态：
+    - 解析 qr_token 获取充电桩信息
+    - 检查充电桩是否在线（last_seen 5分钟内）
+    - 检查是否有活跃充电会话（区分当前用户和其他用户）
+    - 返回充电桩状态和可操作提示
+    """
+    logger.info(f"[APP API] GET /api/v1/app/charging/check | user={current_user_obj.id} qr_token={qr_token[:20]}...")
+    
+    # 解析 QR token（使用 super session 绕过 RLS）
+    sdb = SuperSessionLocal()
+    try:
+        try:
+            token_rec = resolve_qr_token(db=sdb, token=qr_token)
+            charge_point_id = token_rec.charge_point_id
+            connector_id = token_rec.connector_id
+            logger.info(f"[APP API] QR token resolved: charge_point_id={charge_point_id}, connector_id={connector_id}")
+        except ValueError as e:
+            logger.warning(f"[APP API] Invalid QR token: {qr_token[:20]}... - {e}")
+            raise HTTPException(status_code=400, detail=f"Invalid QR token: {e}")
+        except Exception as e:
+            logger.error(f"[APP API] Error resolving QR token: {e}", exc_info=True)
+            raise HTTPException(status_code=400, detail=f"Invalid QR token: {e}")
+    finally:
+        sdb.close()
+
+    # 使用 super session 查询充电桩信息（绕过 RLS）
+    db = SuperSessionLocal()
+    try:
+        # 获取充电桩基本信息
+        charger = db.query(ChargePoint).filter(ChargePoint.id == charge_point_id).first()
+        if not charger:
+            logger.warning(f"[APP API] Charger not found: {charge_point_id} (from QR token: {qr_token[:20]}...)")
+            raise HTTPException(status_code=404, detail=f"Charger not found: {charge_point_id}")
+        
+        logger.info(f"[APP API] Charger found: {charge_point_id}, tenant_id={charger.tenant_id}")
+
+        # 获取站点信息
+        site = charger.site if charger.site_id else None
+
+        # 获取定价信息
+        tariff = None
+        now = datetime.now(timezone.utc)
+        if charger.site_id:
+            tariff = (
+                db.query(Tariff)
+                .filter(
+                    Tariff.tenant_id == charger.tenant_id,
+                    Tariff.site_id == charger.site_id,
+                    Tariff.charge_point_id.is_(None),
+                    Tariff.is_active == True,  # noqa: E712
+                    Tariff.valid_from <= now,
+                )
+                .filter((Tariff.valid_until.is_(None)) | (Tariff.valid_until >= now))
+                .order_by(Tariff.valid_from.desc())
+                .first()
+            )
+        if not tariff:
+            tariff = (
+                db.query(Tariff)
+                .filter(
+                    Tariff.tenant_id == charger.tenant_id,
+                    Tariff.charge_point_id == charge_point_id,
+                    Tariff.is_active == True,  # noqa: E712
+                    Tariff.valid_from <= now,
+                )
+                .filter((Tariff.valid_until.is_(None)) | (Tariff.valid_until >= now))
+                .order_by(Tariff.valid_from.desc())
+                .first()
+            )
+
+        # 检查充电桩是否在线（通过 last_seen）
+        last_seen = db.query(func.max(EVSEStatus.last_seen)).filter(
+            EVSEStatus.charge_point_id == charge_point_id
+        ).scalar()
+
+        is_online = False
+        if last_seen:
+            time_diff = datetime.now(timezone.utc) - last_seen
+            is_online = time_diff.total_seconds() < 300  # 5分钟内更新过才认为在线
+
+        # 检查是否有活跃充电会话
+        user_id = str(current_user_obj.id)
+        active_session = (
+            db.query(ChargingSession)
+            .filter(
+                ChargingSession.charge_point_id == charge_point_id,
+                ChargingSession.status == "ongoing",
+                ChargingSession.end_time.is_(None),
+            )
+            .order_by(ChargingSession.start_time.desc())
+            .first()
+        )
+
+        # 判断状态
+        status = "offline"
+        session_info = None
+
+        if not is_online:
+            status = "offline"
+        elif active_session:
+            status = "charging"
+            is_current_user = active_session.user_id == user_id
+            session_info = {
+                "session_id": active_session.id,
+                "user_id": active_session.user_id,
+                "is_current_user": is_current_user,
+                "start_time": active_session.start_time.isoformat() if active_session.start_time else None,
+            }
+        else:
+            status = "available"
+
+        # 获取连接器状态
+        evse = db.query(EVSE).filter(
+            EVSE.charge_point_id == charge_point_id,
+            EVSE.evse_id == connector_id
+        ).first()
+
+        evse_status = None
+        if evse:
+            evse_status = db.query(EVSEStatus).filter(
+                EVSEStatus.evse_id == evse.id
+            ).first()
+
+        connector_status = "Unknown"
+        if evse_status:
+            connector_status = evse_status.status or "Unknown"
+
+        return {
+            "charger_id": charge_point_id,
+            "connector_id": connector_id,
+            "status": status,
+            "is_online": is_online,
+            "last_seen": last_seen.isoformat() if last_seen else None,
+            "connector_status": connector_status,
+            "active_session": session_info,
+            "charger_info": {
+                "vendor": charger.vendor,
+                "model": charger.model,
+                "site_name": site.name if site else None,
+                "site_address": site.address if site else None,
+                "price_per_kwh": float(tariff.base_price_per_kwh) if tariff and tariff.base_price_per_kwh else None,
+            },
+        }
+    finally:
+        db.close()
 
 
 @router.get("/active", summary="获取当前进行中的充电会话（终端用户）")
@@ -375,27 +533,27 @@ def get_meter_values(
         if since_id:
             q = q.filter(MeterValue.id > since_id)
 
-    # 按时间顺序返回（前端画曲线/列表更直观）
+        # 按时间顺序返回（前端画曲线/列表更直观）
         rows = q.order_by(MeterValue.timestamp.asc()).limit(limit).all()
 
         result = []
         for r in rows:
             sv = r.sampled_value
-        # OCPP 常见 measurand：
-        # - Power.Active.Import (W)
-        # - Current.Import (A)
-        # - Voltage (V)
-        # - SoC (%)
-        power_w = _extract_first_numeric(sv, "Power.Active.Import")
-        current_a = _extract_first_numeric(sv, "Current.Import")
-        voltage_v = _extract_first_numeric(sv, "Voltage")
-        soc = _extract_first_numeric(sv, "SoC")
+            # OCPP 常见 measurand：
+            # - Power.Active.Import (W)
+            # - Current.Import (A)
+            # - Voltage (V)
+            # - SoC (%)
+            power_w = _extract_first_numeric(sv, "Power.Active.Import")
+            current_a = _extract_first_numeric(sv, "Current.Import")
+            voltage_v = _extract_first_numeric(sv, "Voltage")
+            soc = _extract_first_numeric(sv, "SoC")
 
-        energy_kwh = None
-        try:
-            energy_kwh = float(Decimal(str(r.value)) / Decimal("1000"))
-        except Exception:
             energy_kwh = None
+            try:
+                energy_kwh = float(Decimal(str(r.value)) / Decimal("1000"))
+            except Exception:
+                energy_kwh = None
 
             result.append(
                 {

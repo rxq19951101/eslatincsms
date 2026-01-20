@@ -3,10 +3,11 @@
  */
 
 import React from 'react';
+import { StyleSheet } from 'react-native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import type { MainTabsParamList } from '../types';
-import { COLORS } from '../constants/config';
-import { Text } from 'react-native';
+import { COLORS, IOS_STYLES } from '../constants/config';
+import Icon from '../components/ui/Icon';
 
 // 导入页面组件
 import HomeScreen from '../screens/home/HomeScreen';
@@ -22,19 +23,19 @@ export const MainTabNavigator = () => {
     <Tab.Navigator
       screenOptions={{
         headerShown: false,
-        tabBarActiveTintColor: COLORS.PRIMARY,
-        tabBarInactiveTintColor: COLORS.TEXT_SECONDARY,
+        tabBarActiveTintColor: COLORS.IOS_BLUE,
+        tabBarInactiveTintColor: COLORS.IOS_GRAY,
         tabBarStyle: {
-          backgroundColor: '#FFFFFF',
-          borderTopWidth: 1,
-          borderTopColor: COLORS.BORDER,
+          backgroundColor: COLORS.IOS_WHITE,
+          borderTopWidth: StyleSheet.hairlineWidth,
+          borderTopColor: COLORS.IOS_SEPARATOR,
           height: 60,
-          paddingBottom: 8,
-          paddingTop: 8,
+          paddingBottom: IOS_STYLES.SPACING.SM,
+          paddingTop: IOS_STYLES.SPACING.SM,
         },
         tabBarLabelStyle: {
-          fontSize: 12,
-          fontWeight: '600',
+          fontSize: IOS_STYLES.FONT_SIZE.SMALL,
+          fontWeight: IOS_STYLES.FONT_WEIGHT.SEMIBOLD,
         },
       }}
     >
@@ -44,7 +45,7 @@ export const MainTabNavigator = () => {
         options={{
           tabBarLabel: 'Home',
           tabBarIcon: ({ color, size }) => (
-            <TabIcon icon="🏠" color={color} />
+            <Icon name="home" library="Ionicons" size={size || 24} color={color} />
           ),
         }}
       />
@@ -53,8 +54,8 @@ export const MainTabNavigator = () => {
         component={SavedScreen}
         options={{
           tabBarLabel: 'Saved',
-          tabBarIcon: ({ color }) => (
-            <TabIcon icon="❤️" color={color} />
+          tabBarIcon: ({ color, size }) => (
+            <Icon name="heart" library="Ionicons" size={size || 24} color={color} />
           ),
         }}
       />
@@ -63,8 +64,8 @@ export const MainTabNavigator = () => {
         component={ScanScreen}
         options={{
           tabBarLabel: 'Scan',
-          tabBarIcon: ({ color }) => (
-            <TabIcon icon="📷" color={color} />
+          tabBarIcon: ({ color, size }) => (
+            <Icon name="camera" library="Ionicons" size={size || 24} color={color} />
           ),
         }}
       />
@@ -73,8 +74,8 @@ export const MainTabNavigator = () => {
         component={MyWalletScreen}
         options={{
           tabBarLabel: 'Wallet',
-          tabBarIcon: ({ color }) => (
-            <TabIcon icon="💰" color={color} />
+          tabBarIcon: ({ color, size }) => (
+            <Icon name="wallet" library="Ionicons" size={size || 24} color={color} />
           ),
         }}
       />
@@ -83,16 +84,11 @@ export const MainTabNavigator = () => {
         component={AccountScreen}
         options={{
           tabBarLabel: 'Account',
-          tabBarIcon: ({ color }) => (
-            <TabIcon icon="👤" color={color} />
+          tabBarIcon: ({ color, size }) => (
+            <Icon name="person" library="Ionicons" size={size || 24} color={color} />
           ),
         }}
       />
     </Tab.Navigator>
   );
 };
-
-// 简单的Tab图标组件
-const TabIcon = ({ icon, color }: { icon: string; color: string }) => (
-  <Text style={{ fontSize: 20, color }}>{icon}</Text>
-);

@@ -21,6 +21,7 @@ export interface Charger {
   last_seen?: string;
   available_connectors?: number;
   total_connectors?: number;
+  distance_km?: number; // 距离当前位置的距离（千米），由后端计算
 }
 
 export interface ChargerDetail extends Charger {
