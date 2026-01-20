@@ -3,7 +3,7 @@
  */
 
 import apiClient, { handleApiError } from './client';
-import { API_ENDPOINTS, DEFAULT_TENANT_ID } from '../constants/config';
+import { API_ENDPOINTS } from '../constants/config';
 import { saveTokens, saveUserInfo } from '../utils/tokenManager';
 import type { LoginResponse, User, ApiError } from '../types';
 
@@ -18,7 +18,6 @@ export const registerWithEmail = async (data: {
   try {
     const response = await apiClient.post(API_ENDPOINTS.AUTH.REGISTER_EMAIL, {
       ...data,
-      tenant_id: DEFAULT_TENANT_ID,
     });
     return response.data;
   } catch (error) {
@@ -35,12 +34,10 @@ export const loginWithEmail = async (data: {
   remember_me?: boolean;
 }): Promise<LoginResponse> => {
   try {
+    // 不再强制发送 tenant_id，后端会通过邮箱自动查找租户
     const response = await apiClient.post<LoginResponse>(
       API_ENDPOINTS.AUTH.LOGIN_EMAIL,
-      {
-        ...data,
-        tenant_id: DEFAULT_TENANT_ID,
-      }
+      data
     );
 
     const { access_token, refresh_token, user } = response.data;
@@ -118,7 +115,6 @@ export const loginWithSocial = async (data: {
       `${API_ENDPOINTS.AUTH.SOCIAL_LOGIN}/${data.provider}`,
       {
         token: data.token,
-        tenant_id: DEFAULT_TENANT_ID,
       }
     );
 

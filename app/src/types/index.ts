@@ -10,9 +10,8 @@ export interface User {
   full_name: string;
   phone?: string;
   email_verified: boolean;
-  created_at: string;
-  updated_at: string;
-  tenant_id: string;
+  created_at?: string;
+  updated_at?: string;
 }
 
 export interface AuthTokens {
@@ -125,8 +124,8 @@ export type RootStackParamList = {
   LocationPermission: undefined;
   StationDetail: { chargePointId: string };
   // 仅支持扫码充电：不再实现预订模块（BookingDetail 等路由移除）
-  ChargingProcess: { chargePointId: string; connectorId: number };
-  ChargingComplete: { chargePointId: string };
+  ChargingProcess: { qrToken: string };
+  ChargingComplete: { chargePointId?: string };
   ChargingHistory: undefined;
   ChargingHistoryDetail: { id: number };
   TopUp: undefined;

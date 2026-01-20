@@ -47,7 +47,9 @@ const refreshAccessToken = async (): Promise<string | null> => {
   try {
     const refreshToken = await getRefreshToken();
     if (!refreshToken) {
-      throw new Error('No refresh token available');
+      // 没有 refresh token：不应该在这里抛错“覆盖”原始 401
+      // 交给上层（响应拦截器）决定如何处理（通常是清理本地 token 并让调用方走重新登录）
+      return null;
     }
 
     const response = await axios.post<AuthTokens>(
@@ -67,8 +69,23 @@ const refreshAccessToken = async (): Promise<string | null> => {
   } catch (error) {
     console.error('Token refresh failed:', error);
     await clearTokens();
-    throw error;
+    return null;
   }
+};
+
+const shouldSkipTokenRefresh = (url?: string): boolean => {
+  if (!url) return false;
+  const skipUrls = [
+    API_ENDPOINTS.AUTH.LOGIN_EMAIL,
+    API_ENDPOINTS.AUTH.REGISTER_EMAIL,
+    API_ENDPOINTS.AUTH.RESET_PASSWORD,
+    API_ENDPOINTS.AUTH.CONFIRM_RESET_PASSWORD,
+    API_ENDPOINTS.AUTH.VERIFY_EMAIL,
+    API_ENDPOINTS.AUTH.RESEND_VERIFICATION,
+    API_ENDPOINTS.AUTH.REFRESH,
+    API_ENDPOINTS.AUTH.LOGOUT,
+  ];
+  return skipUrls.some((u) => url.includes(u));
 };
 
 /**
@@ -144,8 +161,8 @@ apiClient.interceptors.response.use(
 
     // 如果是401错误且未重试过（且不是 refresh 请求本身）
     if (error.response?.status === 401 && !originalRequest._retry) {
-      if (originalRequest.url?.includes(API_ENDPOINTS.AUTH.REFRESH)) {
-        await clearTokens();
+      // 登录/注册/refresh 等接口，不应该触发 refresh（避免“没有 refresh token available”覆盖原始错误）
+      if (shouldSkipTokenRefresh(originalRequest.url)) {
         return Promise.reject(error);
       }
       if (isRefreshing) {
@@ -167,6 +184,12 @@ apiClient.interceptors.response.use(
 
       try {
         const newToken = await refreshAccessToken();
+        if (!newToken) {
+          // 刷新失败 or 没有 refresh token：清理本地 token，并把原始 401 返回给调用方
+          isRefreshing = false;
+          await clearTokens();
+          return Promise.reject(error);
+        }
         originalRequest.headers.Authorization = `Bearer ${newToken}`;
         processQueue(null, newToken);
         isRefreshing = false;
@@ -197,10 +220,29 @@ export const handleApiError = (error: any): ApiError => {
     
     if (axiosError.response) {
       // 服务器返回错误
+      const status = axiosError.response.status;
+      const data: any = axiosError.response.data;
+
+      // FastAPI 常见错误字段是 detail（可能是 string / object / array）
+      let message: string | undefined = data?.message;
+      if (!message && data?.detail) {
+        if (typeof data.detail === 'string') {
+          message = data.detail;
+        } else if (Array.isArray(data.detail)) {
+          // 422 validation errors: [{loc, msg, type}, ...]
+          const msgs = data.detail
+            .map((d: any) => d?.msg || d?.message || JSON.stringify(d))
+            .filter(Boolean);
+          message = msgs.length ? msgs.join('; ') : 'Request validation failed';
+        } else {
+          message = typeof data.detail === 'object' ? JSON.stringify(data.detail) : String(data.detail);
+        }
+      }
+
       return {
-        message: axiosError.response.data?.message || 'An error occurred',
-        code: axiosError.response.data?.code,
-        details: axiosError.response.data?.details,
+        message: message || 'An error occurred',
+        code: data?.code || `HTTP_${status}`,
+        details: data?.details ?? data?.detail,
       };
     } else if (axiosError.request) {
       // 请求已发出但没有收到响应

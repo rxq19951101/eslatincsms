@@ -2,11 +2,61 @@
  * 应用配置常量
  */
 
+import Constants from 'expo-constants';
+
 // API基础URL
-export const API_BASE_URL = process.env.EXPO_PUBLIC_API_URL || 'http://localhost:9000';
+// 开发环境：使用环境变量或自动检测局域网IP
+// 生产环境：使用环境变量配置的生产域名
+const inferLanHostFromExpo = (): string | null => {
+  // 在真机 Expo Go 下，`localhost` 指向手机自己，必须用电脑局域网 IP
+  // 这里尽量兼容不同 Expo/SDK 的字段结构（避免升级/降级导致取不到 host）
+  const anyConstants = Constants as unknown as Record<string, any>;
+
+  const hostUri: unknown =
+    anyConstants?.expoConfig?.hostUri ??
+    anyConstants?.manifest2?.extra?.expoClient?.hostUri ??
+    anyConstants?.manifest?.hostUri ??
+    anyConstants?.manifest?.debuggerHost ??
+    anyConstants?.expoGoConfig?.debuggerHost ??
+    anyConstants?.manifest2?.extra?.expoGo?.debuggerHost;
+
+  if (typeof hostUri !== 'string' || !hostUri.trim()) return null;
+
+  // 常见形态：
+  // - "192.168.20.124:8081"
+  // - "192.168.20.124:19000"
+  // - "exp://192.168.20.124:8081"
+  // - "192.168.20.124:8081/some/path"
+  const cleaned = hostUri
+    .trim()
+    .replace(/^exp(\+[\w-]+)?:\/\//, '')
+    .replace(/^https?:\/\//, '');
+
+  const hostPort = cleaned.split('/')[0] ?? '';
+  const host = hostPort.split(':')[0] ?? '';
+  if (!host || host === 'localhost' || host === '127.0.0.1') return null;
+
+  return host;
+};
+
+const getApiBaseUrl = (): string => {
+  // 优先使用环境变量
+  if (process.env.EXPO_PUBLIC_API_URL) {
+    return process.env.EXPO_PUBLIC_API_URL;
+  }
+  // 真机（Expo Go / LAN）自动推导电脑 IP：例如 exp://192.168.20.124:8081 -> http://192.168.20.124:9000
+  const lanHost = inferLanHostFromExpo();
+  if (lanHost) {
+    return `http://${lanHost}:9000`;
+  }
+  // 开发环境默认使用 localhost（适用于模拟器）
+  return 'http://localhost:9000';
+};
+
+export const API_BASE_URL = getApiBaseUrl();
 
 // 默认租户ID（根据实际情况调整）
-export const DEFAULT_TENANT_ID = process.env.EXPO_PUBLIC_TENANT_ID || '11648e2d-bd42-4aae-b0ba-24af22ac3e51';
+export const DEFAULT_TENANT_ID = process.env.EXPO_PUBLIC_TENANT_ID || '0698b167-feaf-423e-a485-d8901b95e3de';
 
 // Token存储键名
 export const STORAGE_KEYS = {

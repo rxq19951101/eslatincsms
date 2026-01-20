@@ -2,7 +2,7 @@
  * 主页 - 充电站列表和地图视图
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useMemo, useState, useEffect } from 'react';
 import {
   View,
   Text,
@@ -23,20 +23,8 @@ import { Charger } from '../../api/chargers';
 import { useNavigation } from '@react-navigation/native';
 import type { StackNavigationProp } from '@react-navigation/stack';
 import type { RootStackParamList } from '../../types';
-// 地图组件（仅移动端）
 import { Platform } from 'react-native';
-let CustomMapView: any = null;
-let ClusteredMarkers: any = null;
-
-if (Platform.OS !== 'web') {
-  try {
-    CustomMapView = require('../../components/MapView').default;
-    const ChargerMarkerModule = require('../../components/ChargerMarker');
-    ClusteredMarkers = ChargerMarkerModule.ClusteredMarkers;
-  } catch (e) {
-    console.warn('Failed to load map components:', e);
-  }
-}
+import GoogleMapView, { type MapMarker } from '../../components/GoogleMapView';
 
 const HomeScreen = () => {
   const dispatch = useAppDispatch();
@@ -46,7 +34,6 @@ const HomeScreen = () => {
   const [viewMode, setViewMode] = useState<'list' | 'map'>('list');
   const [searchQuery, setSearchQuery] = useState('');
   const [userLocation, setUserLocation] = useState<[number, number] | null>(null);
-  const [mapReady, setMapReady] = useState(false);
 
   // 获取用户位置并加载附近充电站
   useEffect(() => {
@@ -169,6 +156,25 @@ const HomeScreen = () => {
     );
   });
 
+  const mapMarkers: MapMarker[] = useMemo(() => {
+    return filteredChargers
+      .filter((c) => typeof c.latitude === 'number' && typeof c.longitude === 'number')
+      .map((c) => ({
+        id: c.id,
+        latitude: c.latitude as number,
+        longitude: c.longitude as number,
+        title: c.site_name || `充电站 ${c.id}`,
+        description: c.site_address || '',
+        status: c.status,
+        available: c.available_connectors,
+      }));
+  }, [filteredChargers]);
+
+  const mapCenter = useMemo(() => {
+    if (userLocation) return { latitude: userLocation[1], longitude: userLocation[0] };
+    return { latitude: MAP_CONFIG.DEFAULT_LATITUDE, longitude: MAP_CONFIG.DEFAULT_LONGITUDE };
+  }, [userLocation]);
+
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
       <StatusBar barStyle="dark-content" />
@@ -290,24 +296,17 @@ const HomeScreen = () => {
               </Text>
             </View>
           ) : (
-            <CustomMapView
+            <GoogleMapView
               style={styles.mapContainer}
-              centerCoordinate={
-                userLocation || [
-                  MAP_CONFIG.DEFAULT_LONGITUDE,
-                  MAP_CONFIG.DEFAULT_LATITUDE,
-                ]
-              }
-              zoomLevel={MAP_CONFIG.DEFAULT_ZOOM}
-              onMapReady={() => setMapReady(true)}
-            >
-              {mapReady && filteredChargers.length > 0 && ClusteredMarkers && (
-                <ClusteredMarkers
-                  chargers={filteredChargers}
-                  onMarkerPress={handleMarkerPress}
-                />
-              )}
-            </CustomMapView>
+              center={mapCenter}
+              zoomDelta={0.08}
+              markers={mapMarkers}
+              onMarkerPress={(m) => {
+                const charger = filteredChargers.find((c) => c.id === m.id);
+                if (charger) handleMarkerPress(charger);
+              }}
+              showsUserLocation={true}
+            />
           )}
         </>
       )}

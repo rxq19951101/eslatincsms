@@ -30,6 +30,13 @@ export interface ChargerDetail extends Charger {
   charging_rate?: number;
   rating?: number;
   description?: string;
+  connectors?: Array<{
+    id: number;
+    connector_id: number;
+    status: string;
+    power_kw?: number | null;
+    connector_type?: string | null;
+  }>;
 }
 
 export interface ChargersListParams {

@@ -25,20 +25,18 @@ export interface ActiveChargingSession {
 }
 
 export async function startChargingByScan(params: {
-  chargePointId: string;
-  connectorId: number;
+  qrToken: string;
 }): Promise<RemoteResponse> {
   const res = await apiClient.post<RemoteResponse>(API_ENDPOINTS.CHARGING.START, {
-    charge_point_id: params.chargePointId,
-    connector_id: params.connectorId,
+    qr_token: params.qrToken,
   });
   return res.data;
 }
 
-export async function getActiveChargingSession(chargePointId: string): Promise<ActiveChargingSession | null> {
+export async function getActiveChargingSession(qrToken: string): Promise<ActiveChargingSession | null> {
   try {
     const res = await apiClient.get<ActiveChargingSession>(API_ENDPOINTS.CHARGING.ACTIVE, {
-      params: { charge_point_id: chargePointId },
+      params: { qr_token: qrToken },
     });
     return res.data;
   } catch (e: any) {
@@ -49,9 +47,9 @@ export async function getActiveChargingSession(chargePointId: string): Promise<A
   }
 }
 
-export async function stopCharging(chargePointId: string): Promise<RemoteResponse> {
+export async function stopCharging(qrToken: string): Promise<RemoteResponse> {
   const res = await apiClient.post<RemoteResponse>(API_ENDPOINTS.CHARGING.STOP, {
-    charge_point_id: chargePointId,
+    qr_token: qrToken,
   });
   return res.data;
 }

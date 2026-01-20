@@ -24,47 +24,31 @@ import type { RootStackParamList } from '../../types';
 
 type Nav = StackNavigationProp<RootStackParamList>;
 
-type ParsedQr = { chargePointId: string; connectorId?: number };
+type ParsedQr = { qrToken: string };
 
 function parseQrPayload(raw: string): ParsedQr | null {
   const s = (raw || '').trim();
   if (!s) return null;
 
-  // 1) JSON: {"chargePointId":"...","connectorId":2} 或 snake_case
+  // 1) JSON: {"qrToken":"..."} 或 {"qr_token":"..."}
   if ((s.startsWith('{') && s.endsWith('}')) || (s.startsWith('[') && s.endsWith(']'))) {
     try {
       const obj: any = JSON.parse(s);
-      const chargePointId =
-        obj.chargePointId || obj.charge_point_id || obj.chargePointID || obj.charge_pointId;
-      const connectorId = obj.connectorId ?? obj.connector_id;
-      if (typeof chargePointId === 'string' && chargePointId.trim()) {
-        return {
-          chargePointId: chargePointId.trim(),
-          connectorId: typeof connectorId === 'number' ? connectorId : undefined,
-        };
-      }
+      const qrToken = obj.qrToken || obj.qr_token;
+      if (typeof qrToken === 'string' && qrToken.trim()) return { qrToken: qrToken.trim() };
     } catch {
       // ignore
     }
   }
 
-  // 2) 形如：CP_SITE_001_01#2
-  if (s.includes('#')) {
-    const [id, conn] = s.split('#');
-    const connectorId = Number(conn);
-    if (id?.trim()) return { chargePointId: id.trim(), connectorId: Number.isFinite(connectorId) ? connectorId : undefined };
+  // 2) token-only：qr:<token>
+  if (s.toLowerCase().startsWith('qr:')) {
+    const token = s.slice(3).trim();
+    if (token) return { qrToken: token };
   }
 
-  // 3) 形如：CP_SITE_001_01?connector=2
-  if (s.includes('?')) {
-    const [id, qs] = s.split('?');
-    const m = qs?.match(/connector(?:Id)?=(\d+)/i);
-    const connectorId = m ? Number(m[1]) : undefined;
-    if (id?.trim()) return { chargePointId: id.trim(), connectorId };
-  }
-
-  // 4) 兜底：纯 charge_point_id
-  return { chargePointId: s };
+  // 爆改阶段不再兼容旧二维码格式
+  return null;
 }
 
 const ScanScreen = () => {
@@ -78,22 +62,17 @@ const ScanScreen = () => {
   const canUseCamera = Platform.OS !== 'web';
 
   const hint = useMemo(() => {
-    return '二维码内容必须包含 charge_point_id + connector_id（一个二维码=一个connector）：\n- CP_SITE_001_01#2\n- CP_SITE_001_01?connector=2\n- JSON {\"chargePointId\":\"...\",\"connectorId\":2}';
+    return '爆改测试版：二维码内容为 token-only：\n- qr:<token>\n- JSON {\"qrToken\":\"...\"}';
   }, []);
 
   const goToProcess = (payload: string) => {
     const parsed = parseQrPayload(payload);
     if (!parsed) {
-      Alert.alert('二维码无效', '请确认二维码内容包含 charge_point_id 和 connector_id');
-      return;
-    }
-    if (typeof parsed.connectorId !== 'number' || !Number.isFinite(parsed.connectorId) || parsed.connectorId <= 0) {
-      Alert.alert('二维码无效', '该二维码未解析出 connector_id（一个二维码应对应一个 connector）');
+      Alert.alert('二维码无效', '请确认二维码内容为 qr:<token> 或 JSON {\"qrToken\":\"...\"}');
       return;
     }
     navigation.navigate('ChargingProcess', {
-      chargePointId: parsed.chargePointId,
-      connectorId: parsed.connectorId,
+      qrToken: parsed.qrToken,
     });
   };
 

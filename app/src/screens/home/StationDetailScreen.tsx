@@ -3,7 +3,7 @@
  * 展示站点信息、状态、价格、连接器列表等
  */
  
-import React, { useEffect } from 'react';
+import React, { useMemo, useEffect } from 'react';
 import {
   View,
   Text,
@@ -13,6 +13,9 @@ import {
   ActivityIndicator,
   StatusBar,
   RefreshControl,
+  Platform,
+  Linking,
+  Alert,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useNavigation, useRoute } from '@react-navigation/native';
@@ -23,6 +26,7 @@ import { COLORS } from '../../constants/config';
 import type { RootStackParamList } from '../../types';
 import { useAppDispatch, useAppSelector } from '../../hooks/useRedux';
 import { fetchChargerById } from '../../store/slices/chargerSlice';
+import GoogleMapView from '../../components/GoogleMapView';
 
 type StationDetailRouteProp = RouteProp<RootStackParamList, 'StationDetail'>;
 type StationDetailNavProp = StackNavigationProp<RootStackParamList, 'StationDetail'>;
@@ -58,6 +62,45 @@ const StationDetailScreen = () => {
     : isAvailable
     ? COLORS.SUCCESS
     : COLORS.WARNING;
+
+  const availableConnectorId = useMemo(() => {
+    const connectors = charger?.connectors;
+    if (!Array.isArray(connectors)) return null;
+    const found = connectors.find((c) => String(c.status || '').toLowerCase() === 'available');
+    const cid = found?.connector_id ?? found?.id;
+    return typeof cid === 'number' ? cid : Number.isFinite(Number(cid)) ? Number(cid) : null;
+  }, [charger?.connectors]);
+
+  const handleNavigate = async () => {
+    if (!charger?.latitude || !charger?.longitude) {
+      Alert.alert('无法导航', '该站点缺少经纬度信息');
+      return;
+    }
+    const lat = charger.latitude;
+    const lng = charger.longitude;
+    const label = encodeURIComponent(charger.site_name || charger.id);
+
+    // iOS 优先 Apple Maps；Android 用 Google Maps
+    const url =
+      Platform.OS === 'ios'
+        ? `http://maps.apple.com/?daddr=${lat},${lng}&q=${label}`
+        : `https://www.google.com/maps/dir/?api=1&destination=${lat},${lng}&destination_place_id=${label}`;
+
+    try {
+      const supported = await Linking.canOpenURL(url);
+      if (!supported) throw new Error('cannot_open_url');
+      await Linking.openURL(url);
+    } catch {
+      // fallback：用通用的 Google Maps url
+      const fallback = `https://www.google.com/maps/search/?api=1&query=${lat},${lng}`;
+      await Linking.openURL(fallback);
+    }
+  };
+
+  const handleStartCharging = () => {
+    // 爆改测试版：启动充电必须扫码获取 qr_token
+    navigation.navigate('Scan');
+  };
 
   return (
     <SafeAreaView style={styles.container}>
@@ -149,11 +192,37 @@ const StationDetailScreen = () => {
               </View>
             </View>
 
+            {/* 地图（仅 iOS/Android，展示站点位置） */}
+            {Platform.OS !== 'web' && typeof charger.latitude === 'number' && typeof charger.longitude === 'number' && (
+              <View style={styles.card}>
+                <Text style={styles.sectionTitle}>位置</Text>
+                <View style={styles.mapWrap}>
+                  <GoogleMapView
+                    style={styles.map}
+                    center={{ latitude: charger.latitude, longitude: charger.longitude }}
+                    zoomDelta={0.02}
+                    markers={[
+                      {
+                        id: charger.id,
+                        latitude: charger.latitude,
+                        longitude: charger.longitude,
+                        title: charger.site_name || `充电站 ${charger.id}`,
+                        description: charger.site_address || '',
+                        status: charger.status,
+                        available: charger.available_connectors,
+                      },
+                    ]}
+                    showsUserLocation={true}
+                  />
+                </View>
+              </View>
+            )}
+
             {/* 连接器列表 */}
             <View style={styles.card}>
               <Text style={styles.sectionTitle}>充电器/接口</Text>
-              {Array.isArray((charger as any).connectors) && (charger as any).connectors.length > 0 ? (
-                (charger as any).connectors.map((c: any) => {
+              {Array.isArray(charger.connectors) && charger.connectors.length > 0 ? (
+                charger.connectors.map((c) => {
                   const st = c.status || 'Unknown';
                   const stColor =
                     st === 'Available'
@@ -190,7 +259,7 @@ const StationDetailScreen = () => {
 
       {/* Bottom actions */}
       <View style={styles.bottomBar}>
-        <TouchableOpacity style={[styles.actionBtn, styles.secondaryBtn]} onPress={() => {}}>
+        <TouchableOpacity style={[styles.actionBtn, styles.secondaryBtn]} onPress={handleNavigate}>
           <Text style={styles.secondaryBtnText}>导航</Text>
         </TouchableOpacity>
         <TouchableOpacity
@@ -200,7 +269,7 @@ const StationDetailScreen = () => {
             !isAvailable && styles.disabledBtn,
           ]}
           disabled={!isAvailable}
-          onPress={() => {}}
+          onPress={handleStartCharging}
         >
           <Text style={styles.primaryBtnText}>{isAvailable ? '开始充电' : '暂无可用接口'}</Text>
         </TouchableOpacity>
@@ -278,6 +347,16 @@ const styles = StyleSheet.create({
   connectorStatusText: { color: '#FFFFFF', fontWeight: '700', fontSize: 12 },
   emptyBlock: { paddingVertical: 16, alignItems: 'center' },
   emptyBlockText: { color: COLORS.TEXT_SECONDARY },
+
+  mapWrap: {
+    height: 220,
+    borderRadius: 12,
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: COLORS.BORDER,
+    marginTop: 10,
+  },
+  map: { flex: 1 },
 
   bottomBar: {
     flexDirection: 'row',

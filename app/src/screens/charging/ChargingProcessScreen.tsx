@@ -31,7 +31,7 @@ const ChargingProcessScreen = () => {
   const navigation = useNavigation<Nav>();
   const dispatch = useAppDispatch();
 
-  const { chargePointId, connectorId } = route.params;
+  const { qrToken } = route.params;
   const { starting, stopping, loadingActive, activeSession, error, lastRemoteResult, meterValues, lastMeterId, loadingMeter, meterError } = useAppSelector(
     (s) => s.charging
   );
@@ -41,9 +41,9 @@ const ChargingProcessScreen = () => {
   const [autoStarted, setAutoStarted] = useState(false);
 
   useEffect(() => {
-    dispatch(setChargingTarget({ chargePointId, connectorId }));
-    dispatch(fetchActiveSession(chargePointId));
-  }, [dispatch, chargePointId, connectorId]);
+    dispatch(setChargingTarget({ qrToken }));
+    dispatch(fetchActiveSession(qrToken));
+  }, [dispatch, qrToken]);
 
   // 进入页面自动发送启动请求（扫码后无需用户再点“开始”）
   useEffect(() => {
@@ -51,12 +51,12 @@ const ChargingProcessScreen = () => {
     setAutoStarted(true);
     (async () => {
       try {
-        await dispatch(startCharging({ chargePointId, connectorId })).unwrap();
+        await dispatch(startCharging({ qrToken })).unwrap();
       } catch {
         // 错误已写入 slice.error
       }
     })();
-  }, [autoStarted, dispatch, chargePointId, connectorId]);
+  }, [autoStarted, dispatch, qrToken]);
 
   useEffect(() => {
     if (activeSession) setHasEverActive(true);
@@ -65,10 +65,10 @@ const ChargingProcessScreen = () => {
   // 轮询 active session（RemoteStart 后需要等待桩上报 StartTransaction 才会入库）
   useEffect(() => {
     const t = setInterval(() => {
-      dispatch(fetchActiveSession(chargePointId));
+      dispatch(fetchActiveSession(qrToken));
     }, 3000);
     return () => clearInterval(t);
-  }, [dispatch, chargePointId]);
+  }, [dispatch, qrToken]);
 
   // 有 session 后轮询 meter values（增量拉取）
   useEffect(() => {
@@ -85,9 +85,9 @@ const ChargingProcessScreen = () => {
   // stop 后：当 activeSession 从“有”变成“无”，认为已结束（至少协议会话已不再 ongoing）
   useEffect(() => {
     if (stopRequested && hasEverActive && !activeSession) {
-      navigation.replace('ChargingComplete', { chargePointId });
+      navigation.replace('ChargingComplete', { chargePointId: undefined });
     }
-  }, [stopRequested, hasEverActive, activeSession, navigation, chargePointId]);
+  }, [stopRequested, hasEverActive, activeSession, navigation]);
 
   const startedText = useMemo(() => {
     if (!activeSession?.start_time) return '—';
@@ -116,7 +116,7 @@ const ChargingProcessScreen = () => {
 
   const onRetryStart = async () => {
     try {
-      await dispatch(startCharging({ chargePointId, connectorId })).unwrap();
+      await dispatch(startCharging({ qrToken })).unwrap();
     } catch {
       // 错误已写入 slice.error
     }
@@ -125,7 +125,7 @@ const ChargingProcessScreen = () => {
   const onStop = async () => {
     try {
       setStopRequested(true);
-      await dispatch(stopChargingSession(chargePointId)).unwrap();
+      await dispatch(stopChargingSession(qrToken)).unwrap();
     } catch {
       // stop 失败则允许用户重试
       setStopRequested(false);
@@ -144,12 +144,12 @@ const ChargingProcessScreen = () => {
 
       <View style={styles.card}>
         <Text style={styles.title}>充电桩</Text>
-        <Text style={styles.value}>{chargePointId}</Text>
+        <Text style={styles.value}>{activeSession?.charge_point_id || '—'}</Text>
 
         <View style={styles.row}>
           <View style={styles.col}>
             <Text style={styles.label}>接口</Text>
-            <Text style={styles.valueSmall}>{connectorId}</Text>
+            <Text style={styles.valueSmall}>{activeSession?.evse_id ? String(activeSession.evse_id) : '—'}</Text>
           </View>
           <View style={styles.col}>
             <Text style={styles.label}>会话ID</Text>

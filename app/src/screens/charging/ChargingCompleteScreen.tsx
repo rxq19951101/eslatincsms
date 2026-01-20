@@ -21,10 +21,10 @@ type Nav = StackNavigationProp<RootStackParamList, 'ChargingComplete'>;
 const ChargingCompleteScreen = () => {
   const route = useRoute<R>();
   const navigation = useNavigation<Nav>();
-  const { chargePointId } = route.params;
 
   const dispatch = useAppDispatch();
   const { lastStoppedSession, lastRemoteResult } = useAppSelector((s) => s.charging);
+  const chargePointId = route.params.chargePointId || lastStoppedSession?.charge_point_id || '—';
 
   const [settling, setSettling] = useState(false);
   const [settleResult, setSettleResult] = useState<SettleResult | null>(null);

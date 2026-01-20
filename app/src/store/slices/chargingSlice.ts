@@ -7,8 +7,7 @@ import type { ActiveChargingSession, MeterValuePoint, RemoteResponse } from '../
 import { getActiveChargingSession, getMeterValues, startChargingByScan, stopCharging } from '../../api/charging';
 
 export interface ChargingState {
-  chargePointId: string | null;
-  connectorId: number | null;
+  qrToken: string | null;
   activeSession: ActiveChargingSession | null;
   lastStoppedSession: ActiveChargingSession | null;
   meterValues: MeterValuePoint[];
@@ -23,8 +22,7 @@ export interface ChargingState {
 }
 
 const initialState: ChargingState = {
-  chargePointId: null,
-  connectorId: null,
+  qrToken: null,
   activeSession: null,
   lastStoppedSession: null,
   meterValues: [],
@@ -41,12 +39,12 @@ const initialState: ChargingState = {
 export const startCharging = createAsyncThunk(
   'charging/start',
   async (
-    { chargePointId, connectorId }: { chargePointId: string; connectorId: number },
+    { qrToken }: { qrToken: string },
     { rejectWithValue }
   ) => {
     try {
-      const res = await startChargingByScan({ chargePointId, connectorId });
-      return { chargePointId, connectorId, res };
+      const res = await startChargingByScan({ qrToken });
+      return { qrToken, res };
     } catch (e: any) {
       const msg =
         e?.response?.data?.detail ||
@@ -60,10 +58,10 @@ export const startCharging = createAsyncThunk(
 
 export const fetchActiveSession = createAsyncThunk(
   'charging/fetchActive',
-  async (chargePointId: string, { rejectWithValue }) => {
+  async (qrToken: string, { rejectWithValue }) => {
     try {
-      const session = await getActiveChargingSession(chargePointId);
-      return { chargePointId, session };
+      const session = await getActiveChargingSession(qrToken);
+      return { qrToken, session };
     } catch (e: any) {
       const msg =
         e?.response?.data?.detail ||
@@ -97,10 +95,10 @@ export const fetchMeterValuePoints = createAsyncThunk(
 
 export const stopChargingSession = createAsyncThunk(
   'charging/stop',
-  async (chargePointId: string, { rejectWithValue }) => {
+  async (qrToken: string, { rejectWithValue }) => {
     try {
-      const res = await stopCharging(chargePointId);
-      return { chargePointId, res };
+      const res = await stopCharging(qrToken);
+      return { qrToken, res };
     } catch (e: any) {
       const msg =
         e?.response?.data?.detail ||
@@ -119,13 +117,12 @@ const chargingSlice = createSlice({
     clearChargingError: (state) => {
       state.error = null;
     },
+    clearChargingTarget: (state) => {
+      state.qrToken = null;
+    },
     resetChargingState: () => initialState,
-    setChargingTarget: (
-      state,
-      action: PayloadAction<{ chargePointId: string; connectorId: number }>
-    ) => {
-      state.chargePointId = action.payload.chargePointId;
-      state.connectorId = action.payload.connectorId;
+    setChargingTarget: (state, action: PayloadAction<{ qrToken: string }>) => {
+      state.qrToken = action.payload.qrToken;
     },
   },
   extraReducers: (builder) => {
@@ -137,8 +134,7 @@ const chargingSlice = createSlice({
       })
       .addCase(startCharging.fulfilled, (state, action) => {
         state.starting = false;
-        state.chargePointId = action.payload.chargePointId;
-        state.connectorId = action.payload.connectorId;
+        state.qrToken = action.payload.qrToken;
         state.lastRemoteResult = action.payload.res;
       })
       .addCase(startCharging.rejected, (state, action) => {
@@ -152,7 +148,7 @@ const chargingSlice = createSlice({
       })
       .addCase(fetchActiveSession.fulfilled, (state, action) => {
         state.loadingActive = false;
-        state.chargePointId = action.payload.chargePointId;
+        state.qrToken = action.payload.qrToken;
         state.activeSession = action.payload.session;
         // session 变化时清空 meterValues（避免把旧会话的数据展示出来）
         if (!action.payload.session) {
@@ -199,7 +195,7 @@ const chargingSlice = createSlice({
         state.stopping = false;
         state.lastRemoteResult = action.payload.res;
         // stop 只是“请求已发送”，本地先把 activeSession 备份；真正结束靠轮询 /active 变成 null
-        if (state.activeSession?.charge_point_id === action.payload.chargePointId) {
+        if (state.qrToken === action.payload.qrToken) {
           state.lastStoppedSession = state.activeSession;
         }
       })
