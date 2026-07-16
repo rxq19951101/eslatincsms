@@ -1,17 +1,15 @@
 /**
- * iOS 风格卡片组件
- * 支持毛玻璃效果背景，按压交互动画
+ * 低噪音内容容器。默认不加阴影，只有 elevated 场景才建立层级。
  */
 
 import React, { useRef } from 'react';
 import {
   TouchableOpacity,
-  StyleSheet,
   StyleProp,
   ViewStyle,
   Animated,
 } from 'react-native';
-import { COLORS, IOS_STYLES } from '../../constants/config';
+import { palette, radius, shadow } from '../../theme';
 
 export interface CardProps {
   children: React.ReactNode;
@@ -52,29 +50,28 @@ const Card: React.FC<CardProps> = ({
 
   const getVariantStyles = (): ViewStyle => {
     const baseStyle: ViewStyle = {
-      backgroundColor: COLORS.CARD_BG,
-      borderRadius: IOS_STYLES.RADIUS.MEDIUM,
+      backgroundColor: palette.surface,
+      borderRadius: radius.lg,
     };
 
     switch (variant) {
       case 'elevated':
         return {
           ...baseStyle,
-          ...IOS_STYLES.SHADOW.MEDIUM,
+          ...shadow.raised,
         };
       case 'outlined':
         return {
           ...baseStyle,
           borderWidth: 1,
-          borderColor: COLORS.BORDER,
+          borderColor: palette.border,
         };
       case 'default':
       default:
         return {
           ...baseStyle,
           borderWidth: 1,
-          borderColor: COLORS.BORDER,
-          ...IOS_STYLES.SHADOW.SMALL,
+          borderColor: palette.border,
         };
     }
   };

@@ -2,16 +2,16 @@
  * 未付账单列表
  */
 import React, { useCallback } from 'react';
-import { View, Text, StyleSheet, FlatList, TouchableOpacity, Alert } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { View, Text, StyleSheet, FlatList, Alert } from 'react-native';
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import type { StackNavigationProp } from '@react-navigation/stack';
 
 import { COLORS } from '../../constants/config';
 import { useI18n } from '../../i18n';
 import type { RootStackParamList } from '../../types';
-import Icon from '../../components/ui/Icon';
 import Button from '../../components/ui/Button';
+import Screen from '../../components/ui/Screen';
+import ScreenHeader from '../../components/ui/ScreenHeader';
 import { getUnpaidCharges, payUnpaidCharge, type UnpaidCharge } from '../../api/payments';
 import { formatMoneyCOP } from '../../utils/formatMoney';
 import { fetchWalletBalance } from '../../store/slices/walletSlice';
@@ -57,14 +57,8 @@ const UnpaidBillsScreen = () => {
   };
 
   return (
-    <SafeAreaView style={styles.container} edges={['top']}>
-      <View style={styles.header}>
-        <TouchableOpacity onPress={() => navigation.goBack()}>
-          <Icon name="arrow-back" library="Ionicons" size={24} color={COLORS.TEXT_PRIMARY} />
-        </TouchableOpacity>
-        <Text style={styles.title}>{t.wallet.unpaidTitle}</Text>
-        <View style={{ width: 24 }} />
-      </View>
+    <Screen>
+      <ScreenHeader title={t.wallet.unpaidTitle} onBack={() => navigation.goBack()} />
 
       {loading ? (
         <Text style={styles.empty}>{t.common.loading}</Text>
@@ -85,20 +79,11 @@ const UnpaidBillsScreen = () => {
           )}
         />
       )}
-    </SafeAreaView>
+    </Screen>
   );
 };
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: COLORS.BACKGROUND },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-  },
-  title: { fontSize: 18, fontWeight: '600', color: COLORS.TEXT_PRIMARY },
   empty: { textAlign: 'center', marginTop: 48, color: COLORS.TEXT_SECONDARY },
   list: { padding: 16, gap: 12 },
   card: {

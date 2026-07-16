@@ -125,11 +125,22 @@ export const es = {
     navNoCoords: 'Esta estación no tiene coordenadas',
   },
 
+  status: {
+    available: 'Disponible', preparing: 'Preparando', charging: 'Cargando', suspended: 'Pausado',
+    finishing: 'Finalizando', reserved: 'Reservado', unavailable: 'No disponible', faulted: 'Con falla',
+    offline: 'Sin conexión', online: 'En línea', active: 'En curso', completed: 'Completado',
+    stopped: 'Detenido', cancelled: 'Cancelado', failed: 'Fallido', unknown: 'Desconocido',
+  },
+
   location: {
     title: 'Ubicación',
     body: 'EsLatin usa tu ubicación para mostrar estaciones cercanas.',
     allow: 'Permitir ubicación',
     skip: 'Continuar sin ubicación',
+    nearby: 'Encuentra estaciones cerca de ti',
+    navigation: 'Navegación precisa',
+    realtime: 'Disponibilidad en tiempo real',
+    timeout: 'La solicitud de ubicación tardó demasiado. Puedes activarla más tarde.',
     required:
       'Se requiere permiso de ubicación para encontrar estaciones cercanas. Actívalo en Ajustes.',
     failed: 'No se pudo solicitar el permiso de ubicación',

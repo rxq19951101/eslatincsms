@@ -8,13 +8,10 @@ import {
   Text,
   StyleSheet,
   TouchableOpacity,
-  TextInput,
   StatusBar,
-  ActivityIndicator,
   Alert,
   ScrollView,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
 import { useNavigation } from '@react-navigation/native';
 import type { StackNavigationProp } from '@react-navigation/stack';
 import type { RootStackParamList } from '../../types';
@@ -22,6 +19,11 @@ import { COLORS, PASSWORD_RULES } from '../../constants/config';
 import { useI18n } from '../../i18n';
 import { useAppDispatch, useAppSelector } from '../../hooks/useRedux';
 import { registerWithEmail } from '../../store/slices/authSlice';
+import Screen from '../../components/ui/Screen';
+import ScreenHeader from '../../components/ui/ScreenHeader';
+import TextField from '../../components/ui/TextField';
+import Button from '../../components/ui/Button';
+import Icon from '../../components/ui/Icon';
 
 type EmailRegisterScreenNavigationProp = StackNavigationProp<
   RootStackParamList,
@@ -121,7 +123,7 @@ const EmailRegisterScreen = () => {
     }
 
     try {
-      const result = await dispatch(
+      await dispatch(
         registerWithEmail({
           email: email.trim().toLowerCase(),
           password,
@@ -145,19 +147,15 @@ const EmailRegisterScreen = () => {
   };
 
   return (
-    <SafeAreaView style={styles.container}>
+    <Screen>
       <StatusBar barStyle="dark-content" />
+      <ScreenHeader title="" onBack={handleBackToWelcome} />
 
       <ScrollView
         style={styles.scrollView}
         contentContainerStyle={styles.scrollContent}
         keyboardShouldPersistTaps="handled"
       >
-        {/* 返回按钮 */}
-        <TouchableOpacity style={styles.backButton} onPress={handleBackToWelcome}>
-          <Text style={styles.backButtonText}>←</Text>
-        </TouchableOpacity>
-
         {/* 标题 */}
         <View style={styles.header}>
           <Text style={styles.title}>{t.auth.signUp}</Text>
@@ -170,11 +168,9 @@ const EmailRegisterScreen = () => {
         <View style={styles.form}>
           {/* 全名输入 */}
           <View style={styles.inputContainer}>
-            <Text style={styles.inputLabel}>{t.auth.fullName}</Text>
-            <TextInput
-              style={styles.input}
+            <TextField
+              label={t.auth.fullName}
               placeholder="John Doe"
-              placeholderTextColor={COLORS.TEXT_SECONDARY}
               value={fullName}
               onChangeText={setFullName}
               autoCapitalize="words"
@@ -184,11 +180,9 @@ const EmailRegisterScreen = () => {
 
           {/* 邮箱输入 */}
           <View style={styles.inputContainer}>
-            <Text style={styles.inputLabel}>{t.auth.email}</Text>
-            <TextInput
-              style={styles.input}
+            <TextField
+              label={t.auth.email}
               placeholder="your.email@example.com"
-              placeholderTextColor={COLORS.TEXT_SECONDARY}
               value={email}
               onChangeText={setEmail}
               keyboardType="email-address"
@@ -202,10 +196,9 @@ const EmailRegisterScreen = () => {
           <View style={styles.inputContainer}>
             <Text style={styles.inputLabel}>{t.auth.password}</Text>
             <View style={styles.passwordContainer}>
-              <TextInput
-                style={[styles.input, styles.passwordInput]}
+              <TextField
+                inputStyle={styles.passwordInput}
                 placeholder="Enter your password"
-                placeholderTextColor={COLORS.TEXT_SECONDARY}
                 value={password}
                 onChangeText={setPassword}
                 secureTextEntry={!showPassword}
@@ -217,7 +210,7 @@ const EmailRegisterScreen = () => {
                 style={styles.eyeButton}
                 onPress={() => setShowPassword(!showPassword)}
               >
-                <Text style={styles.eyeIcon}>{showPassword ? '👁️' : '👁️‍🗨️'}</Text>
+                <Icon name={showPassword ? 'eye-off-outline' : 'eye-outline'} size={20} color={COLORS.TEXT_SECONDARY} />
               </TouchableOpacity>
             </View>
             
@@ -246,10 +239,9 @@ const EmailRegisterScreen = () => {
           <View style={styles.inputContainer}>
             <Text style={styles.inputLabel}>{t.auth.confirmPassword}</Text>
             <View style={styles.passwordContainer}>
-              <TextInput
-                style={[styles.input, styles.passwordInput]}
+              <TextField
+                inputStyle={styles.passwordInput}
                 placeholder="Re-enter your password"
-                placeholderTextColor={COLORS.TEXT_SECONDARY}
                 value={confirmPassword}
                 onChangeText={setConfirmPassword}
                 secureTextEntry={!showConfirmPassword}
@@ -261,9 +253,7 @@ const EmailRegisterScreen = () => {
                 style={styles.eyeButton}
                 onPress={() => setShowConfirmPassword(!showConfirmPassword)}
               >
-                <Text style={styles.eyeIcon}>
-                  {showConfirmPassword ? '👁️' : '👁️‍🗨️'}
-                </Text>
+                <Icon name={showConfirmPassword ? 'eye-off-outline' : 'eye-outline'} size={20} color={COLORS.TEXT_SECONDARY} />
               </TouchableOpacity>
             </View>
           </View>
@@ -284,18 +274,13 @@ const EmailRegisterScreen = () => {
           </TouchableOpacity>
 
           {/* 注册按钮 */}
-          <TouchableOpacity
-            style={[styles.signUpButton, isLoading && styles.signUpButtonDisabled]}
+          <Button
+            title={t.auth.signUp}
             onPress={handleRegister}
             disabled={isLoading}
-            activeOpacity={0.8}
-          >
-            {isLoading ? (
-              <ActivityIndicator color="#FFFFFF" />
-            ) : (
-              <Text style={styles.signUpButtonText}>{t.auth.signUp}</Text>
-            )}
-          </TouchableOpacity>
+            loading={isLoading}
+            size="large"
+          />
 
           {/* 已有账号链接 */}
           <View style={styles.signinContainer}>
@@ -306,31 +291,17 @@ const EmailRegisterScreen = () => {
           </View>
         </View>
       </ScrollView>
-    </SafeAreaView>
+    </Screen>
   );
 };
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: COLORS.BACKGROUND,
-  },
   scrollView: {
     flex: 1,
   },
   scrollContent: {
     paddingHorizontal: 24,
     paddingBottom: 40,
-  },
-  backButton: {
-    marginTop: 20,
-    width: 40,
-    height: 40,
-    justifyContent: 'center',
-  },
-  backButtonText: {
-    fontSize: 28,
-    color: COLORS.TEXT_PRIMARY,
   },
   header: {
     marginTop: 20,
@@ -358,16 +329,6 @@ const styles = StyleSheet.create({
     color: COLORS.TEXT_PRIMARY,
     marginBottom: 8,
   },
-  input: {
-    backgroundColor: '#FFFFFF',
-    borderWidth: 1,
-    borderColor: COLORS.BORDER,
-    borderRadius: 12,
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-    fontSize: 16,
-    color: COLORS.TEXT_PRIMARY,
-  },
   passwordContainer: {
     position: 'relative',
   },
@@ -379,9 +340,6 @@ const styles = StyleSheet.create({
     right: 16,
     top: 14,
     padding: 4,
-  },
-  eyeIcon: {
-    fontSize: 20,
   },
   strengthContainer: {
     marginTop: 8,
@@ -435,26 +393,6 @@ const styles = StyleSheet.create({
   },
   termsLink: {
     color: COLORS.PRIMARY,
-    fontWeight: '600',
-  },
-  signUpButton: {
-    backgroundColor: COLORS.PRIMARY,
-    paddingVertical: 16,
-    borderRadius: 25,
-    alignItems: 'center',
-    marginBottom: 20,
-    shadowColor: COLORS.PRIMARY,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
-    elevation: 5,
-  },
-  signUpButtonDisabled: {
-    opacity: 0.6,
-  },
-  signUpButtonText: {
-    color: '#FFFFFF',
-    fontSize: 16,
     fontWeight: '600',
   },
   signinContainer: {

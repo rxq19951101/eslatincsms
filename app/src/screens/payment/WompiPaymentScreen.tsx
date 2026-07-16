@@ -16,20 +16,21 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useNavigation, useRoute, RouteProp } from '@react-navigation/native';
+import type { StackNavigationProp } from '@react-navigation/stack';
 import type { RootStackParamList } from '../../types';
 import { COLORS, IOS_STYLES } from '../../constants/config';
 import { getPaymentOrderStatus } from '../../api/payments';
 import Button from '../../components/ui/Button';
-import Icon from '../../components/ui/Icon';
 import ScreenHeader from '../../components/ui/ScreenHeader';
 import { useI18n } from '../../i18n';
 
 type WompiPaymentRouteProp = RouteProp<RootStackParamList, 'WompiPayment'>;
+type WompiPaymentNavProp = StackNavigationProp<RootStackParamList, 'WompiPayment'>;
 
 const WompiPaymentScreen = () => {
   const { t } = useI18n();
 
-  const navigation = useNavigation();
+  const navigation = useNavigation<WompiPaymentNavProp>();
   const route = useRoute<WompiPaymentRouteProp>();
   const { orderId, checkoutUrl } = route.params || {};
   
@@ -107,7 +108,6 @@ const WompiPaymentScreen = () => {
           left={<Button title={t.common.close} variant="text" size="small" onPress={handleClose} />}
         />
         <View style={styles.errorContainer}>
-          <Icon name="alert-circle" library="Ionicons" size={60} color={COLORS.ERROR} />
           <Text style={styles.errorText}>{t.payment.invalidLink}</Text>
           <Button title={t.common.back} variant="primary" onPress={handleClose} style={{ marginTop: 20 }} />
         </View>
@@ -125,7 +125,6 @@ const WompiPaymentScreen = () => {
       />
 
       <View style={styles.content}>
-        <Icon name="arrow-forward-circle" library="Ionicons" size={80} color={COLORS.IOS_BLUE} />
         <Text style={styles.title}>{t.payment.opening}</Text>
         <Text style={styles.message}>{t.payment.openBrowser}</Text>
         {orderId && (
@@ -155,7 +154,7 @@ const styles = StyleSheet.create({
     padding: IOS_STYLES.SPACING.XL,
   },
   title: {
-    fontSize: IOS_STYLES.FONT_SIZE.HEADER,
+    fontSize: IOS_STYLES.FONT_SIZE.TITLE,
     fontWeight: IOS_STYLES.FONT_WEIGHT.BOLD,
     color: COLORS.TEXT_PRIMARY,
     marginTop: IOS_STYLES.SPACING.LG,

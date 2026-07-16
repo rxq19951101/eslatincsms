@@ -8,7 +8,7 @@ import { View, StyleSheet, Animated, StyleProp, ViewStyle } from 'react-native';
 import { COLORS, IOS_STYLES } from '../../constants/config';
 
 export interface SkeletonProps {
-  width?: number | string;
+  width?: number | `${number}%`;
   height?: number;
   borderRadius?: number;
   style?: StyleProp<ViewStyle>;

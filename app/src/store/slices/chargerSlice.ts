@@ -28,7 +28,7 @@ const initialState: ChargerState = {
  */
 export const fetchChargers = createAsyncThunk(
   'charger/fetchChargers',
-  async (params?: ChargersListParams, { rejectWithValue }) => {
+  async (params: ChargersListParams | undefined, { rejectWithValue }) => {
     try {
       const data = await getChargers(params);
       return data;

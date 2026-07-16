@@ -4,7 +4,6 @@
 
 import React, { useCallback, useEffect, useState } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, FlatList, Alert } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import type { StackNavigationProp } from '@react-navigation/stack';
 
@@ -14,6 +13,8 @@ import type { RootStackParamList, PaymentMethod } from '../../types';
 import { deletePaymentMethod, getPaymentMethods, setDefaultPaymentMethod } from '../../utils/paymentMethodsStorage';
 import ScreenHeader from '../../components/ui/ScreenHeader';
 import Badge from '../../components/ui/Badge';
+import Screen from '../../components/ui/Screen';
+import Button from '../../components/ui/Button';
 
 type Nav = StackNavigationProp<RootStackParamList, 'PaymentMethods'>;
 
@@ -80,7 +81,7 @@ const PaymentMethodsScreen = () => {
   };
 
   return (
-    <SafeAreaView style={styles.container}>
+    <Screen>
       <ScreenHeader
         title={t.payment.methodsDemo}
         onBack={() => navigation.goBack()}
@@ -99,11 +100,8 @@ const PaymentMethodsScreen = () => {
 
       {methods.length === 0 ? (
         <View style={styles.center}>
-          <Text style={styles.emptyIcon}>💳</Text>
           <Text style={styles.centerText}>{loading ? t.common.loading : t.payment.empty}</Text>
-          <TouchableOpacity style={styles.primaryBtn} onPress={() => navigation.navigate('AddPayment')}>
-            <Text style={styles.primaryText}>{t.payment.addMethod}</Text>
-          </TouchableOpacity>
+          <Button title={t.payment.addMethod} onPress={() => navigation.navigate('AddPayment')} style={styles.primaryBtn} />
         </View>
       ) : (
         <FlatList
@@ -113,12 +111,11 @@ const PaymentMethodsScreen = () => {
           contentContainerStyle={{ padding: 16, paddingBottom: 24 }}
         />
       )}
-    </SafeAreaView>
+    </Screen>
   );
 };
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: COLORS.BACKGROUND },
   addBtn: { minWidth: 44, height: 44, alignItems: 'flex-end', justifyContent: 'center', paddingLeft: 8 },
   addText: { color: COLORS.PRIMARY, fontWeight: '900' },
   demoBanner: {
@@ -132,10 +129,8 @@ const styles = StyleSheet.create({
   },
   demoBannerText: { fontSize: 13, color: COLORS.TEXT_PRIMARY, lineHeight: 20 },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 24 },
-  emptyIcon: { fontSize: 56, marginBottom: 10 },
   centerText: { color: COLORS.TEXT_SECONDARY },
-  primaryBtn: { marginTop: 16, backgroundColor: COLORS.PRIMARY, paddingHorizontal: 18, paddingVertical: 12, borderRadius: 12 },
-  primaryText: { color: '#FFFFFF', fontWeight: '900' },
+  primaryBtn: { marginTop: 16 },
   card: {
     backgroundColor: '#FFFFFF',
     borderRadius: 14,
@@ -157,4 +152,3 @@ const styles = StyleSheet.create({
 });
 
 export default PaymentMethodsScreen;
-

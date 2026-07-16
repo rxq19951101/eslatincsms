@@ -5,7 +5,7 @@
 import apiClient, { handleApiError } from './client';
 import { API_ENDPOINTS } from '../constants/config';
 import { saveTokens, saveUserInfo } from '../utils/tokenManager';
-import type { LoginResponse, User, ApiError } from '../types';
+import type { LoginResponse, User } from '../types';
 
 /**
  * 邮箱注册

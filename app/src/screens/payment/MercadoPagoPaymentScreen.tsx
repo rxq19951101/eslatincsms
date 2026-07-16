@@ -10,7 +10,6 @@ import {
   StyleSheet,
   StatusBar,
   ScrollView,
-  TextInput,
   Alert,
   ActivityIndicator,
   KeyboardAvoidingView,
@@ -25,8 +24,8 @@ import { formatMoneyCOP } from '../../utils/formatMoney';
 import { createMercadoPagoPayment, getPaymentOrderStatus } from '../../api/payments';
 import { handleApiError } from '../../api/client';
 import Button from '../../components/ui/Button';
-import Icon from '../../components/ui/Icon';
 import ScreenHeader from '../../components/ui/ScreenHeader';
+import TextField from '../../components/ui/TextField';
 import { useSelector } from 'react-redux';
 import type { RootState } from '../../store';
 import { useI18n, getT } from '../../i18n';
@@ -291,21 +290,21 @@ const MercadoPagoPaymentScreen = () => {
                     {[
                       <Button
                         key="approved"
-                        title={`✅ ${t.payment.testApprove}`}
+                        title={t.payment.testApprove}
                         variant="text"
                         onPress={() => fillTestCard('approved')}
                         style={styles.testCardButton}
                       />,
                       <Button
                         key="pending"
-                        title={`⏳ ${t.payment.testPending}`}
+                        title={t.payment.testPending}
                         variant="text"
                         onPress={() => fillTestCard('pending')}
                         style={styles.testCardButton}
                       />,
                       <Button
                         key="rejected"
-                        title={`❌ ${t.payment.testReject}`}
+                        title={t.payment.testReject}
                         variant="text"
                         onPress={() => fillTestCard('rejected')}
                         style={styles.testCardButton}
@@ -318,9 +317,10 @@ const MercadoPagoPaymentScreen = () => {
             
             {/* 卡号 */}
             <View style={styles.inputGroup}>
-              <Text style={styles.label}>{t.payment.cardNumber}</Text>
-              <TextInput
-                style={[styles.input, errors.cardNumber ? styles.inputError : undefined]}
+              <TextField
+                label={t.payment.cardNumber}
+                inputStyle={styles.input}
+                error={errors.cardNumber || undefined}
                 placeholder="1234 5678 9012 3456"
                 value={cardNumber}
                 onChangeText={(text) => {
@@ -334,18 +334,16 @@ const MercadoPagoPaymentScreen = () => {
                 maxLength={19}
                 autoComplete="cc-number"
               />
-              {errors.cardNumber && (
-                <Text style={styles.errorText}>{errors.cardNumber}</Text>
-              )}
             </View>
             
             {/* 过期日期和 CVV — 行内子 View 之间不能有裸空白，否则 RN Web 会把缩进当成非法文本节点 */}
             <View style={styles.row}>
               {[
                 <View key="expMonth" style={[styles.inputGroup, styles.flex1]}>
-                  <Text style={styles.label}>{t.payment.expMonth}</Text>
-                  <TextInput
-                    style={[styles.input, errors.expMonth ? styles.inputError : undefined]}
+                  <TextField
+                    label={t.payment.expMonth}
+                    inputStyle={styles.input}
+                    error={errors.expMonth || undefined}
                     placeholder="MM"
                     value={expMonth}
                     onChangeText={(text) => {
@@ -358,14 +356,12 @@ const MercadoPagoPaymentScreen = () => {
                     keyboardType="numeric"
                     maxLength={2}
                   />
-                  {errors.expMonth ? (
-                    <Text style={styles.errorText}>{errors.expMonth}</Text>
-                  ) : null}
                 </View>,
                 <View key="expYear" style={[styles.inputGroup, styles.flex1, styles.marginLeft]}>
-                  <Text style={styles.label}>{t.payment.expYear}</Text>
-                  <TextInput
-                    style={[styles.input, errors.expYear ? styles.inputError : undefined]}
+                  <TextField
+                    label={t.payment.expYear}
+                    inputStyle={styles.input}
+                    error={errors.expYear || undefined}
                     placeholder="YY"
                     value={expYear}
                     onChangeText={(text) => {
@@ -378,14 +374,12 @@ const MercadoPagoPaymentScreen = () => {
                     keyboardType="numeric"
                     maxLength={2}
                   />
-                  {errors.expYear ? (
-                    <Text style={styles.errorText}>{errors.expYear}</Text>
-                  ) : null}
                 </View>,
                 <View key="cvc" style={[styles.inputGroup, styles.flex1, styles.marginLeft]}>
-                  <Text style={styles.label}>{t.payment.cvc}</Text>
-                  <TextInput
-                    style={[styles.input, errors.cvc ? styles.inputError : undefined]}
+                  <TextField
+                    label={t.payment.cvc}
+                    inputStyle={styles.input}
+                    error={errors.cvc || undefined}
                     placeholder="123"
                     value={cvc}
                     onChangeText={(text) => {
@@ -399,16 +393,16 @@ const MercadoPagoPaymentScreen = () => {
                     maxLength={4}
                     secureTextEntry
                   />
-                  {errors.cvc ? <Text style={styles.errorText}>{errors.cvc}</Text> : null}
                 </View>,
               ]}
             </View>
             
             {/* 持卡人姓名 */}
             <View style={styles.inputGroup}>
-              <Text style={styles.label}>{t.payment.holderName}</Text>
-              <TextInput
-                style={[styles.input, errors.holderName ? styles.inputError : undefined]}
+              <TextField
+                label={t.payment.holderName}
+                inputStyle={styles.input}
+                error={errors.holderName || undefined}
                 placeholder="John Doe"
                 value={holderName}
                 onChangeText={(text) => {
@@ -420,16 +414,14 @@ const MercadoPagoPaymentScreen = () => {
                 autoCapitalize="words"
                 autoComplete="name"
               />
-              {errors.holderName && (
-                <Text style={styles.errorText}>{errors.holderName}</Text>
-              )}
             </View>
             
             {/* 邮箱 */}
             <View style={styles.inputGroup}>
-              <Text style={styles.label}>{t.payment.emailRequired}</Text>
-              <TextInput
-                style={[styles.input, errors.email ? styles.inputError : undefined]}
+              <TextField
+                label={t.payment.emailRequired}
+                inputStyle={styles.input}
+                error={errors.email || undefined}
                 placeholder="user@example.com"
                 value={email}
                 onChangeText={(text) => {
@@ -442,9 +434,6 @@ const MercadoPagoPaymentScreen = () => {
                 autoCapitalize="none"
                 autoComplete="email"
               />
-              {errors.email && (
-                <Text style={styles.errorText}>{errors.email}</Text>
-              )}
             </View>
           </View>
           
@@ -530,12 +519,6 @@ const styles = StyleSheet.create({
   inputGroup: {
     marginBottom: IOS_STYLES.SPACING.MD,
   },
-  label: {
-    fontSize: IOS_STYLES.FONT_SIZE.BODY,
-    fontWeight: IOS_STYLES.FONT_WEIGHT.MEDIUM,
-    color: COLORS.TEXT_PRIMARY,
-    marginBottom: IOS_STYLES.SPACING.XS,
-  },
   input: {
     backgroundColor: COLORS.CARD_BG,
     borderWidth: 1,
@@ -544,14 +527,6 @@ const styles = StyleSheet.create({
     padding: IOS_STYLES.SPACING.MD,
     fontSize: IOS_STYLES.FONT_SIZE.BODY,
     color: COLORS.TEXT_PRIMARY,
-  },
-  inputError: {
-    borderColor: COLORS.ERROR,
-  },
-  errorText: {
-    fontSize: IOS_STYLES.FONT_SIZE.SMALL,
-    color: COLORS.ERROR,
-    marginTop: IOS_STYLES.SPACING.XS,
   },
   row: {
     flexDirection: 'row',

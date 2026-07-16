@@ -8,20 +8,22 @@ import {
   Text,
   StyleSheet,
   TouchableOpacity,
-  TextInput,
   StatusBar,
-  ActivityIndicator,
   Alert,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
 import { useNavigation } from '@react-navigation/native';
 import type { StackNavigationProp } from '@react-navigation/stack';
 import type { RootStackParamList } from '../../types';
-import { COLORS, API_BASE_URL } from '../../constants/config';
+import { COLORS } from '../../constants/config';
 import { useAppDispatch, useAppSelector } from '../../hooks/useRedux';
 import { loginWithEmail, clearError } from '../../store/slices/authSlice';
 import { saveRememberMe } from '../../utils/tokenManager';
 import { useI18n } from '../../i18n';
+import Screen from '../../components/ui/Screen';
+import ScreenHeader from '../../components/ui/ScreenHeader';
+import TextField from '../../components/ui/TextField';
+import Button from '../../components/ui/Button';
+import Icon from '../../components/ui/Icon';
 
 type EmailLoginScreenNavigationProp = StackNavigationProp<RootStackParamList, 'EmailLogin'>;
 
@@ -56,16 +58,11 @@ const EmailLoginScreen = () => {
     }
 
     try {
-      // 调试信息
-      console.log('🔐 开始登录...');
-      console.log('📧 邮箱:', email.trim().toLowerCase());
-      console.log('🌐 API地址:', API_BASE_URL);
-      
       // 保存记住我状态
       await saveRememberMe(rememberMe);
 
       // 调用登录API
-      const result = await dispatch(
+      await dispatch(
         loginWithEmail({
           email: email.trim().toLowerCase(),
           password,
@@ -73,11 +70,9 @@ const EmailLoginScreen = () => {
         })
       ).unwrap();
 
-      console.log('✅ 登录成功');
       // 登录成功，导航到位置权限页面
       navigation.navigate('LocationPermission');
     } catch (err: any) {
-      console.error('❌ 登录失败:', err);
       const msg = err?.message || t.common.error;
       if (String(msg).toLowerCase().includes('email not verified')) {
         navigation.navigate('EmailVerification', { email: email.trim().toLowerCase() });
@@ -101,15 +96,10 @@ const EmailLoginScreen = () => {
   };
 
   return (
-    <SafeAreaView style={styles.container}>
+    <Screen>
       <StatusBar barStyle="dark-content" />
-
+      <ScreenHeader title="" onBack={handleBackToWelcome} />
       <View style={styles.content}>
-        {/* 返回按钮 */}
-        <TouchableOpacity style={styles.backButton} onPress={handleBackToWelcome}>
-          <Text style={styles.backButtonText}>←</Text>
-        </TouchableOpacity>
-
         {/* 标题 */}
         <View style={styles.header}>
           <Text style={styles.title}>{t.auth.hello}</Text>
@@ -120,11 +110,9 @@ const EmailLoginScreen = () => {
         <View style={styles.form}>
           {/* 邮箱输入 */}
           <View style={styles.inputContainer}>
-            <Text style={styles.inputLabel}>{t.auth.email}</Text>
-            <TextInput
-              style={styles.input}
+            <TextField
+              label={t.auth.email}
               placeholder="your.email@example.com"
-              placeholderTextColor={COLORS.TEXT_SECONDARY}
               value={email}
               onChangeText={setEmail}
               keyboardType="email-address"
@@ -138,10 +126,9 @@ const EmailLoginScreen = () => {
           <View style={styles.inputContainer}>
             <Text style={styles.inputLabel}>{t.auth.password}</Text>
             <View style={styles.passwordContainer}>
-              <TextInput
-                style={[styles.input, styles.passwordInput]}
+              <TextField
+                inputStyle={styles.passwordInput}
                 placeholder={t.auth.password}
-                placeholderTextColor={COLORS.TEXT_SECONDARY}
                 value={password}
                 onChangeText={setPassword}
                 secureTextEntry={!showPassword}
@@ -153,7 +140,7 @@ const EmailLoginScreen = () => {
                 style={styles.eyeButton}
                 onPress={() => setShowPassword(!showPassword)}
               >
-                <Text style={styles.eyeIcon}>{showPassword ? '👁️' : '👁️‍🗨️'}</Text>
+                <Icon name={showPassword ? 'eye-off-outline' : 'eye-outline'} size={20} color={COLORS.TEXT_SECONDARY} />
               </TouchableOpacity>
             </View>
           </View>
@@ -184,42 +171,23 @@ const EmailLoginScreen = () => {
           )}
 
           {/* 登录按钮 */}
-          <TouchableOpacity
-            style={[styles.signInButton, isLoading && styles.signInButtonDisabled]}
+          <Button
+            title={t.auth.signIn}
             onPress={handleLogin}
             disabled={isLoading}
-            activeOpacity={0.8}
-          >
-            {isLoading ? (
-              <ActivityIndicator color="#FFFFFF" />
-            ) : (
-              <Text style={styles.signInButtonText}>{t.auth.signIn}</Text>
-            )}
-          </TouchableOpacity>
+            loading={isLoading}
+            size="large"
+          />
         </View>
       </View>
-    </SafeAreaView>
+    </Screen>
   );
 };
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: COLORS.BACKGROUND,
-  },
   content: {
     flex: 1,
     paddingHorizontal: 24,
-  },
-  backButton: {
-    marginTop: 20,
-    width: 40,
-    height: 40,
-    justifyContent: 'center',
-  },
-  backButtonText: {
-    fontSize: 28,
-    color: COLORS.TEXT_PRIMARY,
   },
   header: {
     marginTop: 20,
@@ -247,16 +215,6 @@ const styles = StyleSheet.create({
     color: COLORS.TEXT_PRIMARY,
     marginBottom: 8,
   },
-  input: {
-    backgroundColor: '#FFFFFF',
-    borderWidth: 1,
-    borderColor: COLORS.BORDER,
-    borderRadius: 12,
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-    fontSize: 16,
-    color: COLORS.TEXT_PRIMARY,
-  },
   passwordContainer: {
     position: 'relative',
   },
@@ -268,9 +226,6 @@ const styles = StyleSheet.create({
     right: 16,
     top: 14,
     padding: 4,
-  },
-  eyeIcon: {
-    fontSize: 20,
   },
   optionsRow: {
     flexDirection: 'row',
@@ -319,25 +274,6 @@ const styles = StyleSheet.create({
   errorText: {
     color: COLORS.ERROR,
     fontSize: 14,
-  },
-  signInButton: {
-    backgroundColor: COLORS.PRIMARY,
-    paddingVertical: 16,
-    borderRadius: 25,
-    alignItems: 'center',
-    shadowColor: COLORS.PRIMARY,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
-    elevation: 5,
-  },
-  signInButtonDisabled: {
-    opacity: 0.6,
-  },
-  signInButtonText: {
-    color: '#FFFFFF',
-    fontSize: 16,
-    fontWeight: '600',
   },
 });
 

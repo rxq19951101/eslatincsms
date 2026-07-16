@@ -3,13 +3,15 @@
  */
 
 import React, { useEffect, useRef } from 'react';
-import { View, StyleSheet, ActivityIndicator, Text, StyleProp, ViewStyle, TextStyle, Animated } from 'react-native';
+import { StyleSheet, ActivityIndicator, Text, StyleProp, ViewStyle, TextStyle, Animated } from 'react-native';
 import { COLORS, IOS_STYLES } from '../../constants/config';
 
 export interface LoadingSpinnerProps {
   size?: 'small' | 'large';
   color?: string;
   text?: string;
+  /** Compatibility alias used by older screens. */
+  message?: string;
   style?: StyleProp<ViewStyle>;
   textStyle?: StyleProp<TextStyle>;
 }
@@ -18,6 +20,7 @@ const LoadingSpinner: React.FC<LoadingSpinnerProps> = ({
   size = 'large',
   color = COLORS.IOS_BLUE,
   text,
+  message,
   style,
   textStyle,
 }) => {
@@ -34,9 +37,9 @@ const LoadingSpinner: React.FC<LoadingSpinnerProps> = ({
   return (
     <Animated.View style={[styles.container, { opacity: fadeAnim }, style]}>
       <ActivityIndicator size={size} color={color} />
-      {text && (
+      {(text || message) && (
         <Text style={[styles.text, textStyle]}>
-          {text}
+          {text || message}
         </Text>
       )}
     </Animated.View>

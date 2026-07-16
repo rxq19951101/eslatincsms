@@ -7,21 +7,22 @@ import React, { useEffect } from 'react';
 import { View, Text, StyleSheet, StatusBar } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useNavigation, useRoute, RouteProp } from '@react-navigation/native';
+import type { StackNavigationProp } from '@react-navigation/stack';
 import type { RootStackParamList } from '../../types';
 import { COLORS, IOS_STYLES } from '../../constants/config';
-import { getPaymentOrderStatus } from '../../api/payments';
 import { useAppDispatch } from '../../hooks/useRedux';
 import { fetchWalletBalance } from '../../store/slices/walletSlice';
 import Button from '../../components/ui/Button';
-import Icon from '../../components/ui/Icon';
+import Badge from '../../components/ui/Badge';
 import { useI18n } from '../../i18n';
 
 type PaymentResultRouteProp = RouteProp<RootStackParamList, 'PaymentResult'>;
+type PaymentResultNavProp = StackNavigationProp<RootStackParamList, 'PaymentResult'>;
 
 const PaymentResultScreen = () => {
   const { t } = useI18n();
 
-  const navigation = useNavigation();
+  const navigation = useNavigation<PaymentResultNavProp>();
   const route = useRoute<PaymentResultRouteProp>();
   const { orderId, status } = route.params || {};
   const dispatch = useAppDispatch();
@@ -90,7 +91,7 @@ const PaymentResultScreen = () => {
       <StatusBar barStyle="dark-content" />
       
       <View style={styles.content}>
-        <Icon name={config.icon} library="Ionicons" size={80} color={config.iconColor} />
+        <Badge label={config.title} variant={status === 'approved' ? 'success' : 'error'} />
         <Text style={styles.title}>{config.title}</Text>
         <Text style={styles.message}>{config.message}</Text>
         

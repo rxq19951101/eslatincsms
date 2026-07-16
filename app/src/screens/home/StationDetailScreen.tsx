@@ -3,7 +3,7 @@
  * 展示站点信息、状态、价格、连接器列表等
  */
  
-import React, { useMemo, useEffect } from 'react';
+import React, { useEffect } from 'react';
 import {
   View,
   Text,
@@ -28,10 +28,11 @@ import type { RootStackParamList } from '../../types';
 import { useAppDispatch, useAppSelector } from '../../hooks/useRedux';
 import { fetchChargerById } from '../../store/slices/chargerSlice';
 import GoogleMapView from '../../components/GoogleMapView';
-import Icon from '../../components/ui/Icon';
 import Button from '../../components/ui/Button';
 import ScreenHeader from '../../components/ui/ScreenHeader';
 import Badge, { BadgeVariant } from '../../components/ui/Badge';
+import { radius, spacing, typography } from '../../theme';
+import { localizeStatus } from '../../utils/localizeStatus';
 
 type StationDetailRouteProp = RouteProp<RootStackParamList, 'StationDetail'>;
 type StationDetailNavProp = StackNavigationProp<RootStackParamList, 'StationDetail'>;
@@ -69,14 +70,6 @@ const StationDetailScreen = () => {
     : isAvailable
     ? 'success'
     : 'warning';
-
-  const availableConnectorId = useMemo(() => {
-    const connectors = charger?.connectors;
-    if (!Array.isArray(connectors)) return null;
-    const found = connectors.find((c) => String(c.status || '').toLowerCase() === 'available');
-    const cid = found?.connector_id ?? found?.id;
-    return typeof cid === 'number' ? cid : Number.isFinite(Number(cid)) ? Number(cid) : null;
-  }, [charger?.connectors]);
 
   const handleNavigate = async () => {
     if (!charger?.latitude || !charger?.longitude) {
@@ -143,7 +136,6 @@ const StationDetailScreen = () => {
         {/* Empty */}
         {!loading && !error && !charger && (
           <View style={styles.emptyContainer}>
-            <Icon name="search" library="Ionicons" size={56} color={COLORS.TEXT_SECONDARY} />
             <Text style={styles.emptyTitle}>{t.station.notFound}</Text>
             <Text style={styles.emptyText}>{t.station.notFoundHint}</Text>
             <Button title={t.station.reload} onPress={loadDetail} variant="primary" size="medium" />
@@ -162,7 +154,7 @@ const StationDetailScreen = () => {
                   </Text>
                   <Text style={styles.subTitle}>{charger.site_address || t.home.addressUnknown}</Text>
                 </View>
-                <Badge label={charger.status} variant={statusVariant} />
+                <Badge label={localizeStatus(charger.status, t)} variant={statusVariant} />
               </View>
 
               <View style={styles.metricsRow}>
@@ -238,7 +230,7 @@ const StationDetailScreen = () => {
                           {typeof c.power_kw === 'number' ? `${c.power_kw} kW` : t.station.powerUnknown}
                         </Text>
                       </View>
-                      <Badge label={st} variant={stVariant} />
+                      <Badge label={localizeStatus(st, t)} variant={stVariant} />
                     </View>
                   );
                 })
@@ -259,7 +251,6 @@ const StationDetailScreen = () => {
           onPress={handleNavigate}
           variant="secondary"
           size="large"
-          icon={{ name: 'navigate', library: 'Ionicons' }}
           style={{ flex: 1, marginRight: 10 }}
         />
         <Button
@@ -268,7 +259,6 @@ const StationDetailScreen = () => {
           variant="primary"
           size="large"
           disabled={!isAvailable}
-          icon={{ name: 'flash', library: 'Ionicons' }}
           style={{ flex: 1 }}
         />
       </View>
@@ -301,7 +291,7 @@ const styles = StyleSheet.create({
 
   card: {
     backgroundColor: '#FFFFFF',
-    borderRadius: 14,
+    borderRadius: radius.lg,
     padding: 16,
     marginBottom: 12,
     borderWidth: 1,
@@ -309,15 +299,15 @@ const styles = StyleSheet.create({
   },
   titleRow: { flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between' },
   titleLeft: { flex: 1, paddingRight: 12 },
-  title: { fontSize: 18, fontWeight: '800', color: COLORS.TEXT_PRIMARY, marginBottom: 6 },
+  title: { fontSize: 18, fontWeight: typography.bold, color: COLORS.TEXT_PRIMARY, marginBottom: 6 },
   subTitle: { color: COLORS.TEXT_SECONDARY, lineHeight: 20 },
 
   metricsRow: { flexDirection: 'row', marginTop: 14 },
   metricItem: { flex: 1 },
   metricLabel: { color: COLORS.TEXT_SECONDARY, fontSize: 12, marginBottom: 4 },
-  metricValue: { color: COLORS.TEXT_PRIMARY, fontWeight: '800' },
+  metricValue: { color: COLORS.TEXT_PRIMARY, fontWeight: typography.semibold },
 
-  sectionTitle: { fontSize: 16, fontWeight: '800', color: COLORS.TEXT_PRIMARY, marginBottom: 10 },
+  sectionTitle: { fontSize: 16, fontWeight: typography.semibold, color: COLORS.TEXT_PRIMARY, marginBottom: 10 },
   connectorRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -327,14 +317,14 @@ const styles = StyleSheet.create({
     borderTopColor: COLORS.BORDER,
   },
   connectorLeft: { flex: 1, paddingRight: 12 },
-  connectorName: { fontWeight: '700', color: COLORS.TEXT_PRIMARY },
+  connectorName: { fontWeight: typography.semibold, color: COLORS.TEXT_PRIMARY },
   connectorMeta: { marginTop: 4, color: COLORS.TEXT_SECONDARY, fontSize: 12 },
   emptyBlock: { paddingVertical: 16, alignItems: 'center' },
   emptyBlockText: { color: COLORS.TEXT_SECONDARY },
 
   mapWrap: {
     height: 220,
-    borderRadius: 12,
+    borderRadius: radius.md,
     overflow: 'hidden',
     borderWidth: 1,
     borderColor: COLORS.BORDER,
@@ -344,7 +334,7 @@ const styles = StyleSheet.create({
 
   bottomBar: {
     flexDirection: 'row',
-    padding: IOS_STYLES.SPACING.MD,
+    padding: spacing.md,
     backgroundColor: COLORS.IOS_WHITE,
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: COLORS.IOS_SEPARATOR,
@@ -352,4 +342,3 @@ const styles = StyleSheet.create({
 });
 
 export default StationDetailScreen;
-

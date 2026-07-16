@@ -6,6 +6,7 @@ import HomeScreen from '../src/screens/home/HomeScreen';
 import chargerReducer from '../src/store/slices/chargerSlice';
 import authReducer from '../src/store/slices/authSlice';
 import { NavigationContainer } from '@react-navigation/native';
+import type { ReactNode } from 'react';
 
 // Mock AsyncStorage
 jest.mock('@react-native-async-storage/async-storage', () =>
@@ -25,18 +26,18 @@ jest.mock('react-native-maps', () => {
   const { View } = require('react-native');
   return {
     __esModule: true,
-    default: (props) => <View testID="google-map-view" {...props} />,
-    Marker: (props) => <View testID="map-marker" {...props} />,
+    default: (props: Record<string, unknown>) => <View testID="google-map-view" {...props} />,
+    Marker: (props: Record<string, unknown>) => <View testID="map-marker" {...props} />,
     PROVIDER_GOOGLE: 'google',
   };
 });
 
 // Mock GoogleMapView组件
 jest.mock('../src/components/GoogleMapView', () => {
-  const { View, Text } = require('react-native');
+  const { View } = require('react-native');
   return {
     __esModule: true,
-    default: (props) => <View testID="google-map-view-component">{props.children}</View>,
+    default: (props: { children?: ReactNode }) => <View testID="google-map-view-component">{props.children}</View>,
   };
 });
 
@@ -74,15 +75,21 @@ describe('HomeScreen Integration Test', () => {
             status: 'Available',
             available_connectors: 2,
             total_connectors: 4,
+            is_configured: true,
+            has_location: true,
+            has_pricing: false,
           }
         ],
         loading: false,
         error: null,
+        selectedCharger: null,
+        lastFetch: null,
+        filters: {},
       },
     },
   });
 
-  const renderWithProviders = (component) => {
+  const renderWithProviders = (component: ReactNode) => {
     return render(
       <Provider store={mockStore}>
         <NavigationContainer>
@@ -93,13 +100,14 @@ describe('HomeScreen Integration Test', () => {
   };
 
   it('renders correctly and toggles between list and map view', async () => {
-    const { getByText, getByTestId, queryByTestId } = renderWithProviders(<HomeScreen />);
+    const { getByText, getByTestId } = renderWithProviders(<HomeScreen />);
 
     // 初始状态应该显示列表
     expect(getByText('Test Station')).toBeTruthy();
     
     // 切换到地图视图
-    const mapButton = getByText('地图');
+    // 默认 locale 是西语；同时兼容测试环境中持久化为中文的情况。
+    const mapButton = getByText(/^(Mapa|地图)$/);
     fireEvent.press(mapButton);
 
     // 验证地图组件是否渲染 (使用了我们修复后的 GoogleMapView)

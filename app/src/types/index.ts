@@ -240,7 +240,7 @@ export type RootStackParamList = {
   SocialAuthCallback: { provider: string; token: string };
   
   // Main App
-  MainTabs: NavigatorScreenParams<MainTabsParamList>;
+  MainTabs: NavigatorScreenParams<MainTabsParamList> | undefined;
   LocationPermission: undefined;
   StationDetail: { chargePointId: string };
   // 仅支持扫码充电：不再实现预订模块（BookingDetail 等路由移除）

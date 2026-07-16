@@ -120,11 +120,22 @@ export const zh: I18nKeys = {
     navUnavailable: '无法导航',
     navNoCoords: '该站点缺少经纬度',
   },
+  status: {
+    available: '可用', preparing: '准备中', charging: '充电中', suspended: '已暂停',
+    finishing: '即将完成', reserved: '已预留', unavailable: '不可用', faulted: '故障',
+    offline: '离线', online: '在线', active: '进行中', completed: '已完成',
+    stopped: '已停止', cancelled: '已取消', failed: '失败', unknown: '未知',
+  },
+
   location: {
     title: '位置',
     body: 'EsLatin 使用你的位置来显示附近充电站。',
     allow: '允许定位',
     skip: '暂不开启，继续',
+    nearby: '查找附近的充电站',
+    navigation: '提供精确导航',
+    realtime: '查看实时可用状态',
+    timeout: '定位请求超时，你可以稍后在设置中开启。',
     required: '需要定位权限以查找附近充电站，请在系统设置中开启。',
     failed: '无法请求定位权限',
   },

@@ -9,18 +9,19 @@ import {
   Text,
   StyleSheet,
   TouchableOpacity,
-  TextInput,
   StatusBar,
-  ActivityIndicator,
   Alert,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
 import { useNavigation, useRoute, RouteProp } from '@react-navigation/native';
 import type { StackNavigationProp } from '@react-navigation/stack';
 import type { RootStackParamList } from '../../types';
 import { COLORS, PASSWORD_RULES } from '../../constants/config';
 import { useI18n } from '../../i18n';
 import { confirmResetPassword } from '../../api/auth';
+import Screen from '../../components/ui/Screen';
+import TextField from '../../components/ui/TextField';
+import Button from '../../components/ui/Button';
+import Icon from '../../components/ui/Icon';
 
 type ResetPasswordScreenNavigationProp = StackNavigationProp<
   RootStackParamList,
@@ -115,13 +116,13 @@ const ResetPasswordScreen = () => {
   };
 
   return (
-    <SafeAreaView style={styles.container}>
+    <Screen>
       <StatusBar barStyle="dark-content" />
 
       <View style={styles.content}>
         {/* 标题 */}
         <View style={styles.header}>
-          <Text style={styles.title}>Reset Password 🔐</Text>
+          <Text style={styles.title}>Reset Password</Text>
           <Text style={styles.subtitle}>
             Enter your new password below
           </Text>
@@ -133,10 +134,9 @@ const ResetPasswordScreen = () => {
           <View style={styles.inputContainer}>
             <Text style={styles.inputLabel}>New Password</Text>
             <View style={styles.passwordContainer}>
-              <TextInput
-                style={[styles.input, styles.passwordInput]}
+              <TextField
+                inputStyle={styles.passwordInput}
                 placeholder="Enter new password"
-                placeholderTextColor={COLORS.TEXT_SECONDARY}
                 value={newPassword}
                 onChangeText={setNewPassword}
                 secureTextEntry={!showNewPassword}
@@ -148,7 +148,7 @@ const ResetPasswordScreen = () => {
                 style={styles.eyeButton}
                 onPress={() => setShowNewPassword(!showNewPassword)}
               >
-                <Text style={styles.eyeIcon}>{showNewPassword ? '👁️' : '👁️‍🗨️'}</Text>
+                <Icon name={showNewPassword ? 'eye-off-outline' : 'eye-outline'} size={20} color={COLORS.TEXT_SECONDARY} />
               </TouchableOpacity>
             </View>
 
@@ -177,10 +177,9 @@ const ResetPasswordScreen = () => {
           <View style={styles.inputContainer}>
             <Text style={styles.inputLabel}>Confirm New Password</Text>
             <View style={styles.passwordContainer}>
-              <TextInput
-                style={[styles.input, styles.passwordInput]}
+              <TextField
+                inputStyle={styles.passwordInput}
                 placeholder="Re-enter new password"
-                placeholderTextColor={COLORS.TEXT_SECONDARY}
                 value={confirmPassword}
                 onChangeText={setConfirmPassword}
                 secureTextEntry={!showConfirmPassword}
@@ -192,50 +191,30 @@ const ResetPasswordScreen = () => {
                 style={styles.eyeButton}
                 onPress={() => setShowConfirmPassword(!showConfirmPassword)}
               >
-                <Text style={styles.eyeIcon}>
-                  {showConfirmPassword ? '👁️' : '👁️‍🗨️'}
-                </Text>
+                <Icon name={showConfirmPassword ? 'eye-off-outline' : 'eye-outline'} size={20} color={COLORS.TEXT_SECONDARY} />
               </TouchableOpacity>
             </View>
           </View>
 
           {/* 重置按钮 */}
-          <TouchableOpacity
-            style={[styles.resetButton, isLoading && styles.resetButtonDisabled]}
+          <Button
+            title="Reset Password"
             onPress={handleResetPassword}
             disabled={isLoading}
-            activeOpacity={0.8}
-          >
-            {isLoading ? (
-              <ActivityIndicator color="#FFFFFF" />
-            ) : (
-              <Text style={styles.resetButtonText}>Reset Password</Text>
-            )}
-          </TouchableOpacity>
+            loading={isLoading}
+            size="large"
+          />
         </View>
       </View>
-    </SafeAreaView>
+    </Screen>
   );
 };
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: COLORS.BACKGROUND,
-  },
   content: {
     flex: 1,
     paddingHorizontal: 24,
     paddingVertical: 20,
-  },
-  backButton: {
-    width: 40,
-    height: 40,
-    justifyContent: 'center',
-  },
-  backButtonText: {
-    fontSize: 28,
-    color: COLORS.TEXT_PRIMARY,
   },
   header: {
     marginTop: 20,
@@ -264,16 +243,6 @@ const styles = StyleSheet.create({
     color: COLORS.TEXT_PRIMARY,
     marginBottom: 8,
   },
-  input: {
-    backgroundColor: '#FFFFFF',
-    borderWidth: 1,
-    borderColor: COLORS.BORDER,
-    borderRadius: 12,
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-    fontSize: 16,
-    color: COLORS.TEXT_PRIMARY,
-  },
   passwordContainer: {
     position: 'relative',
   },
@@ -285,9 +254,6 @@ const styles = StyleSheet.create({
     right: 16,
     top: 14,
     padding: 4,
-  },
-  eyeIcon: {
-    fontSize: 20,
   },
   strengthContainer: {
     marginTop: 8,
@@ -308,82 +274,6 @@ const styles = StyleSheet.create({
   },
   strengthText: {
     fontSize: 12,
-    fontWeight: '600',
-  },
-  resetButton: {
-    backgroundColor: COLORS.PRIMARY,
-    paddingVertical: 16,
-    borderRadius: 25,
-    alignItems: 'center',
-    marginTop: 20,
-    shadowColor: COLORS.PRIMARY,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
-    elevation: 5,
-  },
-  resetButtonDisabled: {
-    opacity: 0.6,
-  },
-  resetButtonText: {
-    color: '#FFFFFF',
-    fontSize: 16,
-    fontWeight: '600',
-  },
-  backLinkContainer: {
-    marginTop: 24,
-    alignItems: 'center',
-  },
-  backLinkText: {
-    color: COLORS.TEXT_SECONDARY,
-    fontSize: 14,
-  },
-  successContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  iconCircle: {
-    width: 120,
-    height: 120,
-    borderRadius: 60,
-    backgroundColor: COLORS.PRIMARY + '20',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginBottom: 32,
-  },
-  icon: {
-    fontSize: 60,
-  },
-  successTitle: {
-    fontSize: 24,
-    fontWeight: 'bold',
-    color: COLORS.TEXT_PRIMARY,
-    marginBottom: 12,
-    textAlign: 'center',
-  },
-  successSubtitle: {
-    fontSize: 16,
-    color: COLORS.TEXT_SECONDARY,
-    textAlign: 'center',
-    marginBottom: 40,
-    lineHeight: 24,
-  },
-  primaryButton: {
-    backgroundColor: COLORS.PRIMARY,
-    paddingVertical: 16,
-    paddingHorizontal: 40,
-    borderRadius: 25,
-    alignItems: 'center',
-    shadowColor: COLORS.PRIMARY,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
-    elevation: 5,
-  },
-  primaryButtonText: {
-    color: '#FFFFFF',
-    fontSize: 16,
     fontWeight: '600',
   },
 });

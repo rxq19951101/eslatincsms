@@ -3,8 +3,7 @@
  */
 
 import React, { useEffect, useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { View, Text, StyleSheet, ActivityIndicator } from 'react-native';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import type { RouteProp } from '@react-navigation/native';
 import type { StackNavigationProp } from '@react-navigation/stack';
@@ -16,6 +15,11 @@ import { useAppDispatch, useAppSelector } from '../../hooks/useRedux';
 import { settleCharging, SettleResult } from '../../api/charging';
 import { fetchWalletBalance, fetchWalletTransactions } from '../../store/slices/walletSlice';
 import { useI18n } from '../../i18n';
+import Screen from '../../components/ui/Screen';
+import Card from '../../components/ui/Card';
+import Button from '../../components/ui/Button';
+import Badge from '../../components/ui/Badge';
+import { radius, spacing, typography } from '../../theme';
 
 type R = RouteProp<RootStackParamList, 'ChargingComplete'>;
 type Nav = StackNavigationProp<RootStackParamList, 'ChargingComplete'>;
@@ -64,9 +68,9 @@ const ChargingCompleteScreen = () => {
   }, [dispatch, lastStoppedSession]);
 
   return (
-    <SafeAreaView style={styles.container}>
-      <View style={styles.card}>
-        <Text style={styles.icon}>✅</Text>
+    <Screen edges={['top', 'bottom']} contentStyle={styles.container}>
+      <Card style={styles.card}>
+        <Badge label={t.common.success} variant="success" style={styles.statusBadge} />
         <Text style={styles.title}>{t.charging.completeTitle}</Text>
         <Text style={styles.subTitle}>{t.charging.charger.replace('{id}', String(chargePointId))}</Text>
 
@@ -121,44 +125,32 @@ const ChargingCompleteScreen = () => {
         </View>
 
         <View style={styles.row}>
-          <TouchableOpacity
-            style={[styles.btn, styles.secondary]}
-            onPress={() => navigation.navigate('MainTabs')}
-          >
-            <Text style={styles.secondaryText}>{t.charging.home}</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.btn, styles.primary]}
-            onPress={() => navigation.navigate('MainTabs')}
-          >
-            <Text style={styles.primaryText}>{t.charging.scanAgain}</Text>
-          </TouchableOpacity>
+          <Button title={t.charging.home} variant="secondary"
+            onPress={() => navigation.navigate('MainTabs', { screen: 'Home' })} style={styles.action} />
+          <Button title={t.charging.scanAgain}
+            onPress={() => navigation.navigate('MainTabs', { screen: 'Scan' })} style={styles.action} />
         </View>
-      </View>
-    </SafeAreaView>
+      </Card>
+    </Screen>
   );
 };
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: COLORS.BACKGROUND, justifyContent: 'center', padding: 20 },
-  card: { backgroundColor: '#fff', borderRadius: 16, padding: 20 },
-  icon: { fontSize: 40, textAlign: 'center', marginBottom: 8 },
-  title: { fontSize: 22, fontWeight: '700', textAlign: 'center', marginBottom: 8 },
+  container: { justifyContent: 'center', padding: spacing.lg },
+  card: { padding: spacing.lg },
+  statusBadge: { alignSelf: 'center', marginBottom: spacing.md },
+  title: { fontSize: typography.title, fontWeight: typography.bold, color: COLORS.TEXT_PRIMARY, textAlign: 'center', marginBottom: 8 },
   subTitle: { fontSize: 14, color: COLORS.TEXT_SECONDARY, textAlign: 'center', marginBottom: 16 },
   block: { marginTop: 12 },
   kvTitle: { fontSize: 16, fontWeight: '600', marginBottom: 4 },
   kv: { fontSize: 14, color: COLORS.TEXT_PRIMARY, marginTop: 4 },
-  notice: { marginTop: 12, padding: 10, backgroundColor: '#F3F4F6', borderRadius: 8 },
+  notice: { marginTop: 12, padding: 12, backgroundColor: COLORS.IOS_LIGHT_GRAY, borderRadius: radius.md },
   noticeText: { fontSize: 13, color: COLORS.TEXT_SECONDARY },
   settleRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 8 },
   settleText: { marginLeft: 8, color: COLORS.TEXT_SECONDARY },
   errorText: { color: COLORS.ERROR, marginTop: 8 },
   row: { flexDirection: 'row', marginTop: 24, gap: 12 },
-  btn: { flex: 1, paddingVertical: 14, borderRadius: 12, alignItems: 'center' },
-  primary: { backgroundColor: COLORS.PRIMARY },
-  secondary: { backgroundColor: '#E5E7EB' },
-  primaryText: { color: '#fff', fontWeight: '600' },
-  secondaryText: { color: COLORS.TEXT_PRIMARY, fontWeight: '600' },
+  action: { flex: 1 },
 });
 
 export default ChargingCompleteScreen;

@@ -15,6 +15,7 @@ import { useI18n } from '../../i18n';
 import { useAppDispatch, useAppSelector } from '../../hooks/useRedux';
 import { fetchChargingRecordDetail } from '../../store/slices/transactionsSlice';
 import ScreenHeader from '../../components/ui/ScreenHeader';
+import { localizeStatus } from '../../utils/localizeStatus';
 
 type R = RouteProp<RootStackParamList, 'ChargingHistoryDetail'>;
 type Nav = StackNavigationProp<RootStackParamList, 'ChargingHistoryDetail'>;
@@ -65,7 +66,7 @@ const ChargingHistoryDetailScreen = () => {
           </View>
 
           <View style={styles.card}>
-            <Row label={t.history.status} value={d.status} />
+            <Row label={t.history.status} value={localizeStatus(d.status, t)} />
             <Row label={t.history.startTime} value={fmtTime(d.start_time)} />
             <Row label={t.history.endTime} value={fmtTime(d.end_time)} />
             <Row label={t.history.chargerId} value={d.charge_point_id} />
@@ -116,4 +117,3 @@ const styles = StyleSheet.create({
 });
 
 export default ChargingHistoryDetailScreen;
-

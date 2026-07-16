@@ -3,7 +3,7 @@
  */
 
 import React from 'react';
-import { StyleSheet } from 'react-native';
+import { Platform, StyleSheet } from 'react-native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import type { MainTabsParamList } from '../types';
 import { COLORS, IOS_STYLES } from '../constants/config';
@@ -26,20 +26,21 @@ export const MainTabNavigator = () => {
     <Tab.Navigator
       screenOptions={{
         headerShown: false,
-        tabBarActiveTintColor: COLORS.IOS_BLUE,
-        tabBarInactiveTintColor: COLORS.IOS_GRAY,
+        tabBarActiveTintColor: COLORS.PRIMARY,
+        tabBarInactiveTintColor: COLORS.TEXT_TERTIARY,
         tabBarStyle: {
           backgroundColor: COLORS.IOS_WHITE,
           borderTopWidth: StyleSheet.hairlineWidth,
-          borderTopColor: COLORS.IOS_SEPARATOR,
-          height: 60,
-          paddingBottom: IOS_STYLES.SPACING.SM,
-          paddingTop: IOS_STYLES.SPACING.SM,
+          borderTopColor: COLORS.BORDER,
+          height: Platform.OS === 'ios' ? 76 : 64,
+          paddingBottom: Platform.OS === 'ios' ? 18 : 8,
+          paddingTop: 8,
         },
         tabBarLabelStyle: {
-          fontSize: IOS_STYLES.FONT_SIZE.SMALL,
-          fontWeight: IOS_STYLES.FONT_WEIGHT.SEMIBOLD,
+          fontSize: 11,
+          fontWeight: IOS_STYLES.FONT_WEIGHT.MEDIUM,
         },
+        tabBarIconStyle: { marginBottom: -2 },
       }}
     >
       <Tab.Screen
@@ -48,7 +49,7 @@ export const MainTabNavigator = () => {
         options={{
           tabBarLabel: t.tabs.home,
           tabBarIcon: ({ color, size }) => (
-            <Icon name="home" library="Ionicons" size={size || 24} color={color} />
+            <Icon name="home-outline" library="Ionicons" size={size || 22} color={color} />
           ),
         }}
       />
@@ -58,7 +59,7 @@ export const MainTabNavigator = () => {
         options={{
           tabBarLabel: t.tabs.saved,
           tabBarIcon: ({ color, size }) => (
-            <Icon name="heart" library="Ionicons" size={size || 24} color={color} />
+            <Icon name="bookmark-outline" library="Ionicons" size={size || 22} color={color} />
           ),
         }}
       />
@@ -68,7 +69,7 @@ export const MainTabNavigator = () => {
         options={{
           tabBarLabel: t.tabs.scan,
           tabBarIcon: ({ color, size }) => (
-            <Icon name="camera" library="Ionicons" size={size || 24} color={color} />
+            <Icon name="scan-outline" library="Ionicons" size={size || 23} color={color} />
           ),
         }}
       />
@@ -78,7 +79,7 @@ export const MainTabNavigator = () => {
         options={{
           tabBarLabel: t.tabs.wallet,
           tabBarIcon: ({ color, size }) => (
-            <Icon name="wallet" library="Ionicons" size={size || 24} color={color} />
+            <Icon name="wallet-outline" library="Ionicons" size={size || 22} color={color} />
           ),
         }}
       />
@@ -88,7 +89,7 @@ export const MainTabNavigator = () => {
         options={{
           tabBarLabel: t.tabs.account,
           tabBarIcon: ({ color, size }) => (
-            <Icon name="person" library="Ionicons" size={size || 24} color={color} />
+            <Icon name="person-outline" library="Ionicons" size={size || 22} color={color} />
           ),
         }}
       />

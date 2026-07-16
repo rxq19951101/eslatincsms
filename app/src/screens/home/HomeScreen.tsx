@@ -8,10 +8,8 @@ import {
   Text,
   StyleSheet,
   TouchableOpacity,
-  TextInput,
   FlatList,
   StatusBar,
-  Alert,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as Location from 'expo-location';
@@ -28,10 +26,11 @@ import Icon from '../../components/ui/Icon';
 import Card from '../../components/ui/Card';
 import Button from '../../components/ui/Button';
 import Badge, { BadgeVariant } from '../../components/ui/Badge';
-import LoadingSpinner from '../../components/ui/LoadingSpinner';
+import TextField from '../../components/ui/TextField';
 import { useI18n } from '../../i18n';
 import { SkeletonCard } from '../../components/ui/Skeleton';
 import { formatDistance } from '../../utils/formatDistance';
+import { localizeStatus } from '../../utils/localizeStatus';
 
 const HomeScreen = () => {
   const { t } = useI18n();
@@ -110,7 +109,7 @@ const HomeScreen = () => {
           <Text style={styles.stationName} numberOfLines={1}>
             {item.site_name || t.home.stationFallback.replace('{id}', String(item.id))}
           </Text>
-          <Badge label={item.status} variant={statusVariant} dot />
+          <Badge label={localizeStatus(item.status, t)} variant={statusVariant} dot />
         </View>
 
         <View style={styles.addressRow}>
@@ -118,34 +117,17 @@ const HomeScreen = () => {
             {item.site_address || t.home.addressUnknown}
           </Text>
           {item.distance_km !== undefined && (
-            <View style={styles.distanceItem}>
-              <Icon name="location" library="Ionicons" size={14} color={COLORS.TEXT_SECONDARY} />
-              <Text style={styles.distanceText}>
-                {formatDistance(item.distance_km)}
-              </Text>
-            </View>
+            <Text style={styles.distanceText}>{formatDistance(item.distance_km)}</Text>
           )}
         </View>
 
-        <View style={styles.divider} />
-
         <View style={styles.cardFooter}>
-          <View style={styles.infoItem}>
-            <Icon name="flash" library="Ionicons" size={16} color={isAvailable ? COLORS.PRIMARY : COLORS.TEXT_SECONDARY} />
-            <Text
-              style={[styles.infoText, !isAvailable && styles.unavailableText]}
-            >
-              {available}/{total} {t.home.available}
-            </Text>
-          </View>
+          <Text style={[styles.availabilityText, !isAvailable && styles.unavailableText]}>
+            {available}/{total} {t.home.available}
+          </Text>
 
           {!!item.price_per_kwh && (
-            <View style={styles.infoItem}>
-              <Icon name="cash" library="Ionicons" size={16} color={COLORS.TEXT_SECONDARY} />
-              <Text style={styles.infoText}>
-                ${item.price_per_kwh.toFixed(2)}/kWh
-              </Text>
-            </View>
+            <Text style={styles.priceText}>${item.price_per_kwh.toFixed(2)}/kWh</Text>
           )}
         </View>
       </Card>
@@ -189,28 +171,21 @@ const HomeScreen = () => {
       
       {/* Header */}
       <View style={styles.header}>
-        <Text style={styles.headerTitle}>{t.home.title}</Text>
-        <View style={styles.headerActions}>
-          <TouchableOpacity style={styles.refreshButton} onPress={handleRefresh}>
-            <Icon
-              name="refresh"
-              library="Ionicons"
-              size={24}
-              color={COLORS.IOS_BLUE}
-              animation="spin"
-              animating={refreshing}
-            />
-          </TouchableOpacity>
+        <View>
+          <Text style={styles.eyebrow}>ESLATIN</Text>
+          <Text style={styles.headerTitle}>{t.home.title}</Text>
         </View>
+        <TouchableOpacity style={styles.refreshButton} onPress={handleRefresh} accessibilityRole="button">
+          <Text style={styles.refreshText}>{refreshing ? '···' : t.common.refresh}</Text>
+        </TouchableOpacity>
       </View>
 
       {/* Search Bar */}
       <View style={styles.searchContainer}>
-        <Icon name="search" library="Ionicons" size={20} color={COLORS.TEXT_SECONDARY} />
-        <TextInput
-          style={styles.searchInput}
+        <TextField
+          containerStyle={styles.searchField}
+          inputStyle={styles.searchInput}
           placeholder={t.home.search}
-          placeholderTextColor={COLORS.TEXT_SECONDARY}
           value={searchQuery}
           onChangeText={setSearchQuery}
         />
@@ -225,7 +200,7 @@ const HomeScreen = () => {
 
       {error && (
         <View style={styles.errorContainer}>
-          <Icon name="alert-circle" library="Ionicons" size={48} color={COLORS.ERROR} />
+          <Text style={styles.stateTitle}>{t.common.retry}</Text>
           <Text style={styles.errorText}>{error}</Text>
           <Button title={t.common.retry} onPress={handleRefresh} variant="primary" size="medium" />
         </View>
@@ -281,7 +256,6 @@ const HomeScreen = () => {
               showsVerticalScrollIndicator={false}
               ListEmptyComponent={
                 <View style={styles.emptyContainer}>
-                  <Icon name="search" library="Ionicons" size={60} color={COLORS.TEXT_SECONDARY} />
                   <Text style={styles.emptyText}>
                     {searchQuery ? t.home.emptySearch : t.home.empty}
                   </Text>
@@ -328,36 +302,38 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     alignItems: 'center',
     paddingHorizontal: 20,
-    paddingVertical: 16,
+    paddingTop: 20,
+    paddingBottom: 18,
+  },
+  eyebrow: {
+    fontSize: 11,
+    fontWeight: '700',
+    letterSpacing: 1.8,
+    color: COLORS.PRIMARY,
+    marginBottom: 4,
   },
   headerTitle: {
     fontSize: 24,
-    fontWeight: 'bold',
+    fontWeight: '700',
     color: COLORS.TEXT_PRIMARY,
   },
-  headerActions: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
   refreshButton: {
-    width: 40,
-    height: 40,
+    minWidth: 44,
+    height: 36,
     justifyContent: 'center',
     alignItems: 'center',
+    paddingHorizontal: 10,
+  },
+  refreshText: {
+    color: COLORS.PRIMARY,
+    fontSize: 14,
+    fontWeight: '600',
   },
   searchContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: COLORS.IOS_WHITE,
     marginHorizontal: IOS_STYLES.SPACING.MD,
     marginBottom: IOS_STYLES.SPACING.MD,
-    paddingHorizontal: IOS_STYLES.SPACING.MD,
-    paddingVertical: IOS_STYLES.SPACING.MD,
-    borderRadius: IOS_STYLES.RADIUS.MEDIUM,
-    borderWidth: 1,
-    borderColor: COLORS.BORDER,
-    gap: IOS_STYLES.SPACING.SM,
   },
+  searchField: { flex: 1 },
   searchInput: {
     flex: 1,
     fontSize: 16,
@@ -368,19 +344,17 @@ const styles = StyleSheet.create({
     marginHorizontal: 20,
     marginBottom: 16,
     backgroundColor: '#FFFFFF',
-    borderRadius: 12,
-    padding: 4,
-    borderWidth: 1,
-    borderColor: COLORS.BORDER,
+    borderRadius: IOS_STYLES.RADIUS.ROUND,
+    padding: 3,
   },
   toggleButton: {
     flex: 1,
     paddingVertical: 10,
     alignItems: 'center',
-    borderRadius: 8,
+    borderRadius: IOS_STYLES.RADIUS.ROUND,
   },
   toggleButtonActive: {
-    backgroundColor: COLORS.PRIMARY,
+    backgroundColor: COLORS.TEXT_PRIMARY,
   },
   toggleText: {
     fontSize: 14,
@@ -395,13 +369,13 @@ const styles = StyleSheet.create({
     paddingBottom: 20,
   },
   stationCard: {
-    padding: IOS_STYLES.SPACING.MD,
+    padding: 18,
   },
   cardHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 8,
+    marginBottom: 6,
     gap: IOS_STYLES.SPACING.SM,
   },
   stationName: {
@@ -414,7 +388,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: IOS_STYLES.SPACING.MD,
+    marginBottom: 18,
   },
   stationAddress: {
     fontSize: IOS_STYLES.FONT_SIZE.BODY,
@@ -422,33 +396,24 @@ const styles = StyleSheet.create({
     flex: 1,
     marginRight: IOS_STYLES.SPACING.SM,
   },
-  distanceItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-  },
   distanceText: {
     fontSize: IOS_STYLES.FONT_SIZE.SMALL,
     color: COLORS.TEXT_SECONDARY,
     fontWeight: IOS_STYLES.FONT_WEIGHT.MEDIUM,
   },
-  divider: {
-    height: StyleSheet.hairlineWidth,
-    backgroundColor: COLORS.IOS_SEPARATOR,
-    marginBottom: IOS_STYLES.SPACING.SM,
-  },
   cardFooter: {
     flexDirection: 'row',
-    gap: IOS_STYLES.SPACING.LG,
-  },
-  infoItem: {
-    flexDirection: 'row',
+    justifyContent: 'space-between',
     alignItems: 'center',
-    gap: 4,
   },
-  infoText: {
+  availabilityText: {
     fontSize: IOS_STYLES.FONT_SIZE.SMALL,
-    color: COLORS.TEXT_PRIMARY,
+    color: COLORS.PRIMARY_DARK,
+    fontWeight: IOS_STYLES.FONT_WEIGHT.SEMIBOLD,
+  },
+  priceText: {
+    fontSize: IOS_STYLES.FONT_SIZE.SMALL,
+    color: COLORS.TEXT_SECONDARY,
     fontWeight: IOS_STYLES.FONT_WEIGHT.MEDIUM,
   },
   unavailableText: {
@@ -467,6 +432,11 @@ const styles = StyleSheet.create({
     fontSize: IOS_STYLES.FONT_SIZE.MEDIUM,
     color: COLORS.ERROR,
     textAlign: 'center',
+  },
+  stateTitle: {
+    fontSize: IOS_STYLES.FONT_SIZE.LARGE,
+    fontWeight: IOS_STYLES.FONT_WEIGHT.SEMIBOLD,
+    color: COLORS.TEXT_PRIMARY,
   },
   emptyContainer: {
     padding: IOS_STYLES.SPACING.XL,

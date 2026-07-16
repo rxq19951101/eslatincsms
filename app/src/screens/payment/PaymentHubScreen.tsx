@@ -2,8 +2,7 @@
  * 支付中枢：支付轨关闭时仅展示余额说明；开启后显示充值入口。
  */
 import React, { useCallback, useEffect } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { View, Text, StyleSheet, ScrollView } from 'react-native';
 import { useNavigation, useFocusEffect } from '@react-navigation/native';
 import type { StackNavigationProp } from '@react-navigation/stack';
 
@@ -14,8 +13,9 @@ import { fetchWalletBalance } from '../../store/slices/walletSlice';
 import { formatMoneyCOP } from '../../utils/formatMoney';
 import Button from '../../components/ui/Button';
 import Card from '../../components/ui/Card';
-import Icon from '../../components/ui/Icon';
 import ScreenHeader from '../../components/ui/ScreenHeader';
+import Screen from '../../components/ui/Screen';
+import ListItem from '../../components/ui/ListItem';
 import { createWompiPayment } from '../../api/payments';
 import { useI18n } from '../../i18n';
 
@@ -56,7 +56,7 @@ const PaymentHubScreen = () => {
   };
 
   return (
-    <SafeAreaView style={styles.container} edges={['top']}>
+    <Screen>
       <ScreenHeader title="Pagos y billetera" onBack={() => navigation.goBack()} />
 
       <ScrollView contentContainerStyle={styles.scroll}>
@@ -74,7 +74,6 @@ const PaymentHubScreen = () => {
 
         {!PAYMENT_RAILS_ENABLED && (
           <View style={styles.demoBanner}>
-            <Icon name="information-circle" library="Ionicons" size={20} color={COLORS.PRIMARY} />
             <Text style={styles.demoText}>
               Contacte al operador o escriba a {LEGAL_URLS.supportEmail} para solicitar saldo. El cobro
               de la carga se descuenta de la billetera al finalizar.
@@ -118,41 +117,23 @@ const PaymentHubScreen = () => {
             </View>
 
             <View style={styles.demoBanner}>
-              <Icon name="information-circle" library="Ionicons" size={20} color={COLORS.PRIMARY} />
               <Text style={styles.demoText}>{t.payment.demoNote}</Text>
             </View>
 
-            <TouchableOpacity
-              style={styles.manageRow}
-              onPress={() => navigation.navigate('PaymentMethods')}
-            >
-              <Text style={styles.manageLabel}>Administrar métodos de pago</Text>
-              <Icon name="chevron-forward" library="Ionicons" size={20} color={COLORS.TEXT_SECONDARY} />
-            </TouchableOpacity>
+            <ListItem label="Administrar métodos de pago" onPress={() => navigation.navigate('PaymentMethods')} />
           </>
         )}
 
-        <TouchableOpacity style={styles.walletLink} onPress={() => navigation.navigate('UnpaidBills')}>
-          <Icon name="alert-circle" library="Ionicons" size={20} color={COLORS.PRIMARY} />
-          <Text style={styles.walletLinkText}>Facturas pendientes</Text>
-          <Icon name="chevron-forward" library="Ionicons" size={18} color={COLORS.TEXT_SECONDARY} />
-        </TouchableOpacity>
-
-        <TouchableOpacity
-          style={styles.walletLink}
-          onPress={() => navigation.navigate('MainTabs', { screen: 'MyWallet' })}
-        >
-          <Icon name="list" library="Ionicons" size={20} color={COLORS.PRIMARY} />
-          <Text style={styles.walletLinkText}>Ver movimientos de billetera</Text>
-          <Icon name="chevron-forward" library="Ionicons" size={18} color={COLORS.TEXT_SECONDARY} />
-        </TouchableOpacity>
+        <View style={styles.links}>
+          <ListItem label="Facturas pendientes" onPress={() => navigation.navigate('UnpaidBills')} />
+          <ListItem label="Ver movimientos de billetera" onPress={() => navigation.navigate('MainTabs', { screen: 'MyWallet' })} />
+        </View>
       </ScrollView>
-    </SafeAreaView>
+    </Screen>
   );
 };
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: COLORS.BACKGROUND },
   scroll: { padding: IOS_STYLES.SPACING.MD, paddingBottom: 40 },
   balanceCard: {
     padding: IOS_STYLES.SPACING.LG,
@@ -171,19 +152,7 @@ const styles = StyleSheet.create({
   },
   chips: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: IOS_STYLES.SPACING.LG },
   chip: { marginRight: 8, marginBottom: 8 },
-  walletLink: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 14,
-    paddingHorizontal: 12,
-    backgroundColor: COLORS.CARD_BG,
-    borderRadius: IOS_STYLES.RADIUS.MEDIUM,
-    marginBottom: IOS_STYLES.SPACING.LG,
-    borderWidth: 1,
-    borderColor: COLORS.BORDER,
-    gap: 8,
-  },
-  walletLinkText: { flex: 1, fontSize: 15, fontWeight: '600', color: COLORS.TEXT_PRIMARY },
+  links: { overflow: 'hidden', borderRadius: IOS_STYLES.RADIUS.LARGE, borderWidth: 1, borderColor: COLORS.BORDER },
   demoBanner: {
     flexDirection: 'row',
     alignItems: 'flex-start',
@@ -196,19 +165,6 @@ const styles = StyleSheet.create({
     borderColor: '#A7F3D0',
   },
   demoText: { flex: 1, fontSize: 13, color: COLORS.TEXT_PRIMARY, lineHeight: 20 },
-  manageRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingVertical: 14,
-    paddingHorizontal: 12,
-    backgroundColor: COLORS.CARD_BG,
-    borderRadius: IOS_STYLES.RADIUS.MEDIUM,
-    borderWidth: 1,
-    borderColor: COLORS.BORDER,
-    marginBottom: IOS_STYLES.SPACING.LG,
-  },
-  manageLabel: { fontSize: 15, fontWeight: '600', color: COLORS.PRIMARY },
 });
 
 export default PaymentHubScreen;

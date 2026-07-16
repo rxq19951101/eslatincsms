@@ -18,6 +18,8 @@ import type {
   MercadoPagoCardTokenResult,
 } from '../types';
 
+export type { UnpaidCharge } from '../types';
+
 /**
  * BIN 回退推断 MP payment_method_id（优先以 card_tokens 响应为准）
  */

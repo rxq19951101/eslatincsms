@@ -9,12 +9,9 @@ import {
   View,
   Text,
   StyleSheet,
-  TouchableOpacity,
-  TextInput,
   Alert,
   Platform,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
 import { useNavigation } from '@react-navigation/native';
 import type { StackNavigationProp } from '@react-navigation/stack';
 import { CameraView, useCameraPermissions } from 'expo-camera';
@@ -22,6 +19,10 @@ import { CameraView, useCameraPermissions } from 'expo-camera';
 import { COLORS } from '../../constants/config';
 import type { RootStackParamList } from '../../types';
 import { useI18n } from '../../i18n';
+import Screen from '../../components/ui/Screen';
+import TextField from '../../components/ui/TextField';
+import Button from '../../components/ui/Button';
+import { radius, spacing, typography } from '../../theme';
 
 type Nav = StackNavigationProp<RootStackParamList>;
 
@@ -80,7 +81,7 @@ const ScanScreen = () => {
   };
 
   return (
-    <SafeAreaView style={styles.container} edges={['top']}>
+    <Screen contentStyle={styles.container}>
       <View style={styles.header}>
         <Text style={styles.title}>{t.scan.title}</Text>
         <Text style={styles.subTitle}>{t.scan.subtitle}</Text>
@@ -90,22 +91,17 @@ const ScanScreen = () => {
         <View style={styles.card}>
           <Text style={styles.cardTitle}>{t.scan.manualTitle}</Text>
           <Text style={styles.cardHint}>{hint}</Text>
-          <TextInput
+          <TextField
             value={manual}
             onChangeText={setManual}
             placeholder={t.scan.placeholder}
-            style={styles.input}
             autoCapitalize="none"
           />
           <View style={styles.row}>
             {canUseCamera && !hasPermission && (
-              <TouchableOpacity style={[styles.btn, styles.secondary]} onPress={requestPermission}>
-                <Text style={styles.secondaryText}>{t.scan.requestCamera}</Text>
-              </TouchableOpacity>
+              <Button title={t.scan.requestCamera} variant="secondary" onPress={requestPermission} style={styles.action} />
             )}
-            <TouchableOpacity style={[styles.btn, styles.primary]} onPress={() => goToProcess(manual)}>
-              <Text style={styles.primaryText}>{t.scan.start}</Text>
-            </TouchableOpacity>
+            <Button title={t.scan.start} onPress={() => goToProcess(manual)} style={styles.action} />
           </View>
         </View>
       )}
@@ -132,43 +128,31 @@ const ScanScreen = () => {
           </View>
         </View>
       )}
-    </SafeAreaView>
+    </Screen>
   );
 };
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: COLORS.BACKGROUND, padding: 16 },
-  header: { marginBottom: 12 },
-  title: { fontSize: 22, fontWeight: '800', color: COLORS.TEXT_PRIMARY },
+  container: { padding: spacing.md },
+  header: { marginBottom: spacing.lg },
+  title: { fontSize: typography.title, fontWeight: typography.bold, color: COLORS.TEXT_PRIMARY },
   subTitle: { marginTop: 6, color: COLORS.TEXT_SECONDARY, lineHeight: 20 },
 
   card: {
     backgroundColor: '#FFFFFF',
-    borderRadius: 14,
+    borderRadius: radius.lg,
     padding: 16,
     borderWidth: 1,
     borderColor: COLORS.BORDER,
   },
-  cardTitle: { fontSize: 16, fontWeight: '800', color: COLORS.TEXT_PRIMARY, marginBottom: 8 },
+  cardTitle: { fontSize: 16, fontWeight: '600', color: COLORS.TEXT_PRIMARY, marginBottom: 8 },
   cardHint: { color: COLORS.TEXT_SECONDARY, lineHeight: 18, marginBottom: 12 },
-  input: {
-    height: 44,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: COLORS.BORDER,
-    paddingHorizontal: 12,
-    backgroundColor: '#FFFFFF',
-  },
-  row: { flexDirection: 'row', marginTop: 12 },
-  btn: { flex: 1, height: 44, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
-  primary: { backgroundColor: COLORS.PRIMARY, marginLeft: 10 },
-  primaryText: { color: '#FFFFFF', fontWeight: '800' },
-  secondary: { backgroundColor: '#E5E7EB' },
-  secondaryText: { color: COLORS.TEXT_PRIMARY, fontWeight: '800' },
+  row: { flexDirection: 'row', marginTop: 12, gap: 10 },
+  action: { flex: 1 },
 
   cameraWrap: {
     flex: 1,
-    borderRadius: 16,
+    borderRadius: radius.lg,
     overflow: 'hidden',
     borderWidth: 1,
     borderColor: COLORS.BORDER,
@@ -194,7 +178,7 @@ const styles = StyleSheet.create({
   overlayText: {
     marginTop: 14,
     color: '#FFFFFF',
-    fontWeight: '800',
+    fontWeight: '600',
     textShadowColor: 'rgba(0,0,0,0.6)',
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 6,
@@ -202,4 +186,3 @@ const styles = StyleSheet.create({
 });
 
 export default ScanScreen;
-

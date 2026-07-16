@@ -108,51 +108,43 @@ const AccountScreen = () => {
 
       <Card style={styles.menuSection}>
         <ListItem
-          icon={{ name: 'document-text', library: 'Ionicons' }}
           label={t.account.history}
           onPress={() => navigation.navigate('ChargingHistory')}
           index={0}
         />
         <ListItem
-          icon={{ name: 'person', library: 'Ionicons' }}
           label={t.account.personal}
           onPress={() => navigation.navigate('PersonalInfo')}
           index={1}
         />
         {PAYMENT_RAILS_ENABLED && (
           <ListItem
-            icon={{ name: 'card', library: 'Ionicons' }}
             label={t.account.payments}
             onPress={() => navigation.navigate('PaymentHub')}
             index={2}
           />
         )}
         <ListItem
-          icon={{ name: 'language', library: 'Ionicons' }}
           label={`${t.account.language} · ${currentLangLabel}`}
           onPress={handleLanguage}
           index={3}
         />
         <ListItem
-          icon={{ name: 'help-circle', library: 'Ionicons' }}
           label={t.account.help}
           onPress={() => navigation.navigate('HelpCenter')}
           index={4}
         />
         <ListItem
-          icon={{ name: 'document', library: 'Ionicons' }}
           label={t.account.privacy}
           onPress={() => navigation.navigate('PrivacyPolicy')}
           index={5}
         />
         <ListItem
-          icon={{ name: 'document-text', library: 'Ionicons' }}
           label={t.account.terms}
           onPress={() => Linking.openURL(LEGAL_URLS.terms)}
           index={6}
         />
         <ListItem
-          icon={{ name: 'information-circle', library: 'Ionicons' }}
           label={t.account.about}
           onPress={() => navigation.navigate('About')}
           index={7}
@@ -191,36 +183,37 @@ const styles = StyleSheet.create({
   },
   header: {
     paddingHorizontal: 20,
-    paddingVertical: 16,
+    paddingTop: 20,
+    paddingBottom: 18,
   },
   headerTitle: {
     fontSize: 24,
-    fontWeight: 'bold',
+    fontWeight: '700',
     color: COLORS.TEXT_PRIMARY,
   },
   profileCard: {
-    alignItems: 'center',
-    paddingVertical: IOS_STYLES.SPACING.LG,
+    alignItems: 'flex-start',
+    padding: IOS_STYLES.SPACING.LG,
     marginBottom: IOS_STYLES.SPACING.MD,
     marginHorizontal: IOS_STYLES.SPACING.MD,
   },
   avatar: {
-    width: 80,
-    height: 80,
-    borderRadius: 40,
-    backgroundColor: COLORS.PRIMARY,
+    width: 52,
+    height: 52,
+    borderRadius: 16,
+    backgroundColor: COLORS.PRIMARY_SOFT,
     justifyContent: 'center',
     alignItems: 'center',
     marginBottom: 12,
   },
   avatarText: {
-    fontSize: 32,
-    fontWeight: 'bold',
-    color: '#FFFFFF',
+    fontSize: 20,
+    fontWeight: '700',
+    color: COLORS.PRIMARY_DARK,
   },
   userName: {
     fontSize: 20,
-    fontWeight: 'bold',
+    fontWeight: '600',
     color: COLORS.TEXT_PRIMARY,
     marginBottom: 4,
   },

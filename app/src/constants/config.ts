@@ -239,25 +239,27 @@ function resolveMercadoPagoPublicKey(): string {
 
 // 应用主题色
 export const COLORS = {
-  PRIMARY: '#10B981', // 品牌主色（绿色）
-  PRIMARY_DARK: '#059669',
-  SECONDARY: '#3B82F6', // 蓝色，仅用于信息类强调，不作为主要交互色
-  SUCCESS: '#10B981',
-  WARNING: '#F59E0B',
-  ERROR: '#EF4444',
-  BACKGROUND: '#F9FAFB',
+  PRIMARY: '#087F5B',
+  PRIMARY_DARK: '#066B4D',
+  PRIMARY_SOFT: '#E8F5EF',
+  SECONDARY: '#4263EB',
+  SUCCESS: '#087F5B',
+  WARNING: '#B86500',
+  ERROR: '#C92A2A',
+  BACKGROUND: '#F7F8F6',
   CARD_BG: '#FFFFFF',
-  TEXT_PRIMARY: '#111827',
-  TEXT_SECONDARY: '#6B7280',
-  BORDER: '#E5E7EB',
-  DISABLED: '#D1D5DB',
+  TEXT_PRIMARY: '#17211B',
+  TEXT_SECONDARY: '#68736C',
+  TEXT_TERTIARY: '#919A94',
+  BORDER: '#E3E7E3',
+  DISABLED: '#CDD3CE',
   // iOS 风格颜色
   // 注意：IOS_BLUE 曾是 iOS 系统蓝，历史上与品牌绿色 PRIMARY 混用导致全局配色不一致。
   // 统一为品牌主色，使 Button/TabBar 等系统级交互色与各页面自绘按钮保持一致。
-  IOS_BLUE: '#10B981',
-  IOS_GRAY: '#8E8E93',
-  IOS_LIGHT_GRAY: '#F2F2F7',
-  IOS_SEPARATOR: '#C6C6C8',
+  IOS_BLUE: '#087F5B',
+  IOS_GRAY: '#7B857E',
+  IOS_LIGHT_GRAY: '#F1F3F1',
+  IOS_SEPARATOR: '#E3E7E3',
   IOS_WHITE: '#FFFFFF',
   IOS_BLACK: '#000000',
 } as const;
@@ -286,16 +288,16 @@ export const IOS_STYLES = {
     SMALL: {
       shadowColor: '#000',
       shadowOffset: { width: 0, height: 1 },
-      shadowOpacity: 0.08,
-      shadowRadius: 3,
-      elevation: 2,
+      shadowOpacity: 0.04,
+      shadowRadius: 2,
+      elevation: 1,
     },
     MEDIUM: {
       shadowColor: '#000',
       shadowOffset: { width: 0, height: 2 },
-      shadowOpacity: 0.12,
-      shadowRadius: 8,
-      elevation: 4,
+      shadowOpacity: 0.07,
+      shadowRadius: 6,
+      elevation: 2,
     },
     LARGE: {
       shadowColor: '#000',

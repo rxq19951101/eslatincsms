@@ -121,11 +121,22 @@ export const en: I18nKeys = {
     navUnavailable: 'Cannot navigate',
     navNoCoords: 'This station has no coordinates',
   },
+  status: {
+    available: 'Available', preparing: 'Preparing', charging: 'Charging', suspended: 'Suspended',
+    finishing: 'Finishing', reserved: 'Reserved', unavailable: 'Unavailable', faulted: 'Faulted',
+    offline: 'Offline', online: 'Online', active: 'Active', completed: 'Completed',
+    stopped: 'Stopped', cancelled: 'Cancelled', failed: 'Failed', unknown: 'Unknown',
+  },
+
   location: {
     title: 'Location',
     body: 'EsLatin uses your location to show nearby stations.',
     allow: 'Allow location',
     skip: 'Continue without location',
+    nearby: 'Find charging stations near you',
+    navigation: 'Get precise navigation',
+    realtime: 'See real-time availability',
+    timeout: 'The location request timed out. You can enable it later in Settings.',
     required:
       'Location permission is required to find nearby stations. Enable it in Settings.',
     failed: 'Could not request location permission',

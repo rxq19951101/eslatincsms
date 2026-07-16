@@ -22,13 +22,13 @@ import type { StackNavigationProp } from '@react-navigation/stack';
 
 import { COLORS, IOS_STYLES, PAYMENT_RAILS_ENABLED, MIN_BALANCE_COP } from '../../constants/config';
 import { useI18n } from '../../i18n';
-import Icon from '../../components/ui/Icon';
 import Button from '../../components/ui/Button';
 import Card from '../../components/ui/Card';
 import LoadingSpinner from '../../components/ui/LoadingSpinner';
 import CircularProgress from '../../components/ui/CircularProgress';
 import Skeleton from '../../components/ui/Skeleton';
 import ScreenHeader from '../../components/ui/ScreenHeader';
+import Badge from '../../components/ui/Badge';
 import type { RootStackParamList } from '../../types';
 import { useAppDispatch, useAppSelector } from '../../hooks/useRedux';
 import { fetchActiveSession, fetchMeterValuePoints, setChargingTarget, startCharging, stopChargingSession } from '../../store/slices/chargingSlice';
@@ -49,7 +49,7 @@ const ChargingProcessScreen = () => {
   const dispatch = useAppDispatch();
 
   const { qrToken } = route.params;
-  const { starting, stopping, loadingActive, activeSession, error, lastRemoteResult, meterValues, lastMeterId, loadingMeter, meterError } = useAppSelector(
+  const { starting, stopping, activeSession, error, meterValues, lastMeterId, meterError } = useAppSelector(
     (s) => s.charging
   );
   const { balance: walletBalanceSlice, loadingBalance } = useAppSelector((s) => s.wallet);
@@ -320,7 +320,7 @@ const ChargingProcessScreen = () => {
         <ScrollView style={styles.scrollContent}>
           <Card style={styles.card}>
             <View style={styles.statusHeader}>
-              <Icon name="alert-circle" library="Ionicons" size={48} color={COLORS.ERROR} />
+              <Badge label={t.chargingUi.offlineTitle} variant="error" />
               <Text style={styles.statusTitle}>{t.chargingUi.offlineTitle}</Text>
               <Text style={styles.statusSubtitle}>{t.chargingUi.offlineSub}</Text>
             </View>
@@ -350,7 +350,6 @@ const ChargingProcessScreen = () => {
                 title={t.chargingUi.refreshStatus}
                 onPress={onRefreshStatus}
                 variant="outline"
-                icon={{ name: 'refresh', library: 'Ionicons' }}
                 style={styles.refreshButton}
               />
               <Button
@@ -374,7 +373,7 @@ const ChargingProcessScreen = () => {
         <ScrollView style={styles.scrollContent}>
           <Card style={styles.card}>
             <View style={styles.statusHeader}>
-              <Icon name="flash" library="Ionicons" size={48} color={COLORS.WARNING} />
+              <Badge label={t.chargingUi.inUseTitle} variant="warning" />
               <Text style={styles.statusTitle}>{t.chargingUi.inUseTitle}</Text>
               <Text style={styles.statusSubtitle}>{t.chargingUi.inUseSub}</Text>
             </View>
@@ -405,7 +404,6 @@ const ChargingProcessScreen = () => {
                 title={t.chargingUi.refreshStatus}
                 onPress={onRefreshStatus}
                 variant="outline"
-                icon={{ name: 'refresh', library: 'Ionicons' }}
                 style={styles.refreshButton}
               />
               <Button
@@ -429,7 +427,7 @@ const ChargingProcessScreen = () => {
         <ScrollView style={styles.scrollContent}>
           <Card style={styles.card}>
             <View style={styles.statusHeader}>
-              <Icon name="checkmark-circle" library="Ionicons" size={48} color={COLORS.SUCCESS} />
+              <Badge label={t.charging.available} variant="success" />
               <Text style={styles.statusTitle}>{t.charging.available}</Text>
               <Text style={styles.statusSubtitle}>{t.chargingUi.readySub}</Text>
             </View>
@@ -487,7 +485,6 @@ const ChargingProcessScreen = () => {
                 title={t.charging.start}
                 onPress={onStartCharging}
                 variant="primary"
-                icon={{ name: 'flash', library: 'Ionicons' }}
                 disabled={starting}
                 loading={starting}
                 style={styles.startButton}
@@ -629,7 +626,6 @@ const ChargingProcessScreen = () => {
             variant="danger"
             disabled={stopping || !canStop}
             style={styles.stopButton}
-            icon={{ name: 'stop-circle', library: 'Ionicons' }}
           />
         )}
         {!canStop && showRetryStart && (
@@ -640,7 +636,6 @@ const ChargingProcessScreen = () => {
             disabled={starting}
             loading={starting}
             style={styles.retryButton}
-            icon={{ name: 'refresh', library: 'Ionicons' }}
           />
         )}
         {showWaitingSession && (
@@ -830,26 +825,6 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
 
-  title: { fontSize: 12, color: COLORS.TEXT_SECONDARY, marginBottom: 6 },
-  value: { fontSize: 18, fontWeight: '900', color: COLORS.TEXT_PRIMARY },
-  row: { flexDirection: 'row', marginTop: 14 },
-  col: { flex: 1 },
-  label: { fontSize: 12, color: COLORS.TEXT_SECONDARY, marginBottom: 4 },
-  valueSmall: { fontWeight: '800', color: COLORS.TEXT_PRIMARY },
-  sectionTitle: { fontSize: 14, fontWeight: '900', color: COLORS.TEXT_PRIMARY },
-  mutedText: { marginTop: 10, color: COLORS.TEXT_SECONDARY, lineHeight: 18 },
-
-  notice: { marginTop: 14, backgroundColor: '#ECFDF5', borderRadius: 12, padding: 10 },
-  noticeText: { color: '#065F46', fontWeight: '700' },
-
-  loadingLine: { flexDirection: 'row', alignItems: 'center', marginTop: 12 },
-  loadingText: { marginLeft: 10, color: COLORS.TEXT_SECONDARY },
-
-  pointsBox: { marginTop: 12, borderTopWidth: 1, borderTopColor: COLORS.BORDER, paddingTop: 10 },
-  pointsTitle: { color: COLORS.TEXT_SECONDARY, fontWeight: '900', marginBottom: 6 },
-  pointRow: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 4 },
-  pointText: { color: COLORS.TEXT_SECONDARY, fontSize: 12 },
-
   bottomBar: {
     padding: 16,
     backgroundColor: '#FFFFFF',
@@ -862,12 +837,6 @@ const styles = StyleSheet.create({
   retryButton: {
     width: '100%',
   },
-  btn: { flex: 1, height: 48, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
-  primary: { backgroundColor: COLORS.PRIMARY, marginRight: 10 },
-  primaryText: { color: '#FFFFFF', fontWeight: '900' },
-  danger: { backgroundColor: COLORS.ERROR },
-  dangerText: { color: '#FFFFFF', fontWeight: '900' },
-  disabled: { opacity: 0.5 },
 });
 
 export default ChargingProcessScreen;

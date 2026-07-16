@@ -3,8 +3,7 @@
  */
 
 import React, { useMemo, useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, TextInput, Alert } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { View, Text, StyleSheet, TouchableOpacity, Alert } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import type { StackNavigationProp } from '@react-navigation/stack';
 
@@ -13,6 +12,10 @@ import { useI18n } from '../../i18n';
 import type { RootStackParamList, PaymentMethod } from '../../types';
 import { addPaymentMethod, getPaymentMethods, savePaymentMethods } from '../../utils/paymentMethodsStorage';
 import ScreenHeader from '../../components/ui/ScreenHeader';
+import Screen from '../../components/ui/Screen';
+import TextField from '../../components/ui/TextField';
+import Button from '../../components/ui/Button';
+import Card from '../../components/ui/Card';
 
 type Nav = StackNavigationProp<RootStackParamList, 'AddPayment'>;
 
@@ -66,7 +69,7 @@ const AddPaymentScreen = () => {
   };
 
   return (
-    <SafeAreaView style={styles.container}>
+    <Screen>
       <ScreenHeader title={t.payment.addMethodDemo} onBack={() => navigation.goBack()} />
 
       <View style={styles.demoBanner}>
@@ -75,7 +78,7 @@ const AddPaymentScreen = () => {
         </Text>
       </View>
 
-      <View style={styles.card}>
+      <Card style={styles.card}>
         <Text style={styles.label}>{t.payment.type}</Text>
         <View style={styles.typeRow}>
           {([
@@ -95,29 +98,25 @@ const AddPaymentScreen = () => {
           ))}
         </View>
 
-        <Text style={[styles.label, { marginTop: 14 }]}>{t.payment.lastFour}</Text>
-        <TextInput
+        <TextField
+          label={t.payment.lastFour}
           value={lastFour}
           onChangeText={setLastFour}
           placeholder={t.payment.lastFourPlaceholder}
           keyboardType="numeric"
           maxLength={4}
-          style={styles.input}
+          error={!isLastFourValid ? t.payment.lastFourInvalid : undefined}
         />
-        {!isLastFourValid && <Text style={styles.error}>{t.payment.lastFourInvalid}</Text>}
-      </View>
+      </Card>
 
       <View style={styles.bottomBar}>
-        <TouchableOpacity style={[styles.btn, styles.primary, saving && styles.disabled]} disabled={saving} onPress={onSave}>
-          <Text style={styles.primaryText}>{saving ? t.payment.saving : t.common.save}</Text>
-        </TouchableOpacity>
+        <Button title={saving ? t.payment.saving : t.common.save} disabled={saving} loading={saving} onPress={onSave} size="large" />
       </View>
-    </SafeAreaView>
+    </Screen>
   );
 };
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: COLORS.BACKGROUND },
   demoBanner: {
     marginHorizontal: 16,
     marginTop: 8,
@@ -130,11 +129,7 @@ const styles = StyleSheet.create({
   demoBannerText: { fontSize: 13, color: COLORS.TEXT_PRIMARY, lineHeight: 20 },
   card: {
     margin: 16,
-    backgroundColor: '#FFFFFF',
-    borderRadius: 14,
     padding: 16,
-    borderWidth: 1,
-    borderColor: COLORS.BORDER,
   },
   label: { color: COLORS.TEXT_SECONDARY, fontSize: 12, marginBottom: 6 },
   typeRow: { flexDirection: 'row', flexWrap: 'wrap' },
@@ -149,26 +144,12 @@ const styles = StyleSheet.create({
   typeChipActive: { backgroundColor: COLORS.PRIMARY },
   typeText: { fontWeight: '800', color: COLORS.TEXT_PRIMARY, fontSize: 12 },
   typeTextActive: { color: '#FFFFFF' },
-  input: {
-    height: 44,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: COLORS.BORDER,
-    paddingHorizontal: 12,
-    backgroundColor: '#FFFFFF',
-  },
-  error: { marginTop: 8, color: COLORS.ERROR, fontWeight: '700' },
   bottomBar: {
     padding: 12,
     backgroundColor: '#FFFFFF',
     borderTopWidth: 1,
     borderTopColor: COLORS.BORDER,
   },
-  btn: { height: 48, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
-  primary: { backgroundColor: COLORS.PRIMARY },
-  primaryText: { color: '#FFFFFF', fontWeight: '900' },
-  disabled: { opacity: 0.6 },
 });
 
 export default AddPaymentScreen;
-

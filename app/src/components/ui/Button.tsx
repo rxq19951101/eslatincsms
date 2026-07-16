@@ -18,7 +18,7 @@ import {
 import { COLORS, IOS_STYLES } from '../../constants/config';
 import Icon, { IconProps } from './Icon';
 
-export type ButtonVariant = 'primary' | 'secondary' | 'text' | 'outline';
+export type ButtonVariant = 'primary' | 'secondary' | 'text' | 'outline' | 'danger';
 export type ButtonSize = 'small' | 'medium' | 'large';
 
 export interface ButtonProps {
@@ -83,8 +83,7 @@ const Button: React.FC<ButtonProps> = ({
         return {
           container: {
             ...baseContainer,
-            backgroundColor: COLORS.IOS_BLUE,
-            ...IOS_STYLES.SHADOW.SMALL,
+            backgroundColor: COLORS.PRIMARY,
           },
           text: {
             ...baseText,
@@ -95,11 +94,11 @@ const Button: React.FC<ButtonProps> = ({
         return {
           container: {
             ...baseContainer,
-            backgroundColor: COLORS.IOS_LIGHT_GRAY,
+            backgroundColor: COLORS.PRIMARY_SOFT,
           },
           text: {
             ...baseText,
-            color: COLORS.TEXT_PRIMARY,
+            color: COLORS.PRIMARY_DARK,
           },
         };
       case 'outline':
@@ -108,11 +107,11 @@ const Button: React.FC<ButtonProps> = ({
             ...baseContainer,
             backgroundColor: 'transparent',
             borderWidth: 1,
-            borderColor: COLORS.IOS_SEPARATOR,
+            borderColor: COLORS.BORDER,
           },
           text: {
             ...baseText,
-            color: COLORS.IOS_BLUE,
+            color: COLORS.PRIMARY,
           },
         };
       case 'text':
@@ -123,16 +122,20 @@ const Button: React.FC<ButtonProps> = ({
           },
           text: {
             ...baseText,
-            color: COLORS.IOS_BLUE,
+            color: COLORS.PRIMARY,
           },
+        };
+      case 'danger':
+        return {
+          container: { ...baseContainer, backgroundColor: COLORS.ERROR },
+          text: { ...baseText, color: COLORS.IOS_WHITE },
         };
       default:
         // 默认返回 primary 样式
         return {
           container: {
             ...baseContainer,
-            backgroundColor: COLORS.IOS_BLUE,
-            ...IOS_STYLES.SHADOW.SMALL,
+            backgroundColor: COLORS.PRIMARY,
           },
           text: {
             ...baseText,
@@ -147,8 +150,9 @@ const Button: React.FC<ButtonProps> = ({
       case 'small':
         return {
           container: {
+            minHeight: 36,
             paddingVertical: 8,
-            paddingHorizontal: 16,
+            paddingHorizontal: 14,
           },
           text: {
             fontSize: IOS_STYLES.FONT_SIZE.BODY,
@@ -157,7 +161,8 @@ const Button: React.FC<ButtonProps> = ({
       case 'large':
         return {
           container: {
-            paddingVertical: 16,
+            minHeight: 52,
+            paddingVertical: 14,
             paddingHorizontal: 24,
           },
           text: {
@@ -168,7 +173,8 @@ const Button: React.FC<ButtonProps> = ({
       default:
         return {
           container: {
-            paddingVertical: 12,
+            minHeight: 44,
+            paddingVertical: 11,
             paddingHorizontal: 20,
           },
           text: {
@@ -203,7 +209,7 @@ const Button: React.FC<ButtonProps> = ({
         <View style={styles.loadingContainer}>
           <ActivityIndicator
             size="small"
-            color={variant === 'primary' ? COLORS.IOS_WHITE : COLORS.IOS_BLUE}
+            color={variant === 'primary' || variant === 'danger' ? COLORS.IOS_WHITE : COLORS.IOS_BLUE}
           />
           <Text
             style={[

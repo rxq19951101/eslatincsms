@@ -3,7 +3,7 @@
  */
 
 import { createSlice, createAsyncThunk, PayloadAction } from '@reduxjs/toolkit';
-import type { User, LoginResponse, ApiError } from '../../types';
+import type { User, ApiError } from '../../types';
 import * as authApi from '../../api/auth';
 import { clearTokens, getUserInfo, isAuthenticated } from '../../utils/tokenManager';
 
@@ -112,7 +112,7 @@ export const fetchCurrentUser = createAsyncThunk(
 /**
  * 登出
  */
-export const logout = createAsyncThunk('auth/logout', async (_, { rejectWithValue }) => {
+export const logout = createAsyncThunk('auth/logout', async () => {
   try {
     await authApi.logout();
     await clearTokens();

@@ -12,7 +12,6 @@ import {
   ActivityIndicator,
   RefreshControl,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
 import { useNavigation } from '@react-navigation/native';
 import type { StackNavigationProp } from '@react-navigation/stack';
 import type { RootStackParamList } from '../../types';
@@ -22,6 +21,8 @@ import { useAppDispatch, useAppSelector } from '../../hooks/useRedux';
 import { fetchChargingRecords } from '../../store/slices/transactionsSlice';
 import type { ChargingRecord } from '../../api/transactions';
 import ScreenHeader from '../../components/ui/ScreenHeader';
+import Screen from '../../components/ui/Screen';
+import { localizeStatus } from '../../utils/localizeStatus';
 
 type Nav = StackNavigationProp<RootStackParamList, 'ChargingHistory'>;
 
@@ -50,7 +51,7 @@ const ChargingHistoryScreen = () => {
 
   const renderItem = ({ item }: { item: ChargingRecord }) => {
     const title = item.site_name || item.charge_point_id;
-    const sub = `${fmtTime(item.start_time)}  ·  ${item.status}`;
+    const sub = `${fmtTime(item.start_time)}  ·  ${localizeStatus(item.status, t)}`;
     const energy = typeof item.energy_kwh === 'number' ? `${item.energy_kwh.toFixed(2)} kWh` : '—';
     return (
       <TouchableOpacity
@@ -69,7 +70,7 @@ const ChargingHistoryScreen = () => {
   };
 
   return (
-    <SafeAreaView style={styles.container}>
+    <Screen>
       <ScreenHeader title={t.history.title} onBack={() => navigation.goBack()} />
 
       {!!error && <Text style={styles.errorText}>{error}</Text>}
@@ -81,7 +82,6 @@ const ChargingHistoryScreen = () => {
         </View>
       ) : items.length === 0 ? (
         <View style={styles.center}>
-          <Text style={styles.emptyIcon}>🧾</Text>
           <Text style={styles.centerText}>{t.history.empty}</Text>
         </View>
       ) : (
@@ -93,16 +93,14 @@ const ChargingHistoryScreen = () => {
           refreshControl={<RefreshControl refreshing={false} onRefresh={load} />}
         />
       )}
-    </SafeAreaView>
+    </Screen>
   );
 };
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: COLORS.BACKGROUND },
   errorText: { paddingHorizontal: 16, paddingTop: 10, color: COLORS.ERROR, fontWeight: '700' },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   centerText: { marginTop: 10, color: COLORS.TEXT_SECONDARY },
-  emptyIcon: { fontSize: 56, marginBottom: 10 },
   card: {
     backgroundColor: '#FFFFFF',
     borderRadius: 14,
@@ -119,4 +117,3 @@ const styles = StyleSheet.create({
 });
 
 export default ChargingHistoryScreen;
-

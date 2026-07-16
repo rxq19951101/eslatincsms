@@ -1,13 +1,13 @@
 /**
  * 统一图标组件
- * 封装 Expo Vector Icons，支持多种图标库和动画效果
+ * App-wide Ionicons wrapper. A single icon family keeps weight and geometry consistent.
  */
 
 import React, { useEffect } from 'react';
 import { Animated, StyleProp, TextStyle } from 'react-native';
-import { Ionicons, MaterialIcons, FontAwesome, FontAwesome5 } from '@expo/vector-icons';
+import { Ionicons } from '@expo/vector-icons';
 
-export type IconLibrary = 'Ionicons' | 'MaterialIcons' | 'FontAwesome' | 'FontAwesome5';
+export type IconLibrary = 'Ionicons';
 export type IconAnimation = 'none' | 'spin' | 'pulse';
 
 export interface IconProps {
@@ -22,7 +22,6 @@ export interface IconProps {
 
 const Icon: React.FC<IconProps> = ({
   name,
-  library = 'Ionicons',
   size = 24,
   color = '#000000',
   style,
@@ -68,26 +67,9 @@ const Icon: React.FC<IconProps> = ({
     outputRange: ['0deg', '360deg'],
   });
 
-  const renderIcon = () => {
-    const commonProps = {
-      name: name as any,
-      size,
-      color,
-      style,
-    };
-
-    switch (library) {
-      case 'MaterialIcons':
-        return <MaterialIcons {...commonProps} />;
-      case 'FontAwesome':
-        return <FontAwesome {...commonProps} />;
-      case 'FontAwesome5':
-        return <FontAwesome5 {...commonProps} />;
-      case 'Ionicons':
-      default:
-        return <Ionicons {...commonProps} />;
-    }
-  };
+  const renderIcon = () => (
+    <Ionicons name={name as any} size={size} color={color} style={style} />
+  );
 
   if (animation === 'spin' && animating) {
     return (

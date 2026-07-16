@@ -4,18 +4,18 @@
 
 import React, { useEffect } from 'react';
 import { View, Text, StyleSheet, StatusBar, FlatList } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
 import { useNavigation } from '@react-navigation/native';
 import { COLORS, IOS_STYLES, PAYMENT_RAILS_ENABLED } from '../../constants/config';
 import { useAppDispatch, useAppSelector } from '../../hooks/useRedux';
 import { fetchWalletBalance, fetchWalletTransactions } from '../../store/slices/walletSlice';
 import type { WalletTransaction } from '../../types';
-import Icon from '../../components/ui/Icon';
 import Button from '../../components/ui/Button';
 import Card from '../../components/ui/Card';
 import LoadingSpinner from '../../components/ui/LoadingSpinner';
 import { formatMoneyCOP, formatMoneyCOPShort } from '../../utils/formatMoney';
 import { useI18n } from '../../i18n';
+import Screen from '../../components/ui/Screen';
+import { palette, spacing, typography } from '../../theme';
 
 const COP_TOP_UP_AMOUNTS = [10000, 20000, 50000];
 
@@ -55,12 +55,6 @@ const MyWalletScreen = () => {
       >
         <View style={styles.txLeft}>
           <View style={styles.txIconContainer}>
-            <Icon
-              name={isTopUp ? 'add-circle' : 'remove-circle'}
-              library="Ionicons"
-              size={20}
-              color={color}
-            />
             <Text style={styles.txTitle}>
               {item.description || (isTopUp ? t.wallet.topUpLabel : t.wallet.chargeLabel)}
             </Text>
@@ -73,7 +67,7 @@ const MyWalletScreen = () => {
   };
 
   return (
-    <SafeAreaView style={styles.container} edges={['top']}>
+    <Screen>
       <StatusBar barStyle="dark-content" />
 
       <View style={styles.header}>
@@ -118,7 +112,6 @@ const MyWalletScreen = () => {
 
         {transactions.length === 0 && !loadingTx ? (
           <View style={styles.emptyState}>
-            <Icon name="wallet" library="Ionicons" size={60} color={COLORS.TEXT_SECONDARY} />
             <Text style={styles.emptyText}>{t.wallet.emptyTx}</Text>
           </View>
         ) : (
@@ -130,30 +123,25 @@ const MyWalletScreen = () => {
           />
         )}
       </View>
-    </SafeAreaView>
+    </Screen>
   );
 };
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: COLORS.BACKGROUND,
-  },
   header: {
     paddingHorizontal: 20,
     paddingVertical: 16,
   },
   headerTitle: {
     fontSize: 24,
-    fontWeight: 'bold',
+    fontWeight: typography.bold,
     color: COLORS.TEXT_PRIMARY,
   },
   balanceCard: {
     backgroundColor: COLORS.PRIMARY,
-    marginHorizontal: IOS_STYLES.SPACING.MD,
-    marginBottom: IOS_STYLES.SPACING.LG,
-    padding: IOS_STYLES.SPACING.LG,
-    borderRadius: IOS_STYLES.RADIUS.LARGE,
+    marginHorizontal: spacing.md,
+    marginBottom: spacing.lg,
+    padding: spacing.lg,
   },
   balanceLabel: {
     fontSize: 14,
@@ -163,7 +151,7 @@ const styles = StyleSheet.create({
   },
   balanceAmount: {
     fontSize: 36,
-    fontWeight: 'bold',
+    fontWeight: typography.bold,
     color: '#FFFFFF',
     marginBottom: 16,
   },
@@ -192,7 +180,7 @@ const styles = StyleSheet.create({
   },
   sectionTitle: {
     fontSize: 18,
-    fontWeight: 'bold',
+    fontWeight: typography.semibold,
     color: COLORS.TEXT_PRIMARY,
   },
   txRow: {
@@ -207,7 +195,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: IOS_STYLES.SPACING.SM,
   },
-  txTitle: { fontWeight: IOS_STYLES.FONT_WEIGHT.HEAVY, color: COLORS.TEXT_PRIMARY },
+  txTitle: { fontWeight: typography.semibold, color: palette.ink },
   txTime: {
     marginTop: IOS_STYLES.SPACING.SM,
     color: COLORS.TEXT_SECONDARY,

@@ -1,20 +1,18 @@
 /**
- * iOS 风格列表项组件
- * 图标 + 文本 + 箭头，支持进入动画
+ * 内容优先的列表项。图标是可选语义，不用于装饰。
  */
 
-import React, { useEffect, useRef } from 'react';
+import React from 'react';
 import {
   TouchableOpacity,
   View,
   Text,
   StyleSheet,
-  Animated,
   StyleProp,
   ViewStyle,
   TextStyle,
 } from 'react-native';
-import { COLORS, IOS_STYLES } from '../../constants/config';
+import { palette, spacing, typography } from '../../theme';
 import Icon, { IconProps } from './Icon';
 
 export interface ListItemProps {
@@ -35,38 +33,11 @@ const ListItem: React.FC<ListItemProps> = ({
   showArrow = true,
   style,
   labelStyle,
-  index = 0,
+  index: _index = 0,
   disabled = false,
 }) => {
-  const fadeAnim = useRef(new Animated.Value(0)).current;
-  const translateX = useRef(new Animated.Value(20)).current;
-
-  useEffect(() => {
-    Animated.parallel([
-      Animated.timing(fadeAnim, {
-        toValue: 1,
-        duration: 300,
-        delay: index * 30,
-        useNativeDriver: true,
-      }),
-      Animated.timing(translateX, {
-        toValue: 0,
-        duration: 300,
-        delay: index * 30,
-        useNativeDriver: true,
-      }),
-    ]).start();
-  }, [fadeAnim, translateX, index]);
-
   return (
-    <Animated.View
-      style={[
-        {
-          opacity: fadeAnim,
-          transform: [{ translateX }],
-        },
-      ]}
-    >
+    <View>
       <TouchableOpacity
         style={[
           styles.container,
@@ -82,7 +53,7 @@ const ListItem: React.FC<ListItemProps> = ({
             <Icon
               {...icon}
               size={icon.size || 20}
-              color={icon.color || COLORS.TEXT_PRIMARY}
+              color={icon.color || palette.ink}
               style={[styles.icon, icon.style]}
             />
           )}
@@ -92,12 +63,12 @@ const ListItem: React.FC<ListItemProps> = ({
           <Icon
             name="chevron-forward"
             library="Ionicons"
-            size={20}
-            color={COLORS.IOS_GRAY}
+            size={18}
+            color={palette.subtle}
           />
         )}
       </TouchableOpacity>
-    </Animated.View>
+    </View>
   );
 };
 
@@ -106,11 +77,12 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: IOS_STYLES.SPACING.MD,
-    paddingVertical: IOS_STYLES.SPACING.MD,
-    backgroundColor: COLORS.CARD_BG,
+    paddingHorizontal: spacing.md,
+    minHeight: 52,
+    paddingVertical: 14,
+    backgroundColor: palette.surface,
     borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: COLORS.IOS_SEPARATOR,
+    borderBottomColor: palette.border,
   },
   leftContent: {
     flexDirection: 'row',
@@ -118,12 +90,12 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   icon: {
-    marginRight: IOS_STYLES.SPACING.MD,
+    marginRight: spacing.sm + 4,
   },
   label: {
-    fontSize: IOS_STYLES.FONT_SIZE.MEDIUM,
-    color: COLORS.TEXT_PRIMARY,
-    fontWeight: IOS_STYLES.FONT_WEIGHT.REGULAR,
+    fontSize: typography.label,
+    color: palette.ink,
+    fontWeight: typography.medium,
   },
   disabled: {
     opacity: 0.5,

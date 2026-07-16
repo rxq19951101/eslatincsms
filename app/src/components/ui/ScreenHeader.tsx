@@ -8,7 +8,7 @@
 
 import React from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, StyleProp, ViewStyle } from 'react-native';
-import { COLORS, IOS_STYLES } from '../../constants/config';
+import { palette, spacing, typography } from '../../theme';
 import Icon from './Icon';
 
 export interface ScreenHeaderProps {
@@ -27,7 +27,7 @@ const ScreenHeader: React.FC<ScreenHeaderProps> = ({ title, onBack, left, right,
         {left ??
           (onBack && (
             <TouchableOpacity style={styles.backButton} onPress={onBack} activeOpacity={0.7}>
-              <Icon name="arrow-back" library="Ionicons" size={24} color={COLORS.TEXT_PRIMARY} />
+              <Icon name="arrow-back" library="Ionicons" size={22} color={palette.ink} />
             </TouchableOpacity>
           ))}
       </View>
@@ -46,13 +46,11 @@ const ScreenHeader: React.FC<ScreenHeaderProps> = ({ title, onBack, left, right,
 const styles = StyleSheet.create({
   header: {
     height: 56,
-    backgroundColor: COLORS.IOS_WHITE,
+    backgroundColor: palette.canvas,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: IOS_STYLES.SPACING.SM,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: COLORS.IOS_SEPARATOR,
+    paddingHorizontal: spacing.sm,
   },
   side: {
     minWidth: 44,
@@ -81,9 +79,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: 60,
   },
   title: {
-    fontSize: IOS_STYLES.FONT_SIZE.MEDIUM,
-    fontWeight: IOS_STYLES.FONT_WEIGHT.BOLD,
-    color: COLORS.TEXT_PRIMARY,
+    fontSize: typography.label,
+    fontWeight: typography.semibold,
+    color: palette.ink,
   },
 });
 

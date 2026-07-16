@@ -28,7 +28,7 @@ function extractErrorMessage(e: any, fallback: string) {
 
 export const fetchChargingRecords = createAsyncThunk(
   'transactions/fetchList',
-  async (params?: { status?: string; limit?: number; offset?: number }, { rejectWithValue }) => {
+  async (params: { status?: string; limit?: number; offset?: number } | undefined, { rejectWithValue }) => {
     try {
       return await getChargingRecords(params);
     } catch (e: any) {
@@ -95,4 +95,3 @@ const transactionsSlice = createSlice({
 
 export const { clearTransactionsError, clearSelectedRecord, setSelectedRecord } = transactionsSlice.actions;
 export default transactionsSlice.reducer;
-

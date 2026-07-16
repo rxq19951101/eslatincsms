@@ -38,7 +38,7 @@ export const fetchWalletBalance = createAsyncThunk('wallet/fetchBalance', async 
 
 export const fetchWalletTransactions = createAsyncThunk(
   'wallet/fetchTransactions',
-  async (params?: { limit?: number; offset?: number }, { rejectWithValue }) => {
+  async (params: { limit?: number; offset?: number } | undefined, { rejectWithValue }) => {
     try {
       return await getWalletTransactions(params);
     } catch (e: any) {
@@ -112,4 +112,3 @@ const walletSlice = createSlice({
 
 export const { clearWalletError, setBalance } = walletSlice.actions;
 export default walletSlice.reducer;
-
