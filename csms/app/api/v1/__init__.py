@@ -41,7 +41,9 @@ def register_routes():
     ("app.chargers", "/app/chargers", "APP充电站查询"),  # 添加 APP 认证路由
     ("app.charging", "/app/charging", "APP扫码充电"),
     ("app.wallet", "/app/wallet", "APP钱包"),
+        ("app.payments", "/app/wallet/payments", "APP支付（Wompi）"),
     ("app.transactions", "/app/transactions", "APP充电记录"),
+    ("admin.payments", "/admin/payments", "管理员支付管理"),
     ]
     
     for module_name, prefix, tag in routes_config:

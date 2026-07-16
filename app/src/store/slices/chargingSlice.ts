@@ -5,6 +5,7 @@
 import { createAsyncThunk, createSlice, PayloadAction } from '@reduxjs/toolkit';
 import type { ActiveChargingSession, MeterValuePoint, RemoteResponse } from '../../api/charging';
 import { getActiveChargingSession, getMeterValues, startChargingByScan, stopCharging } from '../../api/charging';
+import { handleApiError } from '../../api/client';
 
 export interface ChargingState {
   qrToken: string | null;
@@ -46,12 +47,7 @@ export const startCharging = createAsyncThunk(
       const res = await startChargingByScan({ qrToken });
       return { qrToken, res };
     } catch (e: any) {
-      const msg =
-        e?.response?.data?.detail ||
-        e?.response?.data?.message ||
-        e?.message ||
-        'Failed to start charging';
-      return rejectWithValue(msg);
+      return rejectWithValue(handleApiError(e).message || 'Failed to start charging');
     }
   }
 );

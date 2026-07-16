@@ -9,7 +9,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from app.database import Base
-from app.config import get_settings
+from app.core.config import get_settings
 
 settings = get_settings()
 
@@ -59,7 +59,7 @@ def run_migrations_online() -> None:
 
 
 if context.is_offline_mode():
-    run_migrations_online()
+    run_migrations_offline()
 else:
     run_migrations_online()
 

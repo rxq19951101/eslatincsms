@@ -21,6 +21,7 @@ import { CameraView, useCameraPermissions } from 'expo-camera';
 
 import { COLORS } from '../../constants/config';
 import type { RootStackParamList } from '../../types';
+import { useI18n } from '../../i18n';
 
 type Nav = StackNavigationProp<RootStackParamList>;
 
@@ -52,6 +53,8 @@ function parseQrPayload(raw: string): ParsedQr | null {
 }
 
 const ScanScreen = () => {
+  const { t } = useI18n();
+
   const navigation = useNavigation<Nav>();
   const [manual, setManual] = useState('');
   const [scanned, setScanned] = useState(false);
@@ -62,13 +65,13 @@ const ScanScreen = () => {
   const canUseCamera = Platform.OS !== 'web';
 
   const hint = useMemo(() => {
-    return '爆改测试版：二维码内容为 token-only：\n- qr:<token>\n- JSON {\"qrToken\":\"...\"}';
+    return 'Formato: qr:<token> o JSON {"qrToken":"..."}';
   }, []);
 
   const goToProcess = (payload: string) => {
     const parsed = parseQrPayload(payload);
     if (!parsed) {
-      Alert.alert('二维码无效', '请确认二维码内容为 qr:<token> 或 JSON {\"qrToken\":\"...\"}');
+      Alert.alert(t.scan.invalidQr, t.scan.invalidQrDetail);
       return;
     }
     navigation.navigate('ChargingProcess', {
@@ -77,32 +80,31 @@ const ScanScreen = () => {
   };
 
   return (
-    <SafeAreaView style={styles.container}>
+    <SafeAreaView style={styles.container} edges={['top']}>
       <View style={styles.header}>
-        <Text style={styles.title}>扫码充电</Text>
-        <Text style={styles.subTitle}>对准充电桩二维码，自动识别并进入充电流程</Text>
+        <Text style={styles.title}>{t.scan.title}</Text>
+        <Text style={styles.subTitle}>{t.scan.subtitle}</Text>
       </View>
 
-      {/* Web fallback / 权限引导 */}
       {(!canUseCamera || !hasPermission) && (
         <View style={styles.card}>
-          <Text style={styles.cardTitle}>手动输入（Web/无权限时）</Text>
+          <Text style={styles.cardTitle}>{t.scan.manualTitle}</Text>
           <Text style={styles.cardHint}>{hint}</Text>
           <TextInput
             value={manual}
             onChangeText={setManual}
-            placeholder="粘贴二维码内容…"
+            placeholder={t.scan.placeholder}
             style={styles.input}
             autoCapitalize="none"
           />
           <View style={styles.row}>
             {canUseCamera && !hasPermission && (
               <TouchableOpacity style={[styles.btn, styles.secondary]} onPress={requestPermission}>
-                <Text style={styles.secondaryText}>请求相机权限</Text>
+                <Text style={styles.secondaryText}>{t.scan.requestCamera}</Text>
               </TouchableOpacity>
             )}
             <TouchableOpacity style={[styles.btn, styles.primary]} onPress={() => goToProcess(manual)}>
-              <Text style={styles.primaryText}>进入充电</Text>
+              <Text style={styles.primaryText}>{t.scan.start}</Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -126,7 +128,7 @@ const ScanScreen = () => {
           />
           <View style={styles.overlay}>
             <View style={styles.scanBox} />
-            <Text style={styles.overlayText}>对准二维码</Text>
+            <Text style={styles.overlayText}>{t.scan.subtitle}</Text>
           </View>
         </View>
       )}

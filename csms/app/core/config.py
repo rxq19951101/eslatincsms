@@ -3,14 +3,20 @@
 # 使用pydantic-settings进行配置验证和管理
 #
 
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import List, Optional
 from functools import lru_cache
 
 
 class Settings(BaseSettings):
     """应用配置"""
-    
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+    )    
     # 应用基础配置
     app_name: str = "OCPP 1.6J CSMS"
     app_version: str = "1.0.0"
@@ -22,7 +28,7 @@ class Settings(BaseSettings):
     port: int = 9000
     
     # 数据库配置
-    database_url: str = "postgresql://local:local@localhost:5432/ocpp"
+    database_url: str = "postgresql://ocpp_user:ocpp_password@localhost:5432/ocpp"
     db_pool_size: int = 10
     db_max_overflow: int = 20
     db_pool_recycle: int = 3600
@@ -96,11 +102,11 @@ class Settings(BaseSettings):
     # 充电桩配置
     default_charging_rate: float = 7.0  # kW
     default_price_per_kwh: float = 2700.0  # COP/kWh
-    
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
-        case_sensitive = False
+
+    # 支付轨：默认关闭（上架极简方案）；打开后才允许 create / create-mp
+    payment_rails_enabled: bool = False
+    # 启动充电所需最低钱包余额（COP）
+    min_wallet_balance_to_start: float = 5000.0
 
 
 @lru_cache()

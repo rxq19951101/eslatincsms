@@ -11,14 +11,18 @@ import { useNavigation } from '@react-navigation/native';
 import type { StackNavigationProp } from '@react-navigation/stack';
 
 import { COLORS } from '../../constants/config';
+import { useI18n } from '../../i18n';
 import type { RootStackParamList, User } from '../../types';
 import { useAppDispatch, useAppSelector } from '../../hooks/useRedux';
 import { setUser } from '../../store/slices/authSlice';
 import { saveUserInfo } from '../../utils/tokenManager';
+import ScreenHeader from '../../components/ui/ScreenHeader';
 
 type Nav = StackNavigationProp<RootStackParamList, 'PersonalInfo'>;
 
 const PersonalInfoScreen = () => {
+  const { t } = useI18n();
+
   const navigation = useNavigation<Nav>();
   const dispatch = useAppDispatch();
   const { user } = useAppSelector((s) => s.auth);
@@ -43,10 +47,10 @@ const PersonalInfoScreen = () => {
       };
       dispatch(setUser(next));
       await saveUserInfo(next);
-      Alert.alert('已保存', Platform.OS === 'web' ? '本地保存成功（Web）' : '本地保存成功');
+      Alert.alert(t.personal.saved, t.personal.savedBody);
       navigation.goBack();
     } catch (e) {
-      Alert.alert('保存失败', '请稍后重试');
+      Alert.alert(t.common.error, t.personal.saveFailed);
     } finally {
       setSaving(false);
     }
@@ -54,28 +58,22 @@ const PersonalInfoScreen = () => {
 
   return (
     <SafeAreaView style={styles.container}>
-      <View style={styles.header}>
-        <TouchableOpacity style={styles.backBtn} onPress={() => navigation.goBack()}>
-          <Text style={styles.backText}>←</Text>
-        </TouchableOpacity>
-        <Text style={styles.headerTitle}>个人信息</Text>
-        <View style={styles.headerRight} />
-      </View>
+      <ScreenHeader title={t.personal.title} onBack={() => navigation.goBack()} />
 
       <View style={styles.card}>
-        <Text style={styles.label}>邮箱</Text>
+        <Text style={styles.label}>{t.personal.email}</Text>
         <Text style={styles.readonly}>{user?.email || '—'}</Text>
 
-        <Text style={[styles.label, { marginTop: 14 }]}>姓名</Text>
-        <TextInput value={fullName} onChangeText={setFullName} placeholder="请输入姓名" style={styles.input} />
+        <Text style={[styles.label, { marginTop: 14 }]}>{t.personal.name}</Text>
+        <TextInput value={fullName} onChangeText={setFullName} placeholder={t.personal.namePlaceholder} style={styles.input} />
 
-        <Text style={[styles.label, { marginTop: 14 }]}>手机号（可选）</Text>
-        <TextInput value={phone} onChangeText={setPhone} placeholder="请输入手机号" style={styles.input} />
+        <Text style={[styles.label, { marginTop: 14 }]}>{t.personal.phone}</Text>
+        <TextInput value={phone} onChangeText={setPhone} placeholder={t.personal.phonePlaceholder} style={styles.input} />
       </View>
 
       <View style={styles.bottomBar}>
         <TouchableOpacity style={[styles.btn, styles.primary, saving && styles.disabled]} disabled={saving} onPress={onSave}>
-          <Text style={styles.primaryText}>{saving ? '保存中...' : '保存'}</Text>
+          <Text style={styles.primaryText}>{saving ? t.personal.saving : t.common.save}</Text>
         </TouchableOpacity>
       </View>
     </SafeAreaView>
@@ -84,19 +82,6 @@ const PersonalInfoScreen = () => {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: COLORS.BACKGROUND },
-  header: {
-    height: 56,
-    backgroundColor: '#FFFFFF',
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: COLORS.BORDER,
-  },
-  backBtn: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
-  backText: { fontSize: 22, color: COLORS.TEXT_PRIMARY },
-  headerTitle: { flex: 1, textAlign: 'center', fontSize: 16, fontWeight: '800', color: COLORS.TEXT_PRIMARY },
-  headerRight: { width: 44 },
   card: {
     margin: 16,
     backgroundColor: '#FFFFFF',

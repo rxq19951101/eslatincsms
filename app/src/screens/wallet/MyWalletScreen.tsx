@@ -1,31 +1,48 @@
 /**
- * 我的钱包页面
+ * 我的钱包页面（只读余额与流水；支付轨关闭时无充值入口）
  */
 
 import React, { useEffect } from 'react';
 import { View, Text, StyleSheet, StatusBar, FlatList } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { COLORS, IOS_STYLES } from '../../constants/config';
+import { useNavigation } from '@react-navigation/native';
+import { COLORS, IOS_STYLES, PAYMENT_RAILS_ENABLED } from '../../constants/config';
 import { useAppDispatch, useAppSelector } from '../../hooks/useRedux';
-import { fetchWalletBalance, fetchWalletTransactions, topUp } from '../../store/slices/walletSlice';
+import { fetchWalletBalance, fetchWalletTransactions } from '../../store/slices/walletSlice';
 import type { WalletTransaction } from '../../types';
 import Icon from '../../components/ui/Icon';
 import Button from '../../components/ui/Button';
 import Card from '../../components/ui/Card';
 import LoadingSpinner from '../../components/ui/LoadingSpinner';
+import { formatMoneyCOP, formatMoneyCOPShort } from '../../utils/formatMoney';
+import { useI18n } from '../../i18n';
+
+const COP_TOP_UP_AMOUNTS = [10000, 20000, 50000];
 
 const MyWalletScreen = () => {
+  const { t } = useI18n();
+
   const dispatch = useAppDispatch();
-  const { balance, transactions, loadingBalance, loadingTx, toppingUp, error } = useAppSelector((s) => s.wallet);
+  const navigation = useNavigation<any>();
+  const { balance, transactions, loadingBalance, loadingTx, toppingUp, error } = useAppSelector(
+    (s) => s.wallet
+  );
 
   useEffect(() => {
     dispatch(fetchWalletBalance());
     dispatch(fetchWalletTransactions({ limit: 50, offset: 0 }));
   }, [dispatch]);
 
+  const handleMercadoPagoTopUp = (amount: number) => {
+    navigation.navigate('MercadoPagoPayment', {
+      amount,
+      type: 'top_up',
+    });
+  };
+
   const amountText = (amount: number) => {
     const sign = amount >= 0 ? '+' : '-';
-    return `${sign}$${Math.abs(amount).toFixed(2)}`;
+    return `${sign}${formatMoneyCOP(Math.abs(amount))}`;
   };
 
   const renderTx = ({ item, index }: { item: WalletTransaction; index: number }) => {
@@ -44,7 +61,9 @@ const MyWalletScreen = () => {
               size={20}
               color={color}
             />
-            <Text style={styles.txTitle}>{item.description || (isTopUp ? '充值' : '充电扣费')}</Text>
+            <Text style={styles.txTitle}>
+              {item.description || (isTopUp ? t.wallet.topUpLabel : t.wallet.chargeLabel)}
+            </Text>
           </View>
           <Text style={styles.txTime}>{item.created_at}</Text>
         </View>
@@ -56,47 +75,43 @@ const MyWalletScreen = () => {
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
       <StatusBar barStyle="dark-content" />
-      
+
       <View style={styles.header}>
-        <Text style={styles.headerTitle}>我的钱包</Text>
+        <Text style={styles.headerTitle}>{t.wallet.title}</Text>
       </View>
 
-      {/* Balance Card */}
       <Card style={styles.balanceCard}>
-        <Text style={styles.balanceLabel}>可用余额</Text>
+        <Text style={styles.balanceLabel}>{t.wallet.available}</Text>
         <Text style={styles.balanceAmount}>
-          {loadingBalance && !balance ? '—' : `$${(balance?.balance ?? 0).toFixed(2)}`}
+          {loadingBalance && !balance ? '—' : formatMoneyCOPShort(balance?.balance ?? 0)}
         </Text>
-        
-        <View style={styles.topUpRow}>
-          {[10, 20, 50].map((amt) => (
-            <Button
-              key={amt}
-              title={`充值 $${amt}`}
-              onPress={async () => {
-                try {
-                  await dispatch(topUp(amt)).unwrap();
-                  dispatch(fetchWalletTransactions({ limit: 50, offset: 0 }));
-                } catch {
-                  // 错误已进入 slice.error
-                }
-              }}
-              variant="secondary"
-              size="small"
-              disabled={toppingUp}
-              style={{ marginRight: IOS_STYLES.SPACING.SM }}
-            />
-          ))}
-        </View>
+
+        {PAYMENT_RAILS_ENABLED ? (
+          <>
+            <View style={styles.topUpRow}>
+              {COP_TOP_UP_AMOUNTS.map((amt) => (
+                <Button
+                  key={amt}
+                  title={t.wallet.topUp.replace('{amount}', formatMoneyCOPShort(amt))}
+                  onPress={() => handleMercadoPagoTopUp(amt)}
+                  variant="secondary"
+                  size="small"
+                  disabled={toppingUp}
+                  style={{ marginRight: IOS_STYLES.SPACING.SM }}
+                />
+              ))}
+            </View>
+            <Text style={styles.paymentNote}>{t.wallet.cardNote}</Text>
+          </>
+        ) : (
+          <Text style={styles.paymentNote}>{t.wallet.railsOff}</Text>
+        )}
       </Card>
 
-      {/* Transactions */}
       <View style={styles.transactionsSection}>
         <View style={styles.txHeader}>
-          <Text style={styles.sectionTitle}>交易记录</Text>
-          {(loadingTx || toppingUp) && (
-            <LoadingSpinner size="small" color={COLORS.IOS_BLUE} />
-          )}
+          <Text style={styles.sectionTitle}>{t.wallet.transactions}</Text>
+          {(loadingTx || toppingUp) && <LoadingSpinner size="small" color={COLORS.IOS_BLUE} />}
         </View>
 
         {!!error && <Text style={styles.errorText}>{error}</Text>}
@@ -104,7 +119,7 @@ const MyWalletScreen = () => {
         {transactions.length === 0 && !loadingTx ? (
           <View style={styles.emptyState}>
             <Icon name="wallet" library="Ionicons" size={60} color={COLORS.TEXT_SECONDARY} />
-            <Text style={styles.emptyText}>暂无交易记录</Text>
+            <Text style={styles.emptyText}>{t.wallet.emptyTx}</Text>
           </View>
         ) : (
           <FlatList
@@ -157,6 +172,14 @@ const styles = StyleSheet.create({
     flexWrap: 'wrap',
     marginTop: IOS_STYLES.SPACING.SM,
   },
+  paymentNote: {
+    fontSize: IOS_STYLES.FONT_SIZE.SMALL,
+    color: '#FFFFFF',
+    opacity: 0.85,
+    marginTop: IOS_STYLES.SPACING.SM,
+    textAlign: 'center',
+    lineHeight: 18,
+  },
   transactionsSection: {
     flex: 1,
     paddingHorizontal: 20,
@@ -185,13 +208,24 @@ const styles = StyleSheet.create({
     gap: IOS_STYLES.SPACING.SM,
   },
   txTitle: { fontWeight: IOS_STYLES.FONT_WEIGHT.HEAVY, color: COLORS.TEXT_PRIMARY },
-  txTime: { marginTop: IOS_STYLES.SPACING.SM, color: COLORS.TEXT_SECONDARY, fontSize: IOS_STYLES.FONT_SIZE.SMALL },
+  txTime: {
+    marginTop: IOS_STYLES.SPACING.SM,
+    color: COLORS.TEXT_SECONDARY,
+    fontSize: IOS_STYLES.FONT_SIZE.SMALL,
+  },
   txAmount: { fontWeight: IOS_STYLES.FONT_WEIGHT.HEAVY },
-  errorText: { color: COLORS.ERROR, fontWeight: IOS_STYLES.FONT_WEIGHT.BOLD, marginBottom: IOS_STYLES.SPACING.MD },
+  errorText: {
+    color: COLORS.ERROR,
+    fontWeight: IOS_STYLES.FONT_WEIGHT.BOLD,
+    marginBottom: IOS_STYLES.SPACING.MD,
+  },
   emptyState: {
     padding: IOS_STYLES.SPACING.XL,
     alignItems: 'center',
     gap: IOS_STYLES.SPACING.MD,
+  },
+  emptyText: {
+    color: COLORS.TEXT_SECONDARY,
   },
 });
 

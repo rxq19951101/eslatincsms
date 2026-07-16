@@ -395,7 +395,7 @@ export default function TenantsPage() {
                     <Input
                       value={tenantDomain}
                       onChange={(e) => setTenantDomain(e.target.value)}
-                      placeholder="例如：tenant1.eslatin.com"
+                      placeholder="例如：tenant1.eslatin.com.co"
                       className="bg-slate-800 border-slate-600 text-slate-200"
                     />
                   </div>

@@ -8,6 +8,7 @@ import { API_BASE_URL, API_ENDPOINTS } from '../constants/config';
 import { getAccessToken, getRefreshToken, saveTokens, clearTokens, isTokenExpiringSoon } from '../utils/tokenManager';
 import type { ApiError, AuthTokens } from '../types';
 import { Platform } from 'react-native';
+import { navigateToLogin } from '../navigation/navigationRef';
 
 // 创建Axios实例
 const apiClient: AxiosInstance = axios.create({
@@ -188,6 +189,7 @@ apiClient.interceptors.response.use(
           // 刷新失败 or 没有 refresh token：清理本地 token，并把原始 401 返回给调用方
           isRefreshing = false;
           await clearTokens();
+          navigateToLogin();
           return Promise.reject(error);
         }
         originalRequest.headers.Authorization = `Bearer ${newToken}`;
@@ -199,7 +201,7 @@ apiClient.interceptors.response.use(
         isRefreshing = false;
         // Token刷新失败，清除Token并跳转登录
         await clearTokens();
-        // TODO: 导航到登录页面
+        navigateToLogin();
         return Promise.reject(refreshError);
       }
     }
@@ -224,7 +226,8 @@ export const handleApiError = (error: any): ApiError => {
       const data: any = axiosError.response.data;
 
       // FastAPI 常见错误字段是 detail（可能是 string / object / array）
-      let message: string | undefined = data?.message;
+      // 自定义异常处理器返回 { success, error: { message, code } }
+      let message: string | undefined = data?.message ?? data?.error?.message;
       if (!message && data?.detail) {
         if (typeof data.detail === 'string') {
           message = data.detail;

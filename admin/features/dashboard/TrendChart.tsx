@@ -8,9 +8,11 @@ interface TrendChartProps {
   title: string;
   color: string;
   unit?: string;
+  /** 图表像素高度，需与外层容器一致，避免 ResponsiveContainer 读到 width/height=-1 */
+  chartHeight?: number;
 }
 
-export function TrendChart({ data, title, color, unit = '' }: TrendChartProps) {
+export function TrendChart({ data, title, color, unit = '', chartHeight = 256 }: TrendChartProps) {
   // 格式化日期显示
   const formatDate = (dateStr: string) => {
     const date = new Date(dateStr);
@@ -30,12 +32,13 @@ export function TrendChart({ data, title, color, unit = '' }: TrendChartProps) {
 
   // 从 CSS variable 获取颜色
   const primaryColor = color || 'hsl(var(--chart-primary))';
-  const secondaryColor = 'hsl(var(--chart-secondary))';
 
   return (
-    // Recharts 的 ResponsiveContainer 需要父容器有明确高度，否则会出现 width/height=-1
-    <div className="w-full h-[260px]">
-      <ResponsiveContainer width="100%" height="100%">
+    <div
+      className="w-full min-w-0"
+      style={{ height: chartHeight }}
+    >
+      <ResponsiveContainer width="100%" height={chartHeight} minWidth={0} minHeight={chartHeight}>
         <AreaChart
           data={data}
           margin={{ top: 10, right: 10, left: 0, bottom: 0 }}

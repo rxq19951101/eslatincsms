@@ -14,7 +14,7 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # 配置
-COMPOSE_FILE="docker-compose.local-prod.yml"
+COMPOSE_FILE="docker-compose.yml"
 CSMS_HEALTH_URL="http://localhost:9000/health"
 ADMIN_URL="http://localhost:3000"
 MAX_WAIT_TIME=120  # 最大等待时间（秒）
@@ -37,7 +37,7 @@ if [ ! -f "$COMPOSE_FILE" ]; then
 fi
 
 # 生成默认密钥（如果未设置，用于本地测试）
-# 注意：docker-compose.local-prod.yml 中已有默认值，这里只是提示
+# 注意：docker-compose.yml 中已有 ENCRYPTION_KEY / SECRET_KEY 默认值（仅本地），这里只是提示
 if [ -z "$SECRET_KEY" ]; then
     echo -e "${YELLOW}⚠️  未设置 SECRET_KEY，将使用 docker-compose 中的默认值（仅用于本地测试）${NC}"
 fi

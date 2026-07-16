@@ -14,6 +14,7 @@ from ocpp.v16.enums import Action, AuthorizationStatus, RegistrationStatus
 
 from .metering import MeteringState, advance_meter
 from .profiles import ChargePointProfile, MeteringProfile
+from .payment_simulator import simulate_charging_payment
 
 logger = logging.getLogger("eslatin_charger_sim")
 
@@ -203,6 +204,85 @@ class SimChargePoint(OcppChargePoint):
             except Exception as e:
                 logger.warning("[%s] MeterValues failed (connector=%s): %s", self.id, connector_id, e)
 
+    async def _trigger_payment_simulation(
+        self,
+        transaction_id: int,
+        connector_id: int,
+        id_tag: str,
+    ) -> None:
+        """
+        触发支付流程模拟（异步）
+        
+        在 StartTransaction 成功后，等待后端创建 ChargingSession，然后模拟支付
+        """
+        if not self.profile.enable_payment_simulation:
+            logger.info("[%s] Payment simulation disabled", self.id)
+            return
+        
+        if not self.profile.backend_api_url:
+            logger.warning("[%s] Backend API URL not configured, skipping payment simulation", self.id)
+            return
+        
+        async def _payment_flow() -> None:
+            try:
+                # 等待后端创建 ChargingSession（可能需要几秒）
+                logger.info(
+                    "[%s] Waiting for backend to create ChargingSession (transaction_id=%s)...",
+                    self.id, transaction_id
+                )
+                await asyncio.sleep(3)  # 等待 3 秒
+                
+                # 尝试获取 session_id
+                from .payment_simulator import get_session_id_by_transaction
+                session_id = await get_session_id_by_transaction(
+                    transaction_id=transaction_id,
+                    charge_point_id=self.profile.charge_point_id,
+                    backend_api_url=self.profile.backend_api_url,
+                    backend_token=self.profile.backend_api_token,
+                )
+                
+                if not session_id:
+                    logger.warning(
+                        "[%s] Failed to get session_id, skipping payment simulation",
+                        self.id
+                    )
+                    return
+                
+                # 计算支付金额（使用配置的金额或默认值）
+                payment_amount = self.profile.payment_amount or 10000.0  # 默认 10000 COP
+                
+                logger.info(
+                    "[%s] Starting payment simulation: session_id=%s, amount=%s COP, transaction_id=%s",
+                    self.id, session_id, payment_amount, transaction_id
+                )
+                
+                # 调用支付模拟
+                success = await simulate_charging_payment(
+                    session_id=session_id,
+                    amount=payment_amount,
+                    charge_point_id=self.profile.charge_point_id,
+                    backend_api_url=self.profile.backend_api_url,
+                    test_card_name=self.profile.payment_test_card,
+                    payment_delay_seconds=self.profile.payment_delay_seconds,
+                    backend_token=self.profile.backend_api_token,
+                )
+                
+                if success:
+                    logger.info(
+                        "[%s] Payment simulation completed successfully: session_id=%s, transaction_id=%s",
+                        self.id, session_id, transaction_id
+                    )
+                else:
+                    logger.warning(
+                        "[%s] Payment simulation failed or timeout: session_id=%s, transaction_id=%s",
+                        self.id, session_id, transaction_id
+                    )
+            except Exception as e:
+                logger.error("[%s] Payment simulation error: %s", self.id, e, exc_info=True)
+        
+        # 异步执行支付流程（不阻塞充电）
+        asyncio.create_task(_payment_flow())
+
     # ---------- CSMS -> CP handlers ----------
 
     @on(Action.RemoteStartTransaction)
@@ -224,13 +304,20 @@ class SimChargePoint(OcppChargePoint):
             try:
                 await self.send_status_notification("Preparing", connector_id=connector_id)
                 await self.send_authorize(id_tag)
-                await self.send_start_transaction(id_tag, connector_id=connector_id)
+                tx_id = await self.send_start_transaction(id_tag, connector_id=connector_id)
                 await self.send_status_notification("Charging", connector_id=connector_id)
 
                 # Start metering loop
                 if c.metering_task and not c.metering_task.done():
                     c.metering_task.cancel()
                 c.metering_task = asyncio.create_task(self._meter_values_loop(connector_id=connector_id))
+                
+                # 触发支付流程模拟（异步，不阻塞充电）
+                await self._trigger_payment_simulation(
+                    transaction_id=tx_id,
+                    connector_id=connector_id,
+                    id_tag=id_tag,
+                )
             except Exception as e:
                 logger.error("[%s] remote start flow failed: %s", self.id, e)
 

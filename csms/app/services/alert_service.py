@@ -48,6 +48,23 @@ class AlertService:
         db.refresh(alert)
         
         logger.info(f"Created alert: {alert.id} (type: {alert_type}, severity: {severity})")
+        try:
+            import asyncio
+            from app.services.notification_service import NotificationService
+            coro = NotificationService.send_alert_notification(
+                title=title,
+                description=description or "",
+                severity=severity,
+                charge_point_id=charge_point_id,
+                tenant_id=str(tenant_id),
+            )
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(coro)
+            except RuntimeError:
+                asyncio.run(coro)
+        except Exception as e:
+            logger.warning("Alert notification failed: %s", e)
         return alert
     
     @staticmethod

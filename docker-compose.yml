@@ -1,91 +1,171 @@
 #
-# 快速开发环境 Docker Compose 配置（默认配置）
-# 端口绑定：csms:9000，admin:3000，db:5432，redis:6379
-# 
-# 注意：此配置使用生产端口，可能与本地开发服务冲突
-# 推荐使用：docker compose -f docker-compose.dev.yml up -d（开发环境，端口：8000, 3001）
-#          docker compose -f docker-compose.test.yml up -d（测试环境，端口：8001, 3002）
-#          docker compose -f docker-compose.prod.yml up -d（生产环境，端口：9000, 3000）
+# 本地默认栈：数据库账号与 CSMS 运行方式与生产一致（ocpp_user / 生产级 env）
+# 启动: docker compose up -d --build
+# 端口: CSMS 9000, Admin 3000, Postgres 5432, Redis 6379, MQTT 1883/9001
+#
+# Admin 的 NEXT_PUBLIC_* 在「构建」时注入：Compose 只从「仓库根目录」的 .env 读取 ${VAR}。
+# 若密钥只在 admin/.env.local（给 npm run dev 用），Docker 构建不到，请复制一行到根 .env，或：
+#   docker compose --env-file admin/.env.local build admin
+#
 
-version: "3.9"
 services:
   db:
     image: postgres:15-alpine
-    container_name: db
+    container_name: ocpp-db
     ports:
       - "5432:5432"
     environment:
-      - POSTGRES_USER=local
-      - POSTGRES_PASSWORD=local
+      - POSTGRES_USER=ocpp_user
+      - POSTGRES_PASSWORD=ocpp_password
       - POSTGRES_DB=ocpp
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
     networks:
       - ocppnet
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U local -d ocpp"]
-      interval: 5s
-      timeout: 3s
-      retries: 3
+      test: ["CMD-SHELL", "pg_isready -U ocpp_user -d ocpp"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
 
   redis:
     image: redis:7-alpine
-    container_name: redis
+    container_name: ocpp-redis
     ports:
       - "6379:6379"
-    # 开发环境：禁用RDB持久化，避免磁盘空间/权限问题
-    command: redis-server --appendonly no --save "" --stop-writes-on-bgsave-error no
+    command: redis-server --appendonly yes --protected-mode no
+    volumes:
+      - redis_data:/data
     networks:
       - ocppnet
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  mqtt-broker:
+    image: eclipse-mosquitto:2.0
+    container_name: ocpp-mqtt
+    ports:
+      - "1883:1883"
+      - "9001:9001"
+    volumes:
+      - mqtt_data:/mosquitto/data
+      - mqtt_log:/mosquitto/log
+      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+    networks:
+      - ocppnet
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "mosquitto_pub -h localhost -t test -m 'healthcheck' && mosquitto_sub -h localhost -t test -C 1 -W 2 || exit 0"]
+      interval: 30s
+      timeout: 10s
       retries: 3
+      start_period: 10s
 
   csms:
     build: ./csms
-    container_name: csms
+    container_name: ocpp-csms
     ports:
       - "9000:9000"
     environment:
-      - ENVIRONMENT=development
+      - ENVIRONMENT=production
+      - DEBUG=false
+      - DATABASE_URL=postgresql://ocpp_user:ocpp_password@db:5432/ocpp
       - REDIS_URL=redis://redis:6379/0
-      - DATABASE_URL=postgresql://local:local@db:5432/ocpp
-      - PORT=9000
-      - CORS_ORIGINS=*
-      - DOCS_URL=/docs
-      - REDOC_URL=/redoc
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY:-ocpp-local-encryption-key-change-in-production}
+      - SECRET_KEY=${SECRET_KEY:-ocpp-local-secret-key-change-in-production-please}
+      - ENCRYPTION_SALT=ocpp_csms_salt
+      - MQTT_BROKER_HOST=mqtt-broker
+      - MQTT_BROKER_PORT=1883
+      - MQTT_USERNAME=
+      - MQTT_PASSWORD=
+      - LOG_LEVEL=INFO
+      - LOG_FORMAT=json
+      # Expo Web（localhost:8081）→ CSMS :9000 跨域；未设置时 main.py 默认已含 8081，此处可覆盖扩展
+      - CORS_ALLOW_ORIGINS=http://localhost:3000,http://127.0.0.1:3000,http://localhost:3001,http://127.0.0.1:3001,http://localhost:8081,http://127.0.0.1:8081,http://localhost:19006,http://127.0.0.1:19006
+      - DOCS_URL=None
+      - REDOC_URL=None
+      - ENABLE_WEBSOCKET_TRANSPORT=true
+      - ENABLE_HTTP_TRANSPORT=false
+      # TEST 凭证与 MP 官方测试卡配套使用
+      - MERCADOPAGO_ENVIRONMENT=sandbox
+      - MERCADOPAGO_ACCESS_TOKEN=TEST-159151764056006-012316-8feefb39f2f87255bb670202a21e2e68-3150452318
+      - MERCADOPAGO_PUBLIC_KEY=TEST-dcddb9cd-e2bb-4807-a069-ec1f4083bec7
+      - MERCADOPAGO_APP_ID=159151764056006
+      - MERCADOPAGO_CLIENT_SECRET=6KFW0uBilwuGI2eZ6A2HdXzBWvzISeg9
+      - MERCADOPAGO_WEBHOOK_SECRET=test-webhook-secret
     depends_on:
       db:
         condition: service_healthy
       redis:
         condition: service_healthy
+      mqtt-broker:
+        condition: service_started
     networks:
       - ocppnet
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   admin:
-    build: ./admin
-    container_name: admin
+    build:
+      context: ./admin
+      args:
+        NEXT_PUBLIC_GOOGLE_MAPS_API_KEY: ${NEXT_PUBLIC_GOOGLE_MAPS_API_KEY:-}
+        NEXT_PUBLIC_GOOGLE_MAP_ID: ${NEXT_PUBLIC_GOOGLE_MAP_ID:-}
+        NEXT_PUBLIC_CSMS_HTTP: ${NEXT_PUBLIC_CSMS_HTTP:-http://localhost:9000}
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:9000}
+    container_name: ocpp-admin
     ports:
       - "3000:3000"
     environment:
-      - NEXT_PUBLIC_CSMS_HTTP=http://localhost:9000
-      - NEXT_PUBLIC_API_BASE_URL=http://localhost:9000
+      - NEXT_PUBLIC_CSMS_HTTP=${NEXT_PUBLIC_CSMS_HTTP:-http://localhost:9000}
+      - NEXT_PUBLIC_API_BASE_URL=${NEXT_PUBLIC_API_BASE_URL:-http://localhost:9000}
+      - NEXT_TELEMETRY_DISABLED=1
     depends_on:
       - csms
     networks:
       - ocppnet
+    restart: unless-stopped
 
   charger-sim:
     build: ./charger-sim
-    container_name: charger-sim
+    container_name: ocpp-charger-sim
     depends_on:
       - csms
     networks:
       - ocppnet
-    command: ["python", "simulator.py", "--id", "CP-DOCKER-1", "--url", "ws://csms:9000/ocpp"]
+    command:
+      [
+        "python",
+        "cli.py",
+        "run-one",
+        "--ws",
+        "ws://csms:9000/ocpp",
+        "--charge-point-id",
+        "CP-DOCKER-1",
+        "--connector-id",
+        "1",
+      ]
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  mqtt_data:
+    driver: local
+  mqtt_log:
+    driver: local
 
 networks:
   ocppnet:
     driver: bridge
-
-

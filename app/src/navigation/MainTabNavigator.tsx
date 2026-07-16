@@ -8,6 +8,7 @@ import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import type { MainTabsParamList } from '../types';
 import { COLORS, IOS_STYLES } from '../constants/config';
 import Icon from '../components/ui/Icon';
+import { useI18n } from '../i18n';
 
 // 导入页面组件
 import HomeScreen from '../screens/home/HomeScreen';
@@ -19,6 +20,8 @@ import AccountScreen from '../screens/account/AccountScreen';
 const Tab = createBottomTabNavigator<MainTabsParamList>();
 
 export const MainTabNavigator = () => {
+  const { t } = useI18n();
+
   return (
     <Tab.Navigator
       screenOptions={{
@@ -43,7 +46,7 @@ export const MainTabNavigator = () => {
         name="Home"
         component={HomeScreen}
         options={{
-          tabBarLabel: 'Home',
+          tabBarLabel: t.tabs.home,
           tabBarIcon: ({ color, size }) => (
             <Icon name="home" library="Ionicons" size={size || 24} color={color} />
           ),
@@ -53,7 +56,7 @@ export const MainTabNavigator = () => {
         name="Saved"
         component={SavedScreen}
         options={{
-          tabBarLabel: 'Saved',
+          tabBarLabel: t.tabs.saved,
           tabBarIcon: ({ color, size }) => (
             <Icon name="heart" library="Ionicons" size={size || 24} color={color} />
           ),
@@ -63,7 +66,7 @@ export const MainTabNavigator = () => {
         name="Scan"
         component={ScanScreen}
         options={{
-          tabBarLabel: 'Scan',
+          tabBarLabel: t.tabs.scan,
           tabBarIcon: ({ color, size }) => (
             <Icon name="camera" library="Ionicons" size={size || 24} color={color} />
           ),
@@ -73,7 +76,7 @@ export const MainTabNavigator = () => {
         name="MyWallet"
         component={MyWalletScreen}
         options={{
-          tabBarLabel: 'Wallet',
+          tabBarLabel: t.tabs.wallet,
           tabBarIcon: ({ color, size }) => (
             <Icon name="wallet" library="Ionicons" size={size || 24} color={color} />
           ),
@@ -83,7 +86,7 @@ export const MainTabNavigator = () => {
         name="Account"
         component={AccountScreen}
         options={{
-          tabBarLabel: 'Account',
+          tabBarLabel: t.tabs.account,
           tabBarIcon: ({ color, size }) => (
             <Icon name="person" library="Ionicons" size={size || 24} color={color} />
           ),

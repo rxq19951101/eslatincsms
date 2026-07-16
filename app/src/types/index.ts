@@ -90,6 +90,19 @@ export interface WalletBalance {
   currency: string;
 }
 
+export interface SavedPaymentMethodItem {
+  id: string;
+  provider: string;
+  last_four?: string;
+  payment_method_brand?: string;
+  is_default: boolean;
+}
+
+export interface SavedPaymentMethodsResponse {
+  items: SavedPaymentMethodItem[];
+  hint: string;
+}
+
 export interface WalletTransaction {
   id: string;
   type: 'charge' | 'top_up';
@@ -105,6 +118,111 @@ export interface PaymentMethod {
   last_four?: string;
   is_default: boolean;
 }
+
+// ==================== 支付相关 =====================
+
+// Wompi 相关（保留兼容）
+export interface WompiPaymentData {
+  public_key: string;
+  reference: string;
+  integrity_signature: string;
+  amount_in_cents: number;
+  currency: string;
+  redirect_url: string;
+}
+
+export interface CreatePaymentRequest {
+  type: 'top_up' | 'charging';
+  amount: number;
+  currency?: string;
+  metadata?: {
+    session_id?: number;
+    charge_point_id?: string;
+    site_id?: string;
+  };
+}
+
+export interface CreatePaymentResponse {
+  order_id: string;
+  reference: string;
+  payment_data: WompiPaymentData;
+  checkout_url?: string;
+}
+
+export type PaymentProviderCode = 'wompi' | 'mercadopago';
+
+export interface PaymentProviderOption {
+  code: PaymentProviderCode;
+  name: string;
+  description: string;
+  enabled: boolean;
+  supportedTypes: Array<'top_up' | 'charging'>;
+}
+
+// Mercado Pago 相关
+export interface CardData {
+  number: string;
+  expMonth: string;
+  expYear: string;
+  cvc: string;
+  holderName: string;
+}
+
+/** MP card_tokens 解析结果（优先用接口返回的 payment_method_id，避免仅凭卡号首位误判） */
+export interface MercadoPagoCardTokenResult {
+  tokenId: string;
+  payment_method_id: string;
+}
+
+export interface CreateMercadoPagoPaymentRequest {
+  type: 'top_up' | 'charging';
+  amount: number;
+  currency?: string;
+  token: string;  // 前端获取的 card token
+  email: string;  // MP 强制要求
+  payment_method_id: string;  // 'visa', 'master' 等
+  idempotency_key: string;  // UUID v4
+  device_id?: string;  // 设备指纹（可选）
+  description?: string;  // 支付描述（可选）
+  metadata?: {
+    session_id?: number;
+    charge_point_id?: string;
+    site_id?: string;
+  };
+}
+
+export interface MercadoPagoPaymentResponse {
+  order_id: string;
+  payment_id: string;
+  status: string;
+  external_reference: string;
+  amount: number;
+  currency: string;
+}
+
+export interface PaymentStatusResponse {
+  order_id: string;
+  status: 'created' | 'processing' | 'approved' | 'declined' | 'voided' | 'error' | 'expired' | 'refunded';
+  wompi_transaction_id?: string;
+  mercadopago_payment_id?: string;
+  amount: number;
+  currency: string;
+  paid_at?: string;
+  expires_at: string;
+  is_expired: boolean;
+}
+
+export interface UnpaidCharge {
+  session_id: number;
+  charge_point_id: string;
+  amount: number;
+  currency: string;
+  created_at: string;
+  payment_order_id?: string;
+}
+
+/** 支付通道（预留：PSE / 本地钱包等） */
+export type PaymentRail = 'card' | 'wallet' | 'pse' | 'nequi' | 'daviplata' | 'other';
 
 // ==================== 导航相关 ====================
 
@@ -134,7 +252,13 @@ export type RootStackParamList = {
   PaymentMethod: undefined;
   TransactionHistory: undefined;
   PaymentMethods: undefined;
+  /** 支付中枢：余额 + 充值 + 支付方式（演示） */
+  PaymentHub: undefined;
   AddPayment: undefined;
+  WompiPayment: { orderId?: string; checkoutUrl?: string; amount?: number };
+  MercadoPagoPayment: { amount: number; type: 'top_up' | 'charging'; metadata?: { session_id?: number; charge_point_id?: string; site_id?: string } };
+  PaymentResult: { orderId?: string; status?: string };
+  UnpaidBills: undefined;
   PersonalInfo: undefined;
   Security: undefined;
   Language: undefined;

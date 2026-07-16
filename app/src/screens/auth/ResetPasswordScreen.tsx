@@ -19,6 +19,7 @@ import { useNavigation, useRoute, RouteProp } from '@react-navigation/native';
 import type { StackNavigationProp } from '@react-navigation/stack';
 import type { RootStackParamList } from '../../types';
 import { COLORS, PASSWORD_RULES } from '../../constants/config';
+import { useI18n } from '../../i18n';
 import { confirmResetPassword } from '../../api/auth';
 
 type ResetPasswordScreenNavigationProp = StackNavigationProp<
@@ -28,6 +29,8 @@ type ResetPasswordScreenNavigationProp = StackNavigationProp<
 type ResetPasswordScreenRouteProp = RouteProp<RootStackParamList, 'ResetPassword'>;
 
 const ResetPasswordScreen = () => {
+  const { t } = useI18n();
+
   const navigation = useNavigation<ResetPasswordScreenNavigationProp>();
   const route = useRoute<ResetPasswordScreenRouteProp>();
   const { token } = route.params;
@@ -69,25 +72,25 @@ const ResetPasswordScreen = () => {
   const handleResetPassword = async () => {
     // 验证密码
     if (newPassword.length < PASSWORD_RULES.MIN_LENGTH) {
-      Alert.alert('Error', `Password must be at least ${PASSWORD_RULES.MIN_LENGTH} characters`);
+      Alert.alert(t.common.error, t.auth.passwordMin.replace('{n}', String(PASSWORD_RULES.MIN_LENGTH)));
       return;
     }
     if (PASSWORD_RULES.REQUIRE_UPPERCASE && !/[A-Z]/.test(newPassword)) {
-      Alert.alert('Error', 'Password must contain at least one uppercase letter');
+      Alert.alert(t.common.error, t.auth.passwordUpper);
       return;
     }
     if (PASSWORD_RULES.REQUIRE_LOWERCASE && !/[a-z]/.test(newPassword)) {
-      Alert.alert('Error', 'Password must contain at least one lowercase letter');
+      Alert.alert(t.common.error, t.auth.passwordLower);
       return;
     }
     if (PASSWORD_RULES.REQUIRE_NUMBER && !/[0-9]/.test(newPassword)) {
-      Alert.alert('Error', 'Password must contain at least one number');
+      Alert.alert(t.common.error, t.auth.passwordNumber);
       return;
     }
 
     // 验证密码确认
     if (newPassword !== confirmPassword) {
-      Alert.alert('Error', 'Passwords do not match');
+      Alert.alert(t.common.error, t.auth.passwordMismatch);
       return;
     }
 
@@ -105,7 +108,7 @@ const ResetPasswordScreen = () => {
         ]
       );
     } catch (error: any) {
-      Alert.alert('Error', error.message || 'Failed to reset password');
+      Alert.alert(t.common.error, error.message || t.auth.resetFailed);
     } finally {
       setIsLoading(false);
     }

@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import { Loader } from '@googlemaps/js-api-loader';
 
 interface GoogleMapViewProps {
@@ -95,26 +95,14 @@ const darkModeStyles: google.maps.MapTypeStyle[] = [
   }
 ];
 
-// 创建自定义红色标记图标（SVG base64）- 移到组件外部
-const createCustomMarkerIcon = (): google.maps.Icon => {
-  // 使用 SVG 创建红色充电桩标记图标
-  const svgMarker = `
-    <svg width="40" height="50" xmlns="http://www.w3.org/2000/svg">
-      <path d="M20 0C9 0 0 9 0 20c0 11 20 30 20 30s20-19 20-30c0-11-9-20-20-20z" fill="#ef4444" stroke="#ffffff" stroke-width="2"/>
-      <text x="20" y="28" font-family="Arial" font-size="16" font-weight="bold" fill="white" text-anchor="middle">⚡</text>
-    </svg>
-  `;
-  return {
-    url: 'data:image/svg+xml;charset=UTF-8,' + encodeURIComponent(svgMarker),
-    scaledSize: new google.maps.Size(40, 50),
-    anchor: new google.maps.Point(20, 50),
-    origin: new google.maps.Point(0, 0)
-  };
-};
+/** Advanced Marker 需要 mapId；可在 Cloud Console 创建或使用官方示例 ID */
+const DEFAULT_MAP_ID = 'DEMO_MAP_ID';
+
+type MarkerPoint = { lat: number; lng: number; title?: string };
 
 export default function GoogleMapView(props: GoogleMapViewProps) {
   const {
-    center = { lat: 4.6097, lng: -74.0817 }, // 默认波哥大
+    center = { lat: 4.6097, lng: -74.0817 },
     markers = [],
     onClick,
     height = '400px',
@@ -124,16 +112,64 @@ export default function GoogleMapView(props: GoogleMapViewProps) {
 
   const mapRef = useRef<HTMLDivElement>(null);
   const googleMapRef = useRef<google.maps.Map | null>(null);
-  const markersRef = useRef<google.maps.Marker[]>([]);
+  const markersRef = useRef<google.maps.marker.AdvancedMarkerElement[]>([]);
+  const mapInitStartedRef = useRef(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // 初始化 Google Maps（只初始化一次，等待 center 准备好）
+  const mapId =
+    typeof process !== 'undefined'
+      ? process.env.NEXT_PUBLIC_GOOGLE_MAP_ID || DEFAULT_MAP_ID
+      : DEFAULT_MAP_ID;
+
+  const clearAndAddMarkers = useCallback(async (map: google.maps.Map, list: MarkerPoint[]) => {
+    const { AdvancedMarkerElement, PinElement } = (await google.maps.importLibrary(
+      'marker'
+    )) as google.maps.MarkerLibrary;
+
+    markersRef.current.forEach((m) => {
+      m.map = null;
+    });
+    markersRef.current = [];
+
+    if (!list?.length) return;
+
+    for (const markerData of list) {
+      if (!markerData || typeof markerData.lat !== 'number' || typeof markerData.lng !== 'number') {
+        continue;
+      }
+
+      const pin = new PinElement({
+        background: '#ef4444',
+        borderColor: '#ffffff',
+        glyphColor: '#ffffff',
+        scale: 1.15
+      });
+
+      const adv = new AdvancedMarkerElement({
+        map,
+        position: { lat: markerData.lat, lng: markerData.lng },
+        title: markerData.title || '充电站位置',
+        content: pin.element,
+        zIndex: 1000
+      });
+
+      if (markerData.title) {
+        const infoWindow = new google.maps.InfoWindow({
+          content: `<div style="padding: 8px; font-weight: bold; color: #1f2937;">${markerData.title}</div>`
+        });
+        adv.addListener('click', () => {
+          infoWindow.open({ map, anchor: adv });
+        });
+      }
+
+      markersRef.current.push(adv);
+    }
+  }, []);
+
   useEffect(() => {
-    // 如果地图已经初始化，跳过
     if (googleMapRef.current) return;
-    
-    // 如果 center 还没准备好，等待
+    if (mapInitStartedRef.current) return;
     if (!center) return;
 
     const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
@@ -143,6 +179,8 @@ export default function GoogleMapView(props: GoogleMapViewProps) {
       return;
     }
 
+    mapInitStartedRef.current = true;
+
     const loader = new Loader({
       apiKey,
       version: 'weekly',
@@ -151,13 +189,13 @@ export default function GoogleMapView(props: GoogleMapViewProps) {
 
     loader
       .load()
-      .then(() => {
+      .then(async () => {
         if (!mapRef.current) return;
 
-        // 创建地图
         const map = new google.maps.Map(mapRef.current, {
           center,
           zoom,
+          mapId,
           styles: darkModeStyles,
           disableDefaultUI: disableInteraction,
           zoomControl: !disableInteraction,
@@ -174,7 +212,6 @@ export default function GoogleMapView(props: GoogleMapViewProps) {
 
         googleMapRef.current = map;
 
-        // 点击地图事件
         if (onClick) {
           map.addListener('click', (e: google.maps.MapMouseEvent) => {
             if (e.latLng) {
@@ -183,51 +220,30 @@ export default function GoogleMapView(props: GoogleMapViewProps) {
           });
         }
 
+        await clearAndAddMarkers(map, markers);
         setLoading(false);
-        
-        // 地图初始化完成后，立即添加标记（如果已有标记数据）
-        if (markers && markers.length > 0) {
-          markers.forEach((markerData) => {
-            if (markerData && typeof markerData.lat === 'number' && typeof markerData.lng === 'number') {
-              const marker = new google.maps.Marker({
-                position: { lat: markerData.lat, lng: markerData.lng },
-                map: map,
-                title: markerData.title || '充电站位置',
-                animation: google.maps.Animation.DROP,
-                icon: createCustomMarkerIcon(),
-                zIndex: 1000,
-                optimized: false
-              });
-              
-              if (markerData.title) {
-                const infoWindow = new google.maps.InfoWindow({
-                  content: `<div style="padding: 8px; font-weight: bold; color: #1f2937;">${markerData.title}</div>`
-                });
-                marker.addListener('click', () => {
-                  infoWindow.open(map, marker);
-                });
-              }
-              
-              markersRef.current.push(marker);
-            }
-          });
-        }
       })
       .catch((err) => {
         console.error('Google Maps 加载失败:', err);
-        setError('地图加载失败，请检查网络连接');
+        mapInitStartedRef.current = false;
+        setError('地图加载失败，请检查网络连接或 Google Cloud 中 API/引荐来源限制');
         setLoading(false);
       });
-  }, [center?.lat, center?.lng, onClick, disableInteraction, markers]);
+    // markers / zoom 变更由下方 effect 处理，勿写入依赖以免重复初始化地图
+  }, [center?.lat, center?.lng, onClick, disableInteraction, clearAndAddMarkers, mapId]);
 
-  // 更新地图中心
   useEffect(() => {
     if (googleMapRef.current && center) {
       googleMapRef.current.setCenter(center);
     }
   }, [center?.lat, center?.lng]);
 
-  // 动态更新地图交互性
+  useEffect(() => {
+    if (googleMapRef.current) {
+      googleMapRef.current.setZoom(zoom);
+    }
+  }, [zoom]);
+
   useEffect(() => {
     if (!googleMapRef.current) return;
     const map = googleMapRef.current;
@@ -242,60 +258,11 @@ export default function GoogleMapView(props: GoogleMapViewProps) {
     });
   }, [disableInteraction]);
 
-  // 更新标记点
   useEffect(() => {
-    if (!googleMapRef.current) {
-      // 如果地图还没初始化，等待一下
-      return;
-    }
-
-    // 清除旧标记
-    markersRef.current.forEach((marker) => marker.setMap(null));
-    markersRef.current = [];
-
-    // 如果没有标记数据，直接返回
-    if (!markers || markers.length === 0) {
-      console.log('[GoogleMapView] 没有标记数据');
-      return;
-    }
-
-    console.log('[GoogleMapView] 添加标记:', markers);
-
-    // 添加新标记（使用自定义红色充电桩标记）
-    markers.forEach((markerData) => {
-      if (!markerData || typeof markerData.lat !== 'number' || typeof markerData.lng !== 'number') {
-        console.warn('[GoogleMapView] 无效的标记数据:', markerData);
-        return;
-      }
-
-      try {
-        const marker = new google.maps.Marker({
-          position: { lat: markerData.lat, lng: markerData.lng },
-          map: googleMapRef.current!,
-          title: markerData.title || '充电站位置',
-          animation: google.maps.Animation.DROP,
-          icon: createCustomMarkerIcon(),
-          zIndex: 1000, // 确保标记在最上层
-          optimized: false // 禁用优化以确保标记始终显示
-        });
-        
-        // 添加信息窗口显示站点名称
-        if (markerData.title) {
-          const infoWindow = new google.maps.InfoWindow({
-            content: `<div style="padding: 8px; font-weight: bold; color: #1f2937;">${markerData.title}</div>`
-          });
-          marker.addListener('click', () => {
-            infoWindow.open(googleMapRef.current!, marker);
-          });
-        }
-        
-        markersRef.current.push(marker);
-        console.log('[GoogleMapView] 标记已添加:', markerData.title, '位置:', markerData.lat, markerData.lng);
-      } catch (error) {
-        console.error('[GoogleMapView] 创建标记失败:', error, markerData);
-      }
-    });
-  }, [markers, googleMapRef.current]);
+    const map = googleMapRef.current;
+    if (!map) return;
+    void clearAndAddMarkers(map, markers);
+  }, [markers, clearAndAddMarkers]);
 
   if (error) {
     return (

@@ -132,7 +132,13 @@ services:
 
   # Admin管理界面
   admin:
-    build: ./admin
+    build:
+      context: ./admin
+      args:
+        NEXT_PUBLIC_GOOGLE_MAPS_API_KEY: ${NEXT_PUBLIC_GOOGLE_MAPS_API_KEY:-}
+        NEXT_PUBLIC_GOOGLE_MAP_ID: ${NEXT_PUBLIC_GOOGLE_MAP_ID:-}
+        NEXT_PUBLIC_CSMS_HTTP: ${NEXT_PUBLIC_CSMS_HTTP:-}
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-}
     container_name: ocpp-admin-prod
     ports:
       - "${ADMIN_PORT:-3000}:3000"
@@ -145,6 +151,7 @@ services:
       # 例如：访问 http://47.236.134.99:3000 时，会自动使用 http://47.236.134.99:9000
       # 注意：如果访问URL包含占位符（如 your-server-ip），会导致连接失败
       - NEXT_PUBLIC_CSMS_HTTP=${NEXT_PUBLIC_CSMS_HTTP:-}
+      - NEXT_PUBLIC_API_BASE_URL=${NEXT_PUBLIC_API_BASE_URL:-}
       # 禁用 Next.js 遥测（消除浏览器控制台的 127.0.0.1:7242 错误）
       - NEXT_TELEMETRY_DISABLED=1
     depends_on:

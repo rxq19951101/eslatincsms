@@ -27,11 +27,15 @@ import GoogleMapView, { type MapMarker } from '../../components/GoogleMapView';
 import Icon from '../../components/ui/Icon';
 import Card from '../../components/ui/Card';
 import Button from '../../components/ui/Button';
+import Badge, { BadgeVariant } from '../../components/ui/Badge';
 import LoadingSpinner from '../../components/ui/LoadingSpinner';
+import { useI18n } from '../../i18n';
 import { SkeletonCard } from '../../components/ui/Skeleton';
 import { formatDistance } from '../../utils/formatDistance';
 
 const HomeScreen = () => {
+  const { t } = useI18n();
+
   const dispatch = useAppDispatch();
   const { chargers, loading, error } = useAppSelector((state) => state.charger);
   const navigation = useNavigation<StackNavigationProp<RootStackParamList>>();
@@ -93,6 +97,7 @@ const HomeScreen = () => {
     const available = item.available_connectors || 0;
     const total = item.total_connectors || 0;
     const isAvailable = available > 0;
+    const statusVariant: BadgeVariant = isAvailable ? 'success' : item.status === 'Offline' ? 'error' : 'warning';
 
     return (
       <Card
@@ -102,28 +107,15 @@ const HomeScreen = () => {
         style={[styles.stationCard, { marginBottom: index < filteredChargers.length - 1 ? IOS_STYLES.SPACING.MD : 0 }]}
       >
         <View style={styles.cardHeader}>
-          <Text style={styles.stationName}>
-            {item.site_name || `充电站 ${item.id}`}
+          <Text style={styles.stationName} numberOfLines={1}>
+            {item.site_name || t.home.stationFallback.replace('{id}', String(item.id))}
           </Text>
-          <View style={styles.statusDot}>
-            <View
-              style={[
-                styles.dot,
-                {
-                  backgroundColor: isAvailable
-                    ? COLORS.SUCCESS
-                    : item.status === 'Offline'
-                    ? COLORS.ERROR
-                    : COLORS.WARNING,
-                },
-              ]}
-            />
-          </View>
+          <Badge label={item.status} variant={statusVariant} dot />
         </View>
 
         <View style={styles.addressRow}>
-          <Text style={styles.stationAddress}>
-            {item.site_address || '地址未知'}
+          <Text style={styles.stationAddress} numberOfLines={1}>
+            {item.site_address || t.home.addressUnknown}
           </Text>
           {item.distance_km !== undefined && (
             <View style={styles.distanceItem}>
@@ -135,29 +127,26 @@ const HomeScreen = () => {
           )}
         </View>
 
+        <View style={styles.divider} />
+
         <View style={styles.cardFooter}>
           <View style={styles.infoItem}>
-            <Icon name="flash" library="Ionicons" size={16} color={COLORS.TEXT_PRIMARY} />
+            <Icon name="flash" library="Ionicons" size={16} color={isAvailable ? COLORS.PRIMARY : COLORS.TEXT_SECONDARY} />
             <Text
               style={[styles.infoText, !isAvailable && styles.unavailableText]}
             >
-              {available}/{total} 可用
+              {available}/{total} {t.home.available}
             </Text>
           </View>
 
-          {item.price_per_kwh && (
+          {!!item.price_per_kwh && (
             <View style={styles.infoItem}>
-              <Icon name="cash" library="Ionicons" size={16} color={COLORS.TEXT_PRIMARY} />
+              <Icon name="cash" library="Ionicons" size={16} color={COLORS.TEXT_SECONDARY} />
               <Text style={styles.infoText}>
                 ${item.price_per_kwh.toFixed(2)}/kWh
               </Text>
             </View>
           )}
-
-          <View style={styles.infoItem}>
-            <Icon name="radio" library="Ionicons" size={16} color={COLORS.TEXT_PRIMARY} />
-            <Text style={styles.infoText}>{item.status}</Text>
-          </View>
         </View>
       </Card>
     );
@@ -182,7 +171,7 @@ const HomeScreen = () => {
         id: c.id,
         latitude: c.latitude as number,
         longitude: c.longitude as number,
-        title: c.site_name || `充电站 ${c.id}`,
+        title: c.site_name || t.home.stationFallback.replace('{id}', String(c.id)),
         description: c.site_address || '',
         status: c.status,
         available: c.available_connectors,
@@ -200,7 +189,7 @@ const HomeScreen = () => {
       
       {/* Header */}
       <View style={styles.header}>
-        <Text style={styles.headerTitle}>充电站</Text>
+        <Text style={styles.headerTitle}>{t.home.title}</Text>
         <View style={styles.headerActions}>
           <TouchableOpacity style={styles.refreshButton} onPress={handleRefresh}>
             <Icon
@@ -212,9 +201,6 @@ const HomeScreen = () => {
               animating={refreshing}
             />
           </TouchableOpacity>
-          <TouchableOpacity style={styles.filterButton}>
-            <Icon name="settings" library="Ionicons" size={24} color={COLORS.IOS_BLUE} />
-          </TouchableOpacity>
         </View>
       </View>
 
@@ -223,7 +209,7 @@ const HomeScreen = () => {
         <Icon name="search" library="Ionicons" size={20} color={COLORS.TEXT_SECONDARY} />
         <TextInput
           style={styles.searchInput}
-          placeholder="搜索充电站..."
+          placeholder={t.home.search}
           placeholderTextColor={COLORS.TEXT_SECONDARY}
           value={searchQuery}
           onChangeText={setSearchQuery}
@@ -241,7 +227,7 @@ const HomeScreen = () => {
         <View style={styles.errorContainer}>
           <Icon name="alert-circle" library="Ionicons" size={48} color={COLORS.ERROR} />
           <Text style={styles.errorText}>{error}</Text>
-          <Button title="重试" onPress={handleRefresh} variant="primary" size="medium" />
+          <Button title={t.common.retry} onPress={handleRefresh} variant="primary" size="medium" />
         </View>
       )}
 
@@ -261,7 +247,7 @@ const HomeScreen = () => {
                 viewMode === 'list' && styles.toggleTextActive,
               ]}
             >
-              列表 ({filteredChargers.length})
+              {t.home.list} ({filteredChargers.length})
             </Text>
           </TouchableOpacity>
           <TouchableOpacity
@@ -277,7 +263,7 @@ const HomeScreen = () => {
                 viewMode === 'map' && styles.toggleTextActive,
               ]}
             >
-              地图
+              {t.home.map}
             </Text>
           </TouchableOpacity>
         </View>
@@ -297,10 +283,10 @@ const HomeScreen = () => {
                 <View style={styles.emptyContainer}>
                   <Icon name="search" library="Ionicons" size={60} color={COLORS.TEXT_SECONDARY} />
                   <Text style={styles.emptyText}>
-                    {searchQuery ? '未找到匹配的充电站' : '暂无充电站数据'}
+                    {searchQuery ? t.home.emptySearch : t.home.empty}
                   </Text>
                   {!searchQuery && (
-                    <Button title="刷新" onPress={handleRefresh} variant="primary" size="medium" />
+                    <Button title={t.common.refresh} onPress={handleRefresh} variant="primary" size="medium" />
                   )}
                 </View>
               }
@@ -308,10 +294,9 @@ const HomeScreen = () => {
           ) : Platform.OS === 'web' || !GoogleMapView ? (
             <View style={styles.mapPlaceholder}>
               <Icon name="map" library="Ionicons" size={80} color={COLORS.TEXT_SECONDARY} />
-              <Text style={styles.placeholderText}>地图视图</Text>
+              <Text style={styles.placeholderText}>{t.home.mapPlaceholder}</Text>
               <Text style={styles.placeholderSubtext}>
-                地图功能在Web平台受限{'\n'}
-                请在移动设备上查看完整功能
+                {t.home.mapWebLimited}
               </Text>
             </View>
           ) : (
@@ -355,13 +340,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   refreshButton: {
-    width: 40,
-    height: 40,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: IOS_STYLES.SPACING.SM,
-  },
-  filterButton: {
     width: 40,
     height: 40,
     justifyContent: 'center',
@@ -424,33 +402,13 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     alignItems: 'center',
     marginBottom: 8,
+    gap: IOS_STYLES.SPACING.SM,
   },
   stationName: {
-    fontSize: 18,
-    fontWeight: 'bold',
+    fontSize: IOS_STYLES.FONT_SIZE.LARGE,
+    fontWeight: IOS_STYLES.FONT_WEIGHT.BOLD,
     color: COLORS.TEXT_PRIMARY,
     flex: 1,
-  },
-  ratingContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  ratingIcon: {
-    fontSize: 16,
-    marginRight: 4,
-  },
-  ratingText: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: COLORS.TEXT_PRIMARY,
-  },
-  statusDot: {
-    marginLeft: 8,
-  },
-  dot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
   },
   addressRow: {
     flexDirection: 'row',
@@ -474,9 +432,14 @@ const styles = StyleSheet.create({
     color: COLORS.TEXT_SECONDARY,
     fontWeight: IOS_STYLES.FONT_WEIGHT.MEDIUM,
   },
+  divider: {
+    height: StyleSheet.hairlineWidth,
+    backgroundColor: COLORS.IOS_SEPARATOR,
+    marginBottom: IOS_STYLES.SPACING.SM,
+  },
   cardFooter: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
+    gap: IOS_STYLES.SPACING.LG,
   },
   infoItem: {
     flexDirection: 'row',

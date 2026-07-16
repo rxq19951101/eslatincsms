@@ -25,10 +25,12 @@
 | MQTT (WS) | 9002 | 9003 | 9001 |
 
 **Docker Compose 文件选择**：
-- `docker-compose.dev.yml` - 开发环境（端口：8000, 3001）
+- `docker-compose.yml` - **本地默认**：与生产一致的数据库账号（`ocpp_user`）与 CSMS 运行方式，端口 9000 / 3000
+- `docker-compose.local-prod.yml` - 兼容别名，内容等价于 `docker-compose.yml`（`include`）
+- `docker-compose.dev.yml` - 开发环境（端口：8000, 3001，与主栈错开端口）
 - `docker-compose.test.yml` - 测试环境（端口：8001, 3002）
-- `docker-compose.yml` - 快速启动（使用生产端口：9000, 3000）
-- `docker-compose.prod.yml` - 生产环境（端口：9000, 3000）
+- `docker-compose.csms-only.yml` - 仅 CSMS + 依赖，无 Admin（OCPP 联调）
+- `docker-compose.prod.yml` - 服务器生产部署
 
 详细配置说明请查看 [PORT_CONFIGURATION.md](./PORT_CONFIGURATION.md)
 
@@ -62,7 +64,7 @@ docker compose -f docker-compose.dev.yml up --build
 # 测试环境
 docker compose -f docker-compose.test.yml up --build
 
-# 快速启动（默认，使用生产端口）
+# 本地默认（与生产一致的数据库账号与 CSMS 配置，端口 9000/3000）
 docker compose up --build
 
 # 生产环境

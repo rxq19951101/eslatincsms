@@ -7,7 +7,7 @@
 echo "正在创建初始数据..."
 
 # 生成密码哈希
-PASSWORD_HASH=$(docker compose -f docker-compose.local-prod.yml run --rm csms python -c "
+PASSWORD_HASH=$(docker compose -f docker-compose.yml run --rm csms python -c "
 from passlib.context import CryptContext
 try:
     pwd_context = CryptContext(schemes=['bcrypt'], deprecated='auto')
@@ -22,7 +22,7 @@ if [ -z "$PASSWORD_HASH" ]; then
 fi
 
 # 使用 psql 执行 SQL
-docker compose -f docker-compose.local-prod.yml exec -T db psql -U ocpp_user -d ocpp <<EOF
+docker compose -f docker-compose.yml exec -T db psql -U ocpp_user -d ocpp <<EOF
 DO \$\$
 DECLARE
     tenant_count INTEGER;

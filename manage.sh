@@ -573,24 +573,23 @@ main() {
     echo ""
     ;;
         test-prod)
-            echo -e "${BLUE}本地测试生产环境配置...${NC}"
-            if [ -f "docker-compose.local-prod.yml" ]; then
-                echo -e "${BLUE}使用 docker-compose.local-prod.yml 启动测试环境...${NC}"
-                docker compose -f docker-compose.local-prod.yml down 2>/dev/null || true
-                docker compose -f docker-compose.local-prod.yml up -d --build
+            echo -e "${BLUE}本地测试生产环境配置（与 docker-compose.yml 一致）...${NC}"
+            LOCAL_STACK="docker-compose.yml"
+            if [ -f "$LOCAL_STACK" ]; then
+                docker compose -f "$LOCAL_STACK" down 2>/dev/null || true
+                docker compose -f "$LOCAL_STACK" up -d --build
                 sleep 10
-                docker compose -f docker-compose.local-prod.yml ps
+                docker compose -f "$LOCAL_STACK" ps
                 echo ""
-                echo -e "${GREEN}✓ 测试环境已启动${NC}"
+                echo -e "${GREEN}✓ 本地栈已启动${NC}"
                 echo "服务地址:"
                 echo "  - CSMS: http://localhost:9000"
                 echo "  - Admin: http://localhost:3000"
                 echo ""
-                echo "查看日志: docker compose -f docker-compose.local-prod.yml logs -f"
-                echo "停止: docker compose -f docker-compose.local-prod.yml down"
+                echo "查看日志: docker compose -f $LOCAL_STACK logs -f"
+                echo "停止: docker compose -f $LOCAL_STACK down"
             else
-                echo -e "${YELLOW}⚠️  docker-compose.local-prod.yml 不存在${NC}"
-                echo "使用生产配置进行测试..."
+                echo -e "${YELLOW}⚠️  $LOCAL_STACK 不存在${NC}"
                 docker compose -f "$COMPOSE_FILE" down 2>/dev/null || true
                 docker compose -f "$COMPOSE_FILE" up -d --build
                 sleep 10

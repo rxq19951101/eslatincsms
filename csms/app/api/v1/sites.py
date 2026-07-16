@@ -17,7 +17,10 @@ from app.core.logging_config import get_logger
 from app.core.permissions import get_current_admin_user
 from app.database.base import get_db, tenant_id_context
 from app.database.models import ChargePoint, EVSE, EVSEStatus, Site, Tariff
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+
+# 与站点详情、充电桩列表一致：5 分钟内有 EVSE 心跳视为在线
+ONLINE_THRESHOLD_SECONDS = 300
 from app.core.permissions import has_permission
 from app.services.role_service import MembershipRoleService
 
@@ -140,14 +143,15 @@ def list_sites(
         .group_by(ChargePoint.site_id)
         .subquery()
     )
-    # 统计：每站点的“在线”充电桩数量（近似：存在任一 EVSEStatus 且 status != Unavailable）
+    # 统计：每站点的在线充电桩数量（5 分钟内有 EVSE 心跳）
+    online_threshold = datetime.now(timezone.utc) - timedelta(seconds=ONLINE_THRESHOLD_SECONDS)
     online_cp_sq = (
         db.query(
             ChargePoint.site_id.label("site_id"),
             func.count(func.distinct(ChargePoint.id)).label("online_cp_count"),
         )
         .join(EVSEStatus, EVSEStatus.charge_point_id == ChargePoint.id)
-        .filter(EVSEStatus.status != "Unavailable")
+        .filter(EVSEStatus.last_seen >= online_threshold)
         .group_by(ChargePoint.site_id)
         .subquery()
     )

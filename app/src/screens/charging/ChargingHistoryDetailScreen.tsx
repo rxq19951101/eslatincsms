@@ -3,7 +3,7 @@
  */
 
 import React, { useEffect } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, ScrollView } from 'react-native';
+import { View, Text, StyleSheet, ActivityIndicator, ScrollView } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import type { RouteProp } from '@react-navigation/native';
@@ -11,8 +11,10 @@ import type { StackNavigationProp } from '@react-navigation/stack';
 
 import type { RootStackParamList } from '../../types';
 import { COLORS } from '../../constants/config';
+import { useI18n } from '../../i18n';
 import { useAppDispatch, useAppSelector } from '../../hooks/useRedux';
 import { fetchChargingRecordDetail } from '../../store/slices/transactionsSlice';
+import ScreenHeader from '../../components/ui/ScreenHeader';
 
 type R = RouteProp<RootStackParamList, 'ChargingHistoryDetail'>;
 type Nav = StackNavigationProp<RootStackParamList, 'ChargingHistoryDetail'>;
@@ -27,6 +29,8 @@ function fmtTime(s?: string | null) {
 }
 
 const ChargingHistoryDetailScreen = () => {
+  const { t } = useI18n();
+
   const navigation = useNavigation<Nav>();
   const route = useRoute<R>();
   const { id } = route.params;
@@ -42,22 +46,16 @@ const ChargingHistoryDetailScreen = () => {
 
   return (
     <SafeAreaView style={styles.container}>
-      <View style={styles.header}>
-        <TouchableOpacity style={styles.backBtn} onPress={() => navigation.goBack()}>
-          <Text style={styles.backText}>←</Text>
-        </TouchableOpacity>
-        <Text style={styles.headerTitle}>记录详情</Text>
-        <View style={styles.headerRight} />
-      </View>
+      <ScreenHeader title={t.history.detail} onBack={() => navigation.goBack()} />
 
       {loadingDetail && !d ? (
         <View style={styles.center}>
           <ActivityIndicator size="large" color={COLORS.PRIMARY} />
-          <Text style={styles.centerText}>加载中...</Text>
+          <Text style={styles.centerText}>{t.common.loading}</Text>
         </View>
       ) : !d ? (
         <View style={styles.center}>
-          <Text style={styles.errorText}>{error || '未找到记录'}</Text>
+          <Text style={styles.errorText}>{error || t.history.notFound}</Text>
         </View>
       ) : (
         <ScrollView contentContainerStyle={{ padding: 16, paddingBottom: 24 }}>
@@ -67,18 +65,18 @@ const ChargingHistoryDetailScreen = () => {
           </View>
 
           <View style={styles.card}>
-            <Row label="状态" value={d.status} />
-            <Row label="开始时间" value={fmtTime(d.start_time)} />
-            <Row label="结束时间" value={fmtTime(d.end_time)} />
-            <Row label="充电桩ID" value={d.charge_point_id} />
+            <Row label={t.history.status} value={d.status} />
+            <Row label={t.history.startTime} value={fmtTime(d.start_time)} />
+            <Row label={t.history.endTime} value={fmtTime(d.end_time)} />
+            <Row label={t.history.chargerId} value={d.charge_point_id} />
             <Row label="EVSE" value={String(d.evse_id)} />
             <Row label="TransactionId" value={String(d.transaction_id)} />
           </View>
 
           <View style={styles.card}>
-            <Row label="电量(kWh)" value={typeof d.energy_kwh === 'number' ? d.energy_kwh.toFixed(2) : '—'} />
+            <Row label={t.history.energyKwh} value={typeof d.energy_kwh === 'number' ? d.energy_kwh.toFixed(2) : '—'} />
             <Row
-              label="时长(分钟)"
+              label={t.history.durationMin}
               value={typeof d.duration_minutes === 'number' ? d.duration_minutes.toFixed(1) : '—'}
             />
             {typeof d.meter_start === 'number' && <Row label="MeterStart(Wh)" value={String(d.meter_start)} />}
@@ -99,19 +97,6 @@ const Row = ({ label, value }: { label: string; value: string }) => (
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: COLORS.BACKGROUND },
-  header: {
-    height: 56,
-    backgroundColor: '#FFFFFF',
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: COLORS.BORDER,
-  },
-  backBtn: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
-  backText: { fontSize: 22, color: COLORS.TEXT_PRIMARY },
-  headerTitle: { flex: 1, textAlign: 'center', fontSize: 16, fontWeight: '800', color: COLORS.TEXT_PRIMARY },
-  headerRight: { width: 44 },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   centerText: { marginTop: 10, color: COLORS.TEXT_SECONDARY },
   errorText: { color: COLORS.ERROR, fontWeight: '800' },

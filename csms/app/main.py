@@ -160,11 +160,28 @@ async def lifespan(app: FastAPI):
             # 不阻止应用启动，但离线检测功能不可用
     else:
         logger.info("测试环境：已跳过 Redis 离线检测监听器初始化")
-    
+
     # 保存后台任务引用以便清理
     background_tasks = []
     if not is_test_env and 'offline_listener_task' in locals():
         background_tasks.append(offline_listener_task)
+
+    # 后台监控循环（离线桩检测）
+    if not is_test_env and DATABASE_AVAILABLE:
+        try:
+            from app.services.monitoring_service import MonitoringService
+
+            monitoring_interval = int(os.getenv("MONITORING_INTERVAL_SECONDS", "60"))
+
+            async def _monitoring_worker():
+                svc = MonitoringService(db=None)  # type: ignore[arg-type]
+                await svc.run_monitoring_loop(interval_seconds=monitoring_interval)
+
+            monitoring_task = asyncio.create_task(_monitoring_worker())
+            background_tasks.append(monitoring_task)
+            logger.info("MonitoringService 后台任务已启动 (interval=%ss)", monitoring_interval)
+        except Exception as e:
+            logger.error("MonitoringService 启动失败: %s", e, exc_info=True)
     
     yield
     
@@ -195,18 +212,29 @@ app = FastAPI(
 
 # 添加请求日志中间件
 try:
-    from app.core.middleware import LoggingMiddleware
+    from app.core.middleware import LoggingMiddleware, SecurityHeadersMiddleware, RateLimitMiddleware
+    from app.core.config import get_settings as _get_settings
+    _settings = _get_settings()
+    if _settings.rate_limit_enabled:
+        app.add_middleware(RateLimitMiddleware, requests_per_minute=_settings.rate_limit_per_minute)
+    app.add_middleware(SecurityHeadersMiddleware)
     app.add_middleware(LoggingMiddleware)
-    logger.info("请求日志中间件已启用")
+    logger.info("请求日志、安全头与限流中间件已启用")
 except ImportError:
     logger.warning("无法导入日志中间件，跳过")
+
+try:
+    from app.core.logging_config import setup_logging
+    setup_logging()
+except Exception:
+    pass
 
 # 添加认证中间件（从token中提取用户信息）
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
     """认证中间件：从JWT token中提取用户信息"""
     # 跳过非业务路径
-    if request.url.path.startswith(("/health", "/docs", "/redoc", "/openapi.json")):
+    if request.url.path.startswith(("/health", "/metrics", "/docs", "/redoc", "/openapi.json")):
         return await call_next(request)
     
     # 从请求中提取token
@@ -237,10 +265,11 @@ try:
 except ImportError as e:
     logger.warning(f"无法导入租户中间件: {e}")
 
-# CORS 配置：开发环境允许所有来源，生产环境限制具体域名
-cors_origins_env = os.getenv(
-    "CORS_ALLOW_ORIGINS",
-    "http://localhost:3000,http://127.0.0.1:3000,http://localhost:3001,http://127.0.0.1:3001",
+# CORS 配置：支持 CORS_ALLOW_ORIGINS 与 CORS_ORIGINS 两种环境变量名
+cors_origins_env = os.getenv("CORS_ALLOW_ORIGINS") or os.getenv(
+    "CORS_ORIGINS",
+    "http://localhost:3000,http://127.0.0.1:3000,http://localhost:3001,http://127.0.0.1:3001,"
+    "http://localhost:8081,http://127.0.0.1:8081,http://localhost:19006,http://127.0.0.1:19006",
 )
 # 如果环境变量包含 "*"，则允许所有来源（仅开发环境）
 if cors_origins_env.strip() == "*":
@@ -267,6 +296,15 @@ try:
     logger.info(f"二维码静态文件服务已挂载: /static/qr -> {qr_storage_dir}")
 except Exception as e:
     logger.warning(f"无法挂载二维码静态文件服务: {e}")
+
+# 法律文档（App Store Connect 隐私政策 / 用户协议 URL）
+try:
+    legal_dir = Path(__file__).resolve().parent.parent / "static" / "legal"
+    legal_dir.mkdir(parents=True, exist_ok=True)
+    app.mount("/legal", StaticFiles(directory=str(legal_dir), html=True), name="legal")
+    logger.info(f"法律文档静态服务已挂载: /legal -> {legal_dir}")
+except Exception as e:
+    logger.warning(f"无法挂载法律文档静态服务: {e}")
 
 
 # ---- Redis Client ----
@@ -952,16 +990,55 @@ def update_active(
 class HealthResponse(BaseModel):
     ok: bool
     ts: str
+    database: Optional[str] = None
+    redis: Optional[str] = None
+    mqtt: Optional[str] = None
 
 
 @app.get("/health", response_model=HealthResponse, tags=["REST"])
 def health() -> HealthResponse:
-    """
-    Health check endpoint.
-    Returns: {"ok": true, "ts": "ISO timestamp"}
-    """
-    logger.debug("[API] GET /health | 健康检查")
-    return HealthResponse(ok=True, ts=now_iso())
+    """健康检查（含依赖探测）。"""
+    db_status = "unknown"
+    redis_status = "unknown"
+    mqtt_status = "skipped"
+
+    if DATABASE_AVAILABLE:
+        try:
+            from app.database.base import check_db_health
+            db_status = "ok" if check_db_health(max_retries=1, retry_delay=0.5) else "error"
+        except Exception:
+            db_status = "error"
+
+    try:
+        redis_client.ping()
+        redis_status = "ok"
+    except Exception:
+        redis_status = "error"
+
+    if MQTT_AVAILABLE and os.getenv("ENABLE_MQTT_TRANSPORT", "false").lower() in ("true", "1", "yes"):
+        mqtt_status = "configured"
+
+    ok = db_status != "error" and redis_status != "error"
+    return HealthResponse(
+        ok=ok,
+        ts=now_iso(),
+        database=db_status,
+        redis=redis_status,
+        mqtt=mqtt_status,
+    )
+
+
+@app.get("/metrics", tags=["REST"])
+def metrics():
+    """Prometheus 指标（ENABLE_METRICS=true 时可用）。"""
+    if os.getenv("ENABLE_METRICS", "false").lower() not in ("true", "1", "yes"):
+        raise HTTPException(status_code=404, detail="Metrics disabled")
+    try:
+        from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+        from starlette.responses import Response
+        return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+    except ImportError:
+        raise HTTPException(status_code=503, detail="prometheus_client not installed")
 
 
 @app.get("/api/ocpp/supported", tags=["REST"])
@@ -1072,19 +1149,32 @@ async def ocpp_ws_with_path(ws: WebSocket, charge_point_id_path: str):
     """
     WebSocket OCPP端点（路径参数版本，兼容某些厂家使用 /ocpp/{id} 的方式）
     例如: ws://server:port/ocpp/635310462
-    这个端点会将路径参数作为charge_point_id处理，然后调用标准的ocpp_ws逻辑
     """
-    # 使用路径参数作为charge_point_id，调用标准处理逻辑
-    # 由于WebSocket连接需要在这个函数内处理，我们需要复制连接逻辑
+    from app.core.ocpp_auth import (
+        is_pre_registration_required,
+        verify_charge_point_pre_registered,
+        verify_ocpp_api_key,
+    )
+
     requested_proto = (ws.headers.get("sec-websocket-protocol") or "").strip()
     requested = [p.strip() for p in requested_proto.split(",") if p.strip()]
     if "ocpp1.6" not in requested:
         await ws.close(code=1002)
         return
-    await ws.accept(subprotocol="ocpp1.6")
-    
-    # 使用路径参数作为charge_point_id
+
     charge_point_id = charge_point_id_path
+    if is_pre_registration_required():
+        if not DATABASE_AVAILABLE:
+            await ws.close(code=1011)
+            return
+        if not verify_charge_point_pre_registered(charge_point_id):
+            await ws.close(code=1008)
+            return
+    if not verify_ocpp_api_key(dict(ws.headers)):
+        await ws.close(code=1008)
+        return
+
+    await ws.accept(subprotocol="ocpp1.6")
     charger_websockets[charge_point_id] = ws
     
     # 注册到适配器和connection_manager
@@ -1381,33 +1471,19 @@ async def ocpp_ws(ws: WebSocket, id: str = Query(..., description="Charge Point 
     # 默认开启（可通过环境变量关闭，便于本地调试/回归旧行为）。
     require_pre_registered = os.getenv("OCPP_WS_REQUIRE_PRE_REGISTERED", "true").lower() in ("true", "1", "yes")
     if require_pre_registered:
-        # 后端 BootNotification 处理会对首次 charge_point_id 做“只保留字母数字”的清洗；
-        # 为避免连接 ID 与系统记录不一致，这里直接要求连接参数本身必须是字母数字。
-        if not id or not id.isalnum():
+        from app.core.ocpp_auth import verify_charge_point_pre_registered
+
+        if not DATABASE_AVAILABLE:
+            await ws.close(code=1011)
+            return
+        if not verify_charge_point_pre_registered(id):
             await ws.close(code=1008)
             return
-        if not DATABASE_AVAILABLE:
-            # 没有数据库就无法验证预注册，严格模式直接拒绝
-            await ws.close(code=1011)
-            return
-        try:
-            from app.database.base import SessionLocal
-            from app.database.models import ChargePoint
 
-            db = SessionLocal()
-            try:
-                exists = db.query(ChargePoint.id).filter(ChargePoint.id == id).first() is not None
-            finally:
-                db.close()
-
-            if not exists:
-                # 未预注册：拒绝连接
-                await ws.close(code=1008)
-                return
-        except Exception as e:
-            logger.error(f"[{id}] 预注册校验失败: {e}", exc_info=True)
-            await ws.close(code=1011)
-            return
+    from app.core.ocpp_auth import verify_ocpp_api_key
+    if not verify_ocpp_api_key(dict(ws.headers)):
+        await ws.close(code=1008)
+        return
 
     await ws.accept(subprotocol="ocpp1.6")
     
@@ -1534,6 +1610,9 @@ try:
         
         from app.api.v1.admin.statistics import router as admin_statistics_router
         logger.info("✓ statistics路由导入成功")
+
+        from app.api.v1.admin.app_users import router as app_users_router
+        logger.info("✓ app_users路由导入成功")
         
         # 导入end-users.py（文件名有连字符，需要特殊处理）
         current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -1587,6 +1666,13 @@ try:
                 prefix="/api/v1/admin/end-users",
                 tags=["终端用户管理"]
             )
+
+        # App 平台用户（钱包调账）
+        app.include_router(
+            app_users_router,
+            prefix="/api/v1/admin/app-users",
+            tags=["App用户管理"],
+        )
         
         # 角色权限管理路由
         app.include_router(

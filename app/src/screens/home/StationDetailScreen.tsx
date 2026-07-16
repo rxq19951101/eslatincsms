@@ -23,17 +23,22 @@ import type { RouteProp } from '@react-navigation/native';
 import type { StackNavigationProp } from '@react-navigation/stack';
 
 import { COLORS, IOS_STYLES } from '../../constants/config';
+import { useI18n } from '../../i18n';
 import type { RootStackParamList } from '../../types';
 import { useAppDispatch, useAppSelector } from '../../hooks/useRedux';
 import { fetchChargerById } from '../../store/slices/chargerSlice';
 import GoogleMapView from '../../components/GoogleMapView';
 import Icon from '../../components/ui/Icon';
 import Button from '../../components/ui/Button';
+import ScreenHeader from '../../components/ui/ScreenHeader';
+import Badge, { BadgeVariant } from '../../components/ui/Badge';
 
 type StationDetailRouteProp = RouteProp<RootStackParamList, 'StationDetail'>;
 type StationDetailNavProp = StackNavigationProp<RootStackParamList, 'StationDetail'>;
 
 const StationDetailScreen = () => {
+  const { t } = useI18n();
+
   const dispatch = useAppDispatch();
   const navigation = useNavigation<StationDetailNavProp>();
   const route = useRoute<StationDetailRouteProp>();
@@ -57,13 +62,13 @@ const StationDetailScreen = () => {
   const charger = selectedCharger && selectedCharger.id === chargePointId ? selectedCharger : null;
 
   const isAvailable = (charger?.available_connectors || 0) > 0;
-  const statusColor = !charger
-    ? COLORS.TEXT_SECONDARY
+  const statusVariant: BadgeVariant = !charger
+    ? 'neutral'
     : charger.status === 'Offline'
-    ? COLORS.ERROR
+    ? 'error'
     : isAvailable
-    ? COLORS.SUCCESS
-    : COLORS.WARNING;
+    ? 'success'
+    : 'warning';
 
   const availableConnectorId = useMemo(() => {
     const connectors = charger?.connectors;
@@ -75,7 +80,7 @@ const StationDetailScreen = () => {
 
   const handleNavigate = async () => {
     if (!charger?.latitude || !charger?.longitude) {
-      Alert.alert('无法导航', '该站点缺少经纬度信息');
+      Alert.alert(t.station.navUnavailable, t.station.navNoCoords);
       return;
     }
     const lat = charger.latitude;
@@ -109,14 +114,7 @@ const StationDetailScreen = () => {
     <SafeAreaView style={styles.container}>
       <StatusBar barStyle="dark-content" />
 
-      {/* Header */}
-      <View style={styles.header}>
-        <TouchableOpacity style={styles.backButton} onPress={() => navigation.goBack()}>
-          <Icon name="arrow-back" library="Ionicons" size={24} color={COLORS.TEXT_PRIMARY} />
-        </TouchableOpacity>
-        <Text style={styles.headerTitle}>充电站详情</Text>
-        <View style={styles.headerRight} />
-      </View>
+      <ScreenHeader title={t.station.title} onBack={() => navigation.goBack()} />
 
       <ScrollView
         style={styles.content}
@@ -127,17 +125,17 @@ const StationDetailScreen = () => {
         {loading && !charger && (
           <View style={styles.loadingContainer}>
             <ActivityIndicator size="large" color={COLORS.PRIMARY} />
-            <Text style={styles.loadingText}>加载中...</Text>
+            <Text style={styles.loadingText}>{t.station.loading}</Text>
           </View>
         )}
 
         {/* Error */}
         {!!error && !charger && (
           <View style={styles.errorContainer}>
-            <Text style={styles.errorTitle}>加载失败</Text>
+            <Text style={styles.errorTitle}>{t.station.loadFailed}</Text>
             <Text style={styles.errorText}>{error}</Text>
             <TouchableOpacity style={styles.retryButton} onPress={loadDetail}>
-              <Text style={styles.retryText}>重试</Text>
+              <Text style={styles.retryText}>{t.common.retry}</Text>
             </TouchableOpacity>
           </View>
         )}
@@ -146,9 +144,9 @@ const StationDetailScreen = () => {
         {!loading && !error && !charger && (
           <View style={styles.emptyContainer}>
             <Icon name="search" library="Ionicons" size={56} color={COLORS.TEXT_SECONDARY} />
-            <Text style={styles.emptyTitle}>未找到充电站</Text>
-            <Text style={styles.emptyText}>该充电站可能已被删除或暂无权限查看。</Text>
-            <Button title="重新加载" onPress={loadDetail} variant="primary" size="medium" />
+            <Text style={styles.emptyTitle}>{t.station.notFound}</Text>
+            <Text style={styles.emptyText}>{t.station.notFoundHint}</Text>
+            <Button title={t.station.reload} onPress={loadDetail} variant="primary" size="medium" />
           </View>
         )}
 
@@ -160,34 +158,32 @@ const StationDetailScreen = () => {
               <View style={styles.titleRow}>
                 <View style={styles.titleLeft}>
                   <Text style={styles.title}>
-                    {charger.site_name || `充电站 ${charger.id}`}
+                    {charger.site_name || t.home.stationFallback.replace('{id}', String(charger.id))}
                   </Text>
-                  <Text style={styles.subTitle}>{charger.site_address || '地址未知'}</Text>
+                  <Text style={styles.subTitle}>{charger.site_address || t.home.addressUnknown}</Text>
                 </View>
-                <View style={[styles.statusBadge, { backgroundColor: statusColor }]}>
-                  <Text style={styles.statusText}>{charger.status}</Text>
-                </View>
+                <Badge label={charger.status} variant={statusVariant} />
               </View>
 
               <View style={styles.metricsRow}>
                 <View style={styles.metricItem}>
-                  <Text style={styles.metricLabel}>可用接口</Text>
+                  <Text style={styles.metricLabel}>{t.station.connectors}</Text>
                   <Text style={styles.metricValue}>
                     {charger.available_connectors || 0}/{charger.total_connectors || 0}
                   </Text>
                 </View>
                 <View style={styles.metricItem}>
-                  <Text style={styles.metricLabel}>电价</Text>
+                  <Text style={styles.metricLabel}>{t.station.price}</Text>
                   <Text style={styles.metricValue}>
                     {typeof charger.price_per_kwh === 'number'
                       ? `$${charger.price_per_kwh.toFixed(2)}/kWh`
-                      : '暂无'}
+                      : t.common.na}
                   </Text>
                 </View>
                 <View style={styles.metricItem}>
-                  <Text style={styles.metricLabel}>评分</Text>
+                  <Text style={styles.metricLabel}>{t.station.rating}</Text>
                   <Text style={styles.metricValue}>
-                    {typeof (charger as any).rating === 'number' ? (charger as any).rating.toFixed(1) : '暂无'}
+                    {typeof (charger as any).rating === 'number' ? (charger as any).rating.toFixed(1) : t.common.na}
                   </Text>
                 </View>
               </View>
@@ -196,7 +192,7 @@ const StationDetailScreen = () => {
             {/* 地图（仅 iOS/Android，展示站点位置） */}
             {Platform.OS !== 'web' && typeof charger.latitude === 'number' && typeof charger.longitude === 'number' && (
               <View style={styles.card}>
-                <Text style={styles.sectionTitle}>位置</Text>
+                <Text style={styles.sectionTitle}>{t.station.location}</Text>
                 <View style={styles.mapWrap}>
                   <GoogleMapView
                     style={styles.map}
@@ -207,7 +203,7 @@ const StationDetailScreen = () => {
                         id: charger.id,
                         latitude: charger.latitude,
                         longitude: charger.longitude,
-                        title: charger.site_name || `充电站 ${charger.id}`,
+                        title: charger.site_name || t.home.stationFallback.replace('{id}', String(charger.id)),
                         description: charger.site_address || '',
                         status: charger.status,
                         available: charger.available_connectors,
@@ -221,36 +217,34 @@ const StationDetailScreen = () => {
 
             {/* 连接器列表 */}
             <View style={styles.card}>
-              <Text style={styles.sectionTitle}>充电器/接口</Text>
+              <Text style={styles.sectionTitle}>{t.station.connectorsTitle}</Text>
               {Array.isArray(charger.connectors) && charger.connectors.length > 0 ? (
                 charger.connectors.map((c) => {
                   const st = c.status || 'Unknown';
-                  const stColor =
+                  const stVariant: BadgeVariant =
                     st === 'Available'
-                      ? COLORS.SUCCESS
+                      ? 'success'
                       : st === 'Charging'
-                      ? COLORS.WARNING
+                      ? 'warning'
                       : st === 'Offline' || st === 'Faulted'
-                      ? COLORS.ERROR
-                      : COLORS.TEXT_SECONDARY;
+                      ? 'error'
+                      : 'neutral';
                   return (
                     <View key={String(c.id)} style={styles.connectorRow}>
                       <View style={styles.connectorLeft}>
-                        <Text style={styles.connectorName}>接口 #{c.connector_id ?? c.id}</Text>
+                        <Text style={styles.connectorName}>{t.station.connector.replace('{id}', String(c.connector_id ?? c.id))}</Text>
                         <Text style={styles.connectorMeta}>
                           {c.connector_type ? `${c.connector_type} · ` : ''}
-                          {typeof c.power_kw === 'number' ? `${c.power_kw} kW` : '功率未知'}
+                          {typeof c.power_kw === 'number' ? `${c.power_kw} kW` : t.station.powerUnknown}
                         </Text>
                       </View>
-                      <View style={[styles.connectorStatus, { backgroundColor: stColor }]}>
-                        <Text style={styles.connectorStatusText}>{st}</Text>
-                      </View>
+                      <Badge label={st} variant={stVariant} />
                     </View>
                   );
                 })
               ) : (
                 <View style={styles.emptyBlock}>
-                  <Text style={styles.emptyBlockText}>暂无接口数据</Text>
+                  <Text style={styles.emptyBlockText}>{t.station.noConnectors}</Text>
                 </View>
               )}
             </View>
@@ -261,7 +255,7 @@ const StationDetailScreen = () => {
       {/* Bottom actions */}
       <View style={styles.bottomBar}>
         <Button
-          title="导航"
+          title={t.station.navigate}
           onPress={handleNavigate}
           variant="secondary"
           size="large"
@@ -269,7 +263,7 @@ const StationDetailScreen = () => {
           style={{ flex: 1, marginRight: 10 }}
         />
         <Button
-          title={isAvailable ? '开始充电' : '暂无可用接口'}
+          title={isAvailable ? t.station.startCharge : t.station.noAvailable}
           onPress={handleStartCharging}
           variant="primary"
           size="large"
@@ -284,19 +278,6 @@ const StationDetailScreen = () => {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: COLORS.BACKGROUND },
-  header: {
-    height: 56,
-    backgroundColor: '#FFFFFF',
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: COLORS.BORDER,
-  },
-  backButton: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
-  headerTitle: { flex: 1, textAlign: 'center', fontSize: 16, fontWeight: '700', color: COLORS.TEXT_PRIMARY },
-  headerRight: { width: 44 },
-
   content: { flex: 1, padding: 16 },
 
   loadingContainer: { paddingVertical: 40, alignItems: 'center' },
@@ -305,6 +286,13 @@ const styles = StyleSheet.create({
   errorContainer: { paddingVertical: 24, alignItems: 'center' },
   errorTitle: { fontSize: 16, fontWeight: '700', color: COLORS.ERROR, marginBottom: 8 },
   errorText: { color: COLORS.TEXT_SECONDARY, textAlign: 'center', marginBottom: 16 },
+  retryButton: {
+    backgroundColor: COLORS.PRIMARY,
+    paddingHorizontal: 20,
+    paddingVertical: 10,
+    borderRadius: IOS_STYLES.RADIUS.MEDIUM,
+  },
+  retryText: { color: COLORS.IOS_WHITE, fontWeight: '700' },
 
   emptyContainer: { paddingVertical: 32, alignItems: 'center', gap: IOS_STYLES.SPACING.MD },
   emptyTitle: { fontSize: 16, fontWeight: '700', color: COLORS.TEXT_PRIMARY, marginBottom: 6 },
@@ -323,8 +311,6 @@ const styles = StyleSheet.create({
   titleLeft: { flex: 1, paddingRight: 12 },
   title: { fontSize: 18, fontWeight: '800', color: COLORS.TEXT_PRIMARY, marginBottom: 6 },
   subTitle: { color: COLORS.TEXT_SECONDARY, lineHeight: 20 },
-  statusBadge: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 12 },
-  statusText: { color: '#FFFFFF', fontWeight: '700', fontSize: 12 },
 
   metricsRow: { flexDirection: 'row', marginTop: 14 },
   metricItem: { flex: 1 },
@@ -343,8 +329,6 @@ const styles = StyleSheet.create({
   connectorLeft: { flex: 1, paddingRight: 12 },
   connectorName: { fontWeight: '700', color: COLORS.TEXT_PRIMARY },
   connectorMeta: { marginTop: 4, color: COLORS.TEXT_SECONDARY, fontSize: 12 },
-  connectorStatus: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 12 },
-  connectorStatusText: { color: '#FFFFFF', fontWeight: '700', fontSize: 12 },
   emptyBlock: { paddingVertical: 16, alignItems: 'center' },
   emptyBlockText: { color: COLORS.TEXT_SECONDARY },
 

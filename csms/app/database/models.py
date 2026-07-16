@@ -8,7 +8,7 @@ from sqlalchemy import (
     Column, Integer, String, Float, Boolean, 
     DateTime, Text, ForeignKey, JSON, Index, Numeric, UniqueConstraint
 )
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import relationship
 import uuid
 from app.database.base import Base
@@ -232,6 +232,11 @@ class ChargingSession(Base):
     
     # 状态
     status = Column(String(50), default="ongoing")  # ongoing, completed, cancelled
+    
+    # 支付相关
+    payment_status = Column(String(50), nullable=True, default="pending")  # pending, paid, unpaid
+    payment_order_id = Column(UUID(as_uuid=True), ForeignKey("payment_orders.id"), nullable=True, index=True)
+    payment_deadline_at = Column(DateTime(timezone=True), nullable=True)  # 支付截止时间
     
     # 元数据
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
@@ -592,6 +597,103 @@ class QrToken(Base):
     )
 
 
+# ==================== 支付层（Wompi）====================
+
+class PaymentOrder(Base):
+    """支付订单表（支持 Wompi 和 Mercado Pago）
+    
+    订单金额和币种一旦创建就不可变，用于防止串单/篡改
+    """
+    __tablename__ = "payment_orders"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    app_user_id = Column(UUID(as_uuid=True), ForeignKey("app_users.id", ondelete="CASCADE"), nullable=False, index=True)
+    
+    # 订单信息（不可变）
+    type = Column(String(50), nullable=False)  # top_up 或 charging
+    amount = Column(Numeric(10, 2), nullable=False)  # 不可变，创建后禁止修改
+    currency = Column(String(3), nullable=False, default="COP")  # 不可变，创建后禁止修改
+    
+    # 支付提供商
+    payment_provider = Column(String(50), nullable=False, default="wompi", index=True)  # 'wompi' 或 'mercadopago'
+    
+    # Wompi 相关（保留用于兼容）
+    reference = Column(String(128), nullable=True, unique=True, index=True)  # 唯一参考号，格式：ESL-YYYYMMDD-{6位随机字符}
+    integrity_signature = Column(String(512), nullable=True)  # 完整性签名
+    wompi_transaction_id = Column(String(255), nullable=True, index=True)  # Wompi 交易ID
+    
+    # Mercado Pago 相关
+    external_reference = Column(String(128), nullable=True, unique=True, index=True)  # Mercado Pago 外部参考号
+    mercadopago_payment_id = Column(String(255), nullable=True, index=True)  # Mercado Pago payment.id
+    
+    # 状态（只能向终态推进，不允许回退）
+    status = Column(String(50), nullable=False, default="created")  # created, processing, approved, declined, voided, error, expired, refunded
+    
+    # URL 和时间
+    redirect_url = Column(Text, nullable=True)
+    expires_at = Column(DateTime(timezone=True), nullable=False)  # 订单过期时间（必须设置）
+    payment_deadline_at = Column(DateTime(timezone=True), nullable=True)  # 支付截止时间（充电支付场景）
+    
+    # 元数据（JSONB）
+    order_metadata = Column("metadata", JSONB, nullable=True)  # 存储额外信息，如充电 session_id、charge_point_id、site_id（映射到数据库的metadata字段）
+    
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False, index=True)
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    paid_at = Column(DateTime(timezone=True), nullable=True)  # 支付完成时间
+    
+    app_user = relationship("AppUser", backref="payment_orders")
+    charging_sessions = relationship("ChargingSession", backref="payment_order")
+    
+    __table_args__ = (
+        Index("idx_payment_orders_user", "app_user_id", "created_at"),
+        Index("idx_payment_orders_status", "status"),
+        Index("idx_payment_orders_type", "type"),
+        Index("idx_payment_orders_provider", "payment_provider"),
+    )
+
+
+class PaymentWebhookEvent(Base):
+    """Webhook 事件记录表（用于幂等性控制）
+    
+    确保同一个 transaction_id + event_id 只处理一次
+    支持 Wompi 和 Mercado Pago
+    """
+    __tablename__ = "payment_webhook_events"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    payment_order_id = Column(UUID(as_uuid=True), ForeignKey("payment_orders.id", ondelete="CASCADE"), nullable=False, index=True)
+    
+    # 支付提供商
+    payment_provider = Column(String(50), nullable=False, index=True)  # 'wompi' 或 'mercadopago'
+    
+    # Wompi 相关（保留用于兼容）
+    wompi_transaction_id = Column(String(255), nullable=True, index=True)
+    wompi_event_id = Column(String(255), nullable=True)  # Wompi 事件ID
+    
+    # 通用字段（用于 Mercado Pago 和其他提供商）
+    payment_provider_id = Column(String(255), nullable=True, index=True)  # 通用支付提供商 ID（如 MP 的 payment.id）
+    event_id = Column(String(255), nullable=True)  # 通用事件 ID（如 MP 的 notification.id）
+    
+    event_type = Column(String(100), nullable=True)  # transaction.updated, payment.created, payment.updated 等
+    
+    payload = Column(JSONB, nullable=True)  # 存储原始 webhook 数据
+    
+    processed = Column(Boolean, nullable=False, default=False)  # 是否已处理
+    processed_at = Column(DateTime(timezone=True), nullable=True)  # 处理时间
+    
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False, index=True)
+    
+    payment_order = relationship("PaymentOrder", backref="webhook_events")
+    
+    __table_args__ = (
+        UniqueConstraint("wompi_transaction_id", "wompi_event_id", name="unique_webhook_event_wompi"),
+        UniqueConstraint("payment_provider", "payment_provider_id", "event_id", name="unique_webhook_event_generic"),
+        Index("idx_webhook_events_order", "payment_order_id"),
+        Index("idx_webhook_events_processed", "processed"),
+        Index("idx_webhook_events_provider", "payment_provider"),
+    )
+
+
 # ==================== 事件和日志层 ====================
 
 class DeviceEvent(Base):
@@ -837,8 +939,13 @@ class AppUser(Base):
 
     password_hash = Column(String(255), nullable=False)
     email_verified = Column(Boolean, default=False)
+    email_verification_code_hash = Column(String(64), nullable=True)
+    email_verification_token_hash = Column(String(64), nullable=True)
+    email_verification_expires_at = Column(DateTime(timezone=True), nullable=True)
+    email_verification_sent_at = Column(DateTime(timezone=True), nullable=True)
 
     balance = Column(Numeric(10, 2), nullable=False, default=0)
+    has_unpaid_charges = Column(Boolean, default=False, nullable=False)
     status = Column(String(50), nullable=False, default="active")  # active, suspended, deleted
     last_login_at = Column(DateTime(timezone=True), nullable=True)
 
@@ -848,6 +955,29 @@ class AppUser(Base):
     __table_args__ = (
         Index("idx_app_users_email", "email"),
         Index("idx_app_users_phone", "phone"),
+    )
+
+
+class AppUserPaymentMethod(Base):
+    """终端用户保存的支付方式（Mercado Pago Customers/Cards 等回填；当前可为空表）"""
+
+    __tablename__ = "app_user_payment_methods"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    app_user_id = Column(UUID(as_uuid=True), ForeignKey("app_users.id", ondelete="CASCADE"), nullable=False, index=True)
+
+    provider = Column(String(32), nullable=False)  # mercadopago | wompi | ...
+    mp_customer_id = Column(String(128), nullable=True)
+    mp_card_id = Column(String(128), nullable=True)
+    payment_method_brand = Column(String(64), nullable=True)
+    last_four = Column(String(4), nullable=True)
+    is_default = Column(Boolean, nullable=False, default=False)
+
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        Index("idx_app_user_payment_methods_user", "app_user_id"),
     )
 
 

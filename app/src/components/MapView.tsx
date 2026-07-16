@@ -6,6 +6,7 @@
 import React, { useRef, useEffect } from 'react';
 import { View, StyleSheet, Platform, Text } from 'react-native';
 import { MAP_CONFIG } from '../constants/config';
+import { useI18n } from '../i18n';
 
 // 仅在非Web平台导入Mapbox GL
 let MapboxGL: any = null;
@@ -32,6 +33,7 @@ const CustomMapView: React.FC<MapViewProps> = ({
   onRegionDidChange,
   style,
 }) => {
+  const { t } = useI18n();
   const mapRef = useRef<any>(null);
   const cameraRef = useRef<any>(null);
 
@@ -48,10 +50,7 @@ const CustomMapView: React.FC<MapViewProps> = ({
       <View style={[styles.webFallback, style]}>
         <View style={styles.webPlaceholder}>
           <Text style={styles.webText}>🗺️</Text>
-          <Text style={styles.webSubtext}>
-            地图功能在Web上显示受限{'\n'}
-            请在移动设备上查看完整地图功能
-          </Text>
+          <Text style={styles.webSubtext}>{t.home.mapWebLimited}</Text>
         </View>
         {children}
       </View>

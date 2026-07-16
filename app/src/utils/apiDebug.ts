@@ -35,7 +35,7 @@ export const debugAPIConnection = async () => {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        email: 'test@eslatin.com',
+        email: 'test@eslatin.com.co',
         password: 'Test123456',
         tenant_id: DEFAULT_TENANT_ID,
       }),

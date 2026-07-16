@@ -11,26 +11,30 @@ import {
   View,
   Text,
   StyleSheet,
-  TouchableOpacity,
   ActivityIndicator,
   ScrollView,
+  Alert,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import type { RouteProp } from '@react-navigation/native';
 import type { StackNavigationProp } from '@react-navigation/stack';
 
-import { COLORS, IOS_STYLES } from '../../constants/config';
+import { COLORS, IOS_STYLES, PAYMENT_RAILS_ENABLED, MIN_BALANCE_COP } from '../../constants/config';
+import { useI18n } from '../../i18n';
 import Icon from '../../components/ui/Icon';
 import Button from '../../components/ui/Button';
 import Card from '../../components/ui/Card';
 import LoadingSpinner from '../../components/ui/LoadingSpinner';
 import CircularProgress from '../../components/ui/CircularProgress';
 import Skeleton from '../../components/ui/Skeleton';
+import ScreenHeader from '../../components/ui/ScreenHeader';
 import type { RootStackParamList } from '../../types';
 import { useAppDispatch, useAppSelector } from '../../hooks/useRedux';
 import { fetchActiveSession, fetchMeterValuePoints, setChargingTarget, startCharging, stopChargingSession } from '../../store/slices/chargingSlice';
 import { checkChargerStatus, type ChargerStatusCheck } from '../../api/charging';
+import { PaymentMethodBar } from '../../components/payment/PaymentMethodBar';
+import { fetchWalletBalance } from '../../store/slices/walletSlice';
 
 type R = RouteProp<RootStackParamList, 'ChargingProcess'>;
 type Nav = StackNavigationProp<RootStackParamList, 'ChargingProcess'>;
@@ -38,6 +42,8 @@ type Nav = StackNavigationProp<RootStackParamList, 'ChargingProcess'>;
 type ChargerStatus = 'checking' | 'offline' | 'charging_other' | 'charging_self' | 'available';
 
 const ChargingProcessScreen = () => {
+  const { t } = useI18n();
+
   const route = useRoute<R>();
   const navigation = useNavigation<Nav>();
   const dispatch = useAppDispatch();
@@ -46,6 +52,7 @@ const ChargingProcessScreen = () => {
   const { starting, stopping, loadingActive, activeSession, error, lastRemoteResult, meterValues, lastMeterId, loadingMeter, meterError } = useAppSelector(
     (s) => s.charging
   );
+  const { balance: walletBalanceSlice, loadingBalance } = useAppSelector((s) => s.wallet);
 
   const [chargerStatus, setChargerStatus] = useState<ChargerStatus>('checking');
   const [statusCheckData, setStatusCheckData] = useState<ChargerStatusCheck | null>(null);
@@ -54,6 +61,15 @@ const ChargingProcessScreen = () => {
   const [hasEverActive, setHasEverActive] = useState(false);
   const [userConfirmedStart, setUserConfirmedStart] = useState(false);
   const [isInitialLoad, setIsInitialLoad] = useState(true);
+
+  const latestPoint = useMemo(() => {
+    if (!meterValues || meterValues.length === 0) return null;
+    return meterValues[meterValues.length - 1];
+  }, [meterValues]);
+
+  useEffect(() => {
+    dispatch(fetchWalletBalance());
+  }, [dispatch]);
 
   // 页面加载时先检查充电桩状态
   useEffect(() => {
@@ -81,11 +97,11 @@ const ChargingProcessScreen = () => {
       } catch (e: any) {
         console.error('检查充电桩状态失败:', e);
         // 提取更详细的错误信息
-        let errorMsg = '检查充电桩状态失败';
+        let errorMsg = t.chargingUi.checkFailed;
         if (e?.response?.status === 404) {
-          errorMsg = '充电桩不存在或二维码无效';
+          errorMsg = t.chargingUi.notFoundOrQr;
         } else if (e?.response?.status === 400) {
-          errorMsg = e?.response?.data?.detail || '二维码无效';
+          errorMsg = e?.response?.data?.detail || t.chargingUi.invalidQr;
         } else if (e?.response?.data?.detail) {
           errorMsg = e.response.data.detail;
         } else if (e?.message) {
@@ -107,14 +123,25 @@ const ChargingProcessScreen = () => {
     }
   }, [chargerStatus, qrToken, dispatch]);
 
-  // 用户确认开始充电后，发送启动请求
+  // 用户确认开始充电后，发送启动请求（成功才进入 charging_self）
   useEffect(() => {
-    if (chargerStatus === 'available' && userConfirmedStart && !starting) {
-      dispatch(startCharging({ qrToken }));
-      // 启动后切换状态为充电中，等待会话创建
-      setChargerStatus('charging_self');
-      setUserConfirmedStart(false);
-    }
+    if (chargerStatus !== 'available' || !userConfirmedStart || starting) return;
+
+    let cancelled = false;
+    (async () => {
+      try {
+        await dispatch(startCharging({ qrToken })).unwrap();
+        if (!cancelled) setChargerStatus('charging_self');
+      } catch {
+        // 保持 available，错误写入 slice.error
+      } finally {
+        if (!cancelled) setUserConfirmedStart(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
   }, [chargerStatus, userConfirmedStart, starting, qrToken, dispatch]);
 
   useEffect(() => {
@@ -172,11 +199,6 @@ const ChargingProcessScreen = () => {
     }
   }, [activeSession?.start_time]);
 
-  const latestPoint = useMemo(() => {
-    if (!meterValues || meterValues.length === 0) return null;
-    return meterValues[meterValues.length - 1];
-  }, [meterValues]);
-
   const sessionEnergyKwh = useMemo(() => {
     if (!activeSession || !latestPoint) return null;
     const meterStart = (activeSession as any).meter_start;
@@ -193,21 +215,41 @@ const ChargingProcessScreen = () => {
       const startTime = new Date(activeSession.start_time).getTime();
       const now = Date.now();
       const minutes = Math.max(0, Math.round((now - startTime) / 1000 / 60));
-      return `已充电 ${minutes} 分钟`;
+      return t.chargingUi.minutesCharged.replace('{n}', String(minutes));
     } catch {
       return '';
     }
   }, [activeSession?.start_time]);
 
   const canStop = !!activeSession && !stopRequested && chargerStatus === 'charging_self';
+  const showRetryStart = chargerStatus === 'available' && !starting && !stopRequested;
+  const showWaitingSession =
+    chargerStatus === 'charging_self' && !activeSession && !stopRequested && !starting;
 
   const onStartCharging = () => {
+    const bal = walletBalanceSlice?.balance ?? 0;
+    if (bal < MIN_BALANCE_COP) {
+      Alert.alert(
+        t.charging.insufficientBalance,
+        PAYMENT_RAILS_ENABLED
+          ? t.chargingUi.needTopUp.replace('{amount}', MIN_BALANCE_COP.toLocaleString())
+          : t.chargingUi.needBalance.replace('{amount}', MIN_BALANCE_COP.toLocaleString()),
+        PAYMENT_RAILS_ENABLED
+          ? [
+              { text: t.chargingUi.goTopUp, onPress: () => navigation.navigate('PaymentHub') },
+              { text: t.common.cancel, style: 'cancel' },
+            ]
+          : [{ text: t.chargingUi.understood, style: 'cancel' }]
+      );
+      return;
+    }
     setUserConfirmedStart(true);
   };
 
   const onRetryStart = async () => {
     try {
       await dispatch(startCharging({ qrToken })).unwrap();
+      setChargerStatus('charging_self');
     } catch {
       // 错误已写入 slice.error
     }
@@ -244,11 +286,11 @@ const ChargingProcessScreen = () => {
       }
     } catch (e: any) {
       console.error('刷新状态失败:', e);
-      let errorMsg = '刷新状态失败';
+      let errorMsg = t.chargingUi.refreshFailed;
       if (e?.response?.status === 404) {
-        errorMsg = '充电桩不存在或二维码无效';
+        errorMsg = t.chargingUi.notFoundOrQr;
       } else if (e?.response?.status === 400) {
-        errorMsg = e?.response?.data?.detail || '二维码无效';
+        errorMsg = e?.response?.data?.detail || t.chargingUi.invalidQr;
       } else if (e?.response?.data?.detail) {
         errorMsg = e.response.data.detail;
       } else if (e?.message) {
@@ -262,15 +304,9 @@ const ChargingProcessScreen = () => {
   if (chargerStatus === 'checking') {
     return (
       <SafeAreaView style={styles.container}>
-        <View style={styles.header}>
-          <TouchableOpacity style={styles.backBtn} onPress={() => navigation.goBack()}>
-            <Icon name="arrow-back" library="Ionicons" size={24} color={COLORS.TEXT_PRIMARY} />
-          </TouchableOpacity>
-          <Text style={styles.headerTitle}>充电桩状态</Text>
-          <View style={styles.headerRight} />
-        </View>
+        <ScreenHeader title={t.chargingUi.statusTitle} onBack={() => navigation.goBack()} />
         <View style={styles.centerContent}>
-          <LoadingSpinner size="large" message="正在检查充电桩状态..." />
+          <LoadingSpinner size="large" message={t.chargingUi.checkingMsg} />
         </View>
       </SafeAreaView>
     );
@@ -280,32 +316,26 @@ const ChargingProcessScreen = () => {
   if (chargerStatus === 'offline') {
     return (
       <SafeAreaView style={styles.container}>
-        <View style={styles.header}>
-          <TouchableOpacity style={styles.backBtn} onPress={() => navigation.goBack()}>
-            <Icon name="arrow-back" library="Ionicons" size={24} color={COLORS.TEXT_PRIMARY} />
-          </TouchableOpacity>
-          <Text style={styles.headerTitle}>充电桩离线</Text>
-          <View style={styles.headerRight} />
-        </View>
+        <ScreenHeader title={t.chargingUi.offlineTitle} onBack={() => navigation.goBack()} />
         <ScrollView style={styles.scrollContent}>
           <Card style={styles.card}>
             <View style={styles.statusHeader}>
               <Icon name="alert-circle" library="Ionicons" size={48} color={COLORS.ERROR} />
-              <Text style={styles.statusTitle}>充电桩离线</Text>
-              <Text style={styles.statusSubtitle}>无法开始充电</Text>
+              <Text style={styles.statusTitle}>{t.chargingUi.offlineTitle}</Text>
+              <Text style={styles.statusSubtitle}>{t.chargingUi.offlineSub}</Text>
             </View>
 
             <View style={styles.infoSection}>
-              <Text style={styles.infoLabel}>充电桩ID</Text>
+              <Text style={styles.infoLabel}>{t.chargingUi.chargerId}</Text>
               <Text style={styles.infoValue}>{statusCheckData?.charger_id || '—'}</Text>
             </View>
 
             <View style={styles.infoSection}>
-              <Text style={styles.infoLabel}>最后在线时间</Text>
+              <Text style={styles.infoLabel}>{t.chargingUi.lastOnline}</Text>
               <Text style={styles.infoValue}>
                 {statusCheckData?.last_seen
                   ? new Date(statusCheckData.last_seen).toLocaleString()
-                  : '从未在线'}
+                  : t.chargingUi.neverOnline}
               </Text>
             </View>
 
@@ -317,14 +347,14 @@ const ChargingProcessScreen = () => {
 
             <View style={styles.actionButtons}>
               <Button
-                title="刷新状态"
+                title={t.chargingUi.refreshStatus}
                 onPress={onRefreshStatus}
                 variant="outline"
                 icon={{ name: 'refresh', library: 'Ionicons' }}
                 style={styles.refreshButton}
               />
               <Button
-                title="返回"
+                title={t.common.back}
                 onPress={() => navigation.goBack()}
                 variant="secondary"
                 style={styles.returnButton}
@@ -340,36 +370,30 @@ const ChargingProcessScreen = () => {
   if (chargerStatus === 'charging_other') {
     return (
       <SafeAreaView style={styles.container}>
-        <View style={styles.header}>
-          <TouchableOpacity style={styles.backBtn} onPress={() => navigation.goBack()}>
-            <Icon name="arrow-back" library="Ionicons" size={24} color={COLORS.TEXT_PRIMARY} />
-          </TouchableOpacity>
-          <Text style={styles.headerTitle}>充电桩使用中</Text>
-          <View style={styles.headerRight} />
-        </View>
+        <ScreenHeader title={t.chargingUi.inUseTitle} onBack={() => navigation.goBack()} />
         <ScrollView style={styles.scrollContent}>
           <Card style={styles.card}>
             <View style={styles.statusHeader}>
               <Icon name="flash" library="Ionicons" size={48} color={COLORS.WARNING} />
-              <Text style={styles.statusTitle}>充电桩正在使用中</Text>
-              <Text style={styles.statusSubtitle}>其他用户正在使用此充电桩</Text>
+              <Text style={styles.statusTitle}>{t.chargingUi.inUseTitle}</Text>
+              <Text style={styles.statusSubtitle}>{t.chargingUi.inUseSub}</Text>
             </View>
 
             <View style={styles.infoSection}>
-              <Text style={styles.infoLabel}>充电桩ID</Text>
+              <Text style={styles.infoLabel}>{t.chargingUi.chargerId}</Text>
               <Text style={styles.infoValue}>{statusCheckData?.charger_id || '—'}</Text>
             </View>
 
             {statusCheckData?.charger_info?.site_name && (
               <View style={styles.infoSection}>
-                <Text style={styles.infoLabel}>站点名称</Text>
+                <Text style={styles.infoLabel}>{t.chargingUi.siteName}</Text>
                 <Text style={styles.infoValue}>{statusCheckData.charger_info.site_name}</Text>
               </View>
             )}
 
             {statusCheckData?.active_session?.start_time && (
               <View style={styles.infoSection}>
-                <Text style={styles.infoLabel}>充电开始时间</Text>
+                <Text style={styles.infoLabel}>{t.chargingUi.chargeStart}</Text>
                 <Text style={styles.infoValue}>
                   {new Date(statusCheckData.active_session.start_time).toLocaleString()}
                 </Text>
@@ -378,14 +402,14 @@ const ChargingProcessScreen = () => {
 
             <View style={styles.actionButtons}>
               <Button
-                title="刷新状态"
+                title={t.chargingUi.refreshStatus}
                 onPress={onRefreshStatus}
                 variant="outline"
                 icon={{ name: 'refresh', library: 'Ionicons' }}
                 style={styles.refreshButton}
               />
               <Button
-                title="返回"
+                title={t.common.back}
                 onPress={() => navigation.goBack()}
                 variant="secondary"
                 style={styles.returnButton}
@@ -401,57 +425,66 @@ const ChargingProcessScreen = () => {
   if (chargerStatus === 'available') {
     return (
       <SafeAreaView style={styles.container}>
-        <View style={styles.header}>
-          <TouchableOpacity style={styles.backBtn} onPress={() => navigation.goBack()}>
-            <Icon name="arrow-back" library="Ionicons" size={24} color={COLORS.TEXT_PRIMARY} />
-          </TouchableOpacity>
-          <Text style={styles.headerTitle}>准备充电</Text>
-          <View style={styles.headerRight} />
-        </View>
+        <ScreenHeader title={t.chargingUi.readyTitle} onBack={() => navigation.goBack()} />
         <ScrollView style={styles.scrollContent}>
           <Card style={styles.card}>
             <View style={styles.statusHeader}>
               <Icon name="checkmark-circle" library="Ionicons" size={48} color={COLORS.SUCCESS} />
-              <Text style={styles.statusTitle}>充电桩可用</Text>
-              <Text style={styles.statusSubtitle}>确认信息后开始充电</Text>
+              <Text style={styles.statusTitle}>{t.charging.available}</Text>
+              <Text style={styles.statusSubtitle}>{t.chargingUi.readySub}</Text>
             </View>
 
             <View style={styles.infoSection}>
-              <Text style={styles.infoLabel}>充电桩ID</Text>
+              <Text style={styles.infoLabel}>{t.chargingUi.chargerId}</Text>
               <Text style={styles.infoValue}>{statusCheckData?.charger_id || '—'}</Text>
             </View>
 
             <View style={styles.infoSection}>
-              <Text style={styles.infoLabel}>接口编号</Text>
+              <Text style={styles.infoLabel}>{t.chargingUi.connector}</Text>
               <Text style={styles.infoValue}>{statusCheckData?.connector_id || '—'}</Text>
             </View>
 
             {statusCheckData?.charger_info?.site_name && (
               <View style={styles.infoSection}>
-                <Text style={styles.infoLabel}>站点名称</Text>
+                <Text style={styles.infoLabel}>{t.chargingUi.siteName}</Text>
                 <Text style={styles.infoValue}>{statusCheckData.charger_info.site_name}</Text>
               </View>
             )}
 
             {statusCheckData?.charger_info?.site_address && (
               <View style={styles.infoSection}>
-                <Text style={styles.infoLabel}>站点地址</Text>
+                <Text style={styles.infoLabel}>{t.chargingUi.siteAddress}</Text>
                 <Text style={styles.infoValue}>{statusCheckData.charger_info.site_address}</Text>
               </View>
             )}
 
-            {statusCheckData?.charger_info?.price_per_kwh && (
+            {statusCheckData?.charger_info?.price_per_kwh != null && (
               <View style={styles.infoSection}>
-                <Text style={styles.infoLabel}>价格</Text>
+                <Text style={styles.infoLabel}>{t.chargingUi.unitPrice}</Text>
                 <Text style={styles.infoValue}>
-                  ${statusCheckData.charger_info.price_per_kwh.toFixed(2)} / kWh
+                  $
+                  {statusCheckData!.charger_info!.price_per_kwh!.toLocaleString('es-CO', {
+                    minimumFractionDigits: 0,
+                    maximumFractionDigits: 2,
+                  })}{' '}
+                  COP / kWh
                 </Text>
               </View>
             )}
 
+            <PaymentMethodBar
+              balanceCOP={walletBalanceSlice?.balance ?? null}
+              loading={loadingBalance}
+              onPressTopUp={
+                PAYMENT_RAILS_ENABLED
+                  ? () => navigation.navigate('PaymentHub')
+                  : undefined
+              }
+            />
+
             <View style={styles.actionButtons}>
               <Button
-                title="开始充电"
+                title={t.charging.start}
                 onPress={onStartCharging}
                 variant="primary"
                 icon={{ name: 'flash', library: 'Ionicons' }}
@@ -460,7 +493,7 @@ const ChargingProcessScreen = () => {
                 style={styles.startButton}
               />
               <Button
-                title="返回"
+                title={t.common.back}
                 onPress={() => navigation.goBack()}
                 variant="secondary"
                 style={styles.returnButton}
@@ -478,13 +511,7 @@ const ChargingProcessScreen = () => {
 
   return (
     <SafeAreaView style={styles.container}>
-      <View style={styles.header}>
-        <TouchableOpacity style={styles.backBtn} onPress={() => navigation.goBack()}>
-          <Icon name="arrow-back" library="Ionicons" size={24} color={COLORS.TEXT_PRIMARY} />
-        </TouchableOpacity>
-        <Text style={styles.headerTitle}>充电中</Text>
-        <View style={styles.headerRight} />
-      </View>
+      <ScreenHeader title={t.chargingUi.chargingTitle} onBack={() => navigation.goBack()} />
 
       <ScrollView style={styles.scrollContent} contentContainerStyle={styles.scrollContentContainer}>
         {/* 充电桩信息（简化） */}
@@ -493,7 +520,7 @@ const ChargingProcessScreen = () => {
             {activeSession?.charge_point_id || statusCheckData?.charger_id || '—'}
           </Text>
           {activeSession?.start_time && (
-            <Text style={styles.startTime}>开始时间：{startedText}</Text>
+            <Text style={styles.startTime}>{t.chargingUi.startAt.replace('{time}', startedText)}</Text>
           )}
         </View>
 
@@ -525,7 +552,7 @@ const ChargingProcessScreen = () => {
                 subText={timeText}
                 bottomInfo={[
                   {
-                    label: '功率',
+                    label: t.chargingUi.power,
                     value: typeof latestPoint?.power_kw === 'number' 
                       ? `${latestPoint.power_kw.toFixed(2)} kW` 
                       : '—',
@@ -545,7 +572,7 @@ const ChargingProcessScreen = () => {
               <Card style={styles.dataCard}>
                 <View style={styles.dataGrid}>
                   <View style={styles.dataItem}>
-                    <Text style={styles.dataLabel}>电压</Text>
+                    <Text style={styles.dataLabel}>{t.chargingUi.voltage}</Text>
                     <Text style={styles.dataValue}>
                       {typeof latestPoint.voltage_v === 'number' 
                         ? `${latestPoint.voltage_v.toFixed(0)} V` 
@@ -553,7 +580,7 @@ const ChargingProcessScreen = () => {
                     </Text>
                   </View>
                   <View style={styles.dataItem}>
-                    <Text style={styles.dataLabel}>电流</Text>
+                    <Text style={styles.dataLabel}>{t.chargingUi.current}</Text>
                     <Text style={styles.dataValue}>
                       {typeof latestPoint.current_a === 'number' 
                         ? `${latestPoint.current_a.toFixed(1)} A` 
@@ -567,7 +594,7 @@ const ChargingProcessScreen = () => {
             {/* 无数据提示 */}
             {!latestPoint && activeSession && !isInitialLoad && (
               <Card style={styles.infoCard}>
-                <Text style={styles.infoText}>等待实时数据...</Text>
+                <Text style={styles.infoText}>{t.chargingUi.waitingData}</Text>
               </Card>
             )}
 
@@ -584,7 +611,7 @@ const ChargingProcessScreen = () => {
                 <View style={styles.statusRow}>
                   <ActivityIndicator size="small" color={COLORS.PRIMARY} />
                   <Text style={styles.statusText}>
-                    {starting ? '正在启动充电...' : stopping ? '正在停止充电...' : ''}
+                    {starting ? t.chargingUi.starting : stopping ? t.chargingUi.stopping : ''}
                   </Text>
                 </View>
               </Card>
@@ -597,7 +624,7 @@ const ChargingProcessScreen = () => {
       <View style={styles.bottomBar}>
         {!stopRequested && canStop && (
           <Button
-            title={stopping ? '正在停止...' : '结束充电'}
+            title={stopping ? t.chargingUi.stopping : t.chargingUi.endCharge}
             onPress={onStop}
             variant="danger"
             disabled={stopping || !canStop}
@@ -605,9 +632,9 @@ const ChargingProcessScreen = () => {
             icon={{ name: 'stop-circle', library: 'Ionicons' }}
           />
         )}
-        {!canStop && !stopRequested && (
+        {!canStop && showRetryStart && (
           <Button
-            title={starting ? '启动中...' : '重试启动'}
+            title={starting ? 'Iniciando…' : 'Reintentar inicio'}
             onPress={onRetryStart}
             variant="primary"
             disabled={starting}
@@ -616,10 +643,16 @@ const ChargingProcessScreen = () => {
             icon={{ name: 'refresh', library: 'Ionicons' }}
           />
         )}
+        {showWaitingSession && (
+          <View style={styles.waitingContainer}>
+            <ActivityIndicator size="small" color={COLORS.PRIMARY} />
+            <Text style={styles.waitingText}>Esperando sesión de carga…</Text>
+          </View>
+        )}
         {stopRequested && (
           <View style={styles.waitingContainer}>
             <ActivityIndicator size="small" color={COLORS.PRIMARY} />
-            <Text style={styles.waitingText}>等待充电结束...</Text>
+            <Text style={styles.waitingText}>{t.chargingUi.waitingEnd}</Text>
           </View>
         )}
       </View>
@@ -632,18 +665,6 @@ const styles = StyleSheet.create({
   scrollContent: { flex: 1 },
   scrollContentContainer: { paddingBottom: 100 },
   centerContent: { flex: 1, justifyContent: 'center', alignItems: 'center' },
-  header: {
-    height: 56,
-    backgroundColor: '#FFFFFF',
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: COLORS.BORDER,
-  },
-  backBtn: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
-  headerTitle: { flex: 1, textAlign: 'center', fontSize: 16, fontWeight: '800', color: COLORS.TEXT_PRIMARY },
-  headerRight: { width: 44 },
   
   // 新的充电中页面样式
   chargerInfo: {

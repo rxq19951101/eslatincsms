@@ -167,3 +167,25 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         
         return response
 
+
+class RateLimitMiddleware(BaseHTTPMiddleware):
+    """简单 API 限流（内存滑动窗口，按 IP）"""
+
+    def __init__(self, app: ASGIApp, requests_per_minute: int = 120):
+        super().__init__(app)
+        self.requests_per_minute = requests_per_minute
+        self._hits: dict = {}
+
+    async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        if request.url.path.startswith(("/health", "/metrics", "/ocpp", "/docs")):
+            return await call_next(request)
+        client = request.client.host if request.client else "unknown"
+        now = time.time()
+        window_start = now - 60
+        hits = [t for t in self._hits.get(client, []) if t > window_start]
+        if len(hits) >= self.requests_per_minute:
+            return Response(status_code=429, content="Rate limit exceeded")
+        hits.append(now)
+        self._hits[client] = hits
+        return await call_next(request)
+

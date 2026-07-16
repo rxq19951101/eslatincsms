@@ -3,6 +3,9 @@
 # 提供各种统计报表和数据分析功能
 #
 
+import csv
+import io
+import json
 from typing import List, Dict, Any, Optional
 from uuid import UUID
 from datetime import datetime, timezone, timedelta
@@ -216,14 +219,27 @@ class ReportService:
         end_date: datetime,
         format: str = "csv"  # csv, excel, json
     ) -> bytes:
-        """
-        导出报表
-        
-        返回文件内容（bytes）
-        """
-        # 这里应该实现实际的导出逻辑
-        # 暂时返回空
-        return b""
+        """导出报表为 CSV 或 JSON。"""
+        if report_type == "revenue":
+            rows = ReportService.get_revenue_report(db, tenant_id, start_date, end_date, "day")
+        elif report_type == "energy":
+            rows = ReportService.get_energy_report(db, tenant_id, start_date, end_date, "day")
+        elif report_type == "orders":
+            rows = ReportService.get_orders_report(db, tenant_id, start_date, end_date, "day")
+        else:
+            rows = []
+
+        if format == "json":
+            return json.dumps(rows, ensure_ascii=False, indent=2).encode("utf-8")
+
+        buf = io.StringIO()
+        if rows:
+            writer = csv.DictWriter(buf, fieldnames=list(rows[0].keys()))
+            writer.writeheader()
+            writer.writerows(rows)
+        else:
+            buf.write("date,total_revenue,total_energy_kwh,invoice_count\n")
+        return buf.getvalue().encode("utf-8-sig")
     
     # ==================== 超级管理员查询所有租户的方法 ====================
     

@@ -16,6 +16,7 @@ import { useNavigation } from '@react-navigation/native';
 import type { StackNavigationProp } from '@react-navigation/stack';
 import type { RootStackParamList } from '../../types';
 import { COLORS } from '../../constants/config';
+import { useI18n } from '../../i18n';
 
 type VerificationSuccessScreenNavigationProp = StackNavigationProp<
   RootStackParamList,
@@ -23,6 +24,8 @@ type VerificationSuccessScreenNavigationProp = StackNavigationProp<
 >;
 
 const VerificationSuccessScreen = () => {
+  const { t } = useI18n();
+
   const navigation = useNavigation<VerificationSuccessScreenNavigationProp>();
   const scaleAnim = new Animated.Value(0);
 
@@ -37,8 +40,7 @@ const VerificationSuccessScreen = () => {
 
     // 3秒后自动跳转
     const timer = setTimeout(() => {
-      // TODO: navigation.navigate('MainTabs');
-      navigation.navigate('Welcome');
+      navigation.navigate('MainTabs');
     }, 3000);
 
     return () => clearTimeout(timer);
@@ -70,8 +72,8 @@ const VerificationSuccessScreen = () => {
 
         {/* 文本 */}
         <View style={styles.textContainer}>
-          <Text style={styles.title}>Email Verified Successfully!</Text>
-          <Text style={styles.subtitle}>Please wait...</Text>
+          <Text style={styles.title}>{t.auth.verifiedTitle}</Text>
+          <Text style={styles.subtitle}>{t.auth.verifiedWait}</Text>
           <Text style={styles.description}>
             You will be directed to the homepage
           </Text>

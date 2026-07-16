@@ -53,7 +53,28 @@ export const loginWithEmail = async (data: {
 };
 
 /**
- * 验证邮箱
+ * 验证邮箱（6 位验证码）；成功后自动登录并保存 Token
+ */
+export const verifyEmailWithCode = async (data: {
+  email: string;
+  code: string;
+}): Promise<LoginResponse> => {
+  try {
+    const response = await apiClient.post<LoginResponse>(API_ENDPOINTS.AUTH.VERIFY_EMAIL, {
+      email: data.email.trim().toLowerCase(),
+      code: data.code.trim(),
+    });
+    const { access_token, refresh_token, user } = response.data;
+    await saveTokens({ access_token, refresh_token, token_type: 'bearer' });
+    await saveUserInfo(user);
+    return response.data;
+  } catch (error) {
+    throw handleApiError(error);
+  }
+};
+
+/**
+ * @deprecated 保留兼容；请使用 verifyEmailWithCode
  */
 export const verifyEmail = async (token: string): Promise<{ success: boolean; message: string }> => {
   try {
@@ -137,6 +158,17 @@ export const getCurrentUser = async (): Promise<User> => {
   try {
     const response = await apiClient.get<User>(API_ENDPOINTS.AUTH.ME);
     await saveUserInfo(response.data);
+    return response.data;
+  } catch (error) {
+    throw handleApiError(error);
+  }
+};
+
+export const deleteAccount = async (): Promise<{ success: boolean; message: string }> => {
+  try {
+    const response = await apiClient.delete(API_ENDPOINTS.AUTH.ME, {
+      data: { confirm: true },
+    });
     return response.data;
   } catch (error) {
     throw handleApiError(error);

@@ -4,6 +4,7 @@
 #
 
 from typing import List, Optional
+from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 from app.database.base import get_db, tenant_id_context
@@ -76,5 +77,63 @@ def list_transactions(
             "status": s.status,
         })
     
+    return result
+
+
+@router.get("/active", summary="获取进行中的充电会话（实时监控）")
+def list_active_sessions(
+    limit: int = Query(50, le=200),
+    current_user_obj=Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+) -> List[dict]:
+    """返回 status=ongoing 的会话及最新计量值。"""
+    from app.database.models import MeterValue
+
+    tenant_id = tenant_id_context.get()
+    query = db.query(ChargingSession).filter(ChargingSession.status == "ongoing")
+    if tenant_id and not current_user_obj.is_super_admin:
+        query = query.filter(ChargingSession.tenant_id == tenant_id)
+
+    sessions = query.order_by(ChargingSession.start_time.desc()).limit(limit).all()
+    result = []
+    for s in sessions:
+        latest = (
+            db.query(MeterValue)
+            .filter(MeterValue.session_id == s.id)
+            .order_by(MeterValue.timestamp.desc())
+            .first()
+        )
+        energy_kwh = None
+        if s.meter_stop is not None and s.meter_start is not None:
+            wh = s.meter_stop - s.meter_start
+            energy_kwh = wh / 1000.0 if wh > 0 else 0
+        elif latest and s.meter_start is not None:
+            wh = latest.value - s.meter_start
+            energy_kwh = wh / 1000.0 if wh > 0 else 0
+
+        power_kw = None
+        if latest and latest.sampled_value:
+            for sv in latest.sampled_value if isinstance(latest.sampled_value, list) else []:
+                if isinstance(sv, dict) and sv.get("measurand") == "Power.Active.Import":
+                    try:
+                        power_kw = float(sv.get("value", 0)) / 1000.0
+                    except (TypeError, ValueError):
+                        pass
+
+        duration_minutes = None
+        if s.start_time:
+            duration_minutes = (datetime.now(timezone.utc) - s.start_time).total_seconds() / 60.0
+
+        result.append({
+            "id": s.id,
+            "transaction_id": s.transaction_id,
+            "charge_point_id": s.charge_point_id,
+            "user_id": s.user_id,
+            "start_time": s.start_time.isoformat() if s.start_time else None,
+            "energy_kwh": energy_kwh,
+            "power_kw": power_kw,
+            "duration_minutes": duration_minutes,
+            "status": s.status,
+        })
     return result
 

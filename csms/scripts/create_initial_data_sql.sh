@@ -4,7 +4,7 @@
 #
 
 # 生成密码哈希（使用 Python 计算）
-PASSWORD_HASH=$(docker compose -f /Users/xiaoqingran/eslatincsms/docker-compose.local-prod.yml run --rm csms python -c "
+PASSWORD_HASH=$(docker compose -f /Users/xiaoqingran/eslatincsms/docker-compose.yml run --rm csms python -c "
 from passlib.context import CryptContext
 try:
     pwd_context = CryptContext(schemes=['bcrypt'], deprecated='auto')
@@ -19,7 +19,7 @@ if [ -z "$PASSWORD_HASH" ]; then
 fi
 
 # 使用 psql 执行 SQL
-docker compose -f /Users/xiaoqingran/eslatincsms/docker-compose.local-prod.yml exec -T db psql -U ocpp_user -d ocpp <<EOF
+docker compose -f /Users/xiaoqingran/eslatincsms/docker-compose.yml exec -T db psql -U ocpp_user -d ocpp <<EOF
 -- 检查是否已有数据
 DO \$\$
 DECLARE

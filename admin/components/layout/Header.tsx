@@ -1,14 +1,30 @@
 'use client';
 
+import useSWR from 'swr';
+import Link from 'next/link';
 import { UserMenu } from './UserMenu';
 import { Bell, Search } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
+import { apiGet } from '@/lib/api';
+import { API_ENDPOINTS, REFRESH_INTERVAL } from '@/lib/constants';
+
+interface AlertItem {
+  id: string;
+  status: string;
+}
 
 export function Header() {
+  const { data: alerts } = useSWR<AlertItem[]>(
+    `${API_ENDPOINTS.ALERTS}?status=pending&limit=50`,
+    (url) => apiGet<AlertItem[]>(url),
+    { refreshInterval: REFRESH_INTERVAL }
+  );
+
+  const pendingCount = alerts?.length ?? 0;
+
   return (
     <header className="h-16 bg-slate-900/80 backdrop-blur-sm border-b border-slate-800 flex items-center justify-between px-6">
-      {/* Search bar */}
       <div className="hidden md:flex flex-1 max-w-md">
         <div className="relative w-full">
           <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 h-4 w-4 text-slate-400" />
@@ -20,19 +36,21 @@ export function Header() {
         </div>
       </div>
 
-      {/* Right side */}
       <div className="flex items-center gap-4">
-        {/* Notifications */}
-        <Button
-          variant="ghost"
-          size="icon"
-          className="relative text-slate-400 hover:text-slate-200 hover:bg-slate-800"
-        >
-          <Bell className="h-5 w-5" />
-          <span className="absolute top-1 right-1 h-2 w-2 bg-red-500 rounded-full" />
-        </Button>
-
-        {/* User menu */}
+        <Link href="/alerts">
+          <Button
+            variant="ghost"
+            size="icon"
+            className="relative text-slate-400 hover:text-slate-200 hover:bg-slate-800"
+          >
+            <Bell className="h-5 w-5" />
+            {pendingCount > 0 && (
+              <span className="absolute -top-0.5 -right-0.5 min-w-[18px] h-[18px] px-1 bg-red-500 rounded-full text-[10px] text-white flex items-center justify-center">
+                {pendingCount > 99 ? '99+' : pendingCount}
+              </span>
+            )}
+          </Button>
+        </Link>
         <UserMenu />
       </div>
     </header>

@@ -104,23 +104,19 @@ class MonitoringService:
         return True
     
     async def run_monitoring_loop(self, interval_seconds: int = 60):
-        """
-        运行监控循环（后台任务）
-        
-        定期检查离线充电桩等
-        """
+        """运行监控循环（后台任务，每轮使用独立 DB session）"""
+        from app.database.base import SessionLocal
+        from app.database.models import Tenant
+
         while True:
+            db = SessionLocal()
             try:
-                # 获取所有活跃的租户
-                from app.database.models import Tenant
-                tenants = self.db.query(Tenant).filter(
-                    Tenant.status == "active"
-                ).all()
-                
+                tenants = db.query(Tenant).filter(Tenant.status == "active").all()
+                svc = MonitoringService(db)
                 for tenant in tenants:
-                    await self.check_offline_chargers(tenant.id)
-                
-                await asyncio.sleep(interval_seconds)
+                    await svc.check_offline_chargers(tenant.id)
             except Exception as e:
                 logger.error(f"监控循环出错: {e}", exc_info=True)
-                await asyncio.sleep(interval_seconds)
+            finally:
+                db.close()
+            await asyncio.sleep(interval_seconds)

@@ -6,6 +6,7 @@ import { store } from './src/store';
 import { RootNavigator } from './src/navigation/RootNavigator';
 import { useAppDispatch, useAppSelector } from './src/hooks/useRedux';
 import { initializeAuth } from './src/store/slices/authSlice';
+import { I18nProvider } from './src/i18n';
 
 const AppContent = () => {
   const dispatch = useAppDispatch();
@@ -33,7 +34,9 @@ export default function App() {
   return (
     <SafeAreaProvider>
       <Provider store={store}>
-        <AppContent />
+        <I18nProvider>
+          <AppContent />
+        </I18nProvider>
       </Provider>
     </SafeAreaProvider>
   );

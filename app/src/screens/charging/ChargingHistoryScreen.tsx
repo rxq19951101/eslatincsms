@@ -17,9 +17,11 @@ import { useNavigation } from '@react-navigation/native';
 import type { StackNavigationProp } from '@react-navigation/stack';
 import type { RootStackParamList } from '../../types';
 import { COLORS } from '../../constants/config';
+import { useI18n } from '../../i18n';
 import { useAppDispatch, useAppSelector } from '../../hooks/useRedux';
 import { fetchChargingRecords } from '../../store/slices/transactionsSlice';
 import type { ChargingRecord } from '../../api/transactions';
+import ScreenHeader from '../../components/ui/ScreenHeader';
 
 type Nav = StackNavigationProp<RootStackParamList, 'ChargingHistory'>;
 
@@ -33,6 +35,8 @@ function fmtTime(s?: string | null) {
 }
 
 const ChargingHistoryScreen = () => {
+  const { t } = useI18n();
+
   const navigation = useNavigation<Nav>();
   const dispatch = useAppDispatch();
   const { items, loadingList, error } = useAppSelector((st) => st.transactions);
@@ -66,25 +70,19 @@ const ChargingHistoryScreen = () => {
 
   return (
     <SafeAreaView style={styles.container}>
-      <View style={styles.header}>
-        <TouchableOpacity style={styles.backBtn} onPress={() => navigation.goBack()}>
-          <Text style={styles.backText}>←</Text>
-        </TouchableOpacity>
-        <Text style={styles.headerTitle}>充电记录</Text>
-        <View style={styles.headerRight} />
-      </View>
+      <ScreenHeader title={t.history.title} onBack={() => navigation.goBack()} />
 
       {!!error && <Text style={styles.errorText}>{error}</Text>}
 
       {loadingList && items.length === 0 ? (
         <View style={styles.center}>
           <ActivityIndicator size="large" color={COLORS.PRIMARY} />
-          <Text style={styles.centerText}>加载中...</Text>
+          <Text style={styles.centerText}>{t.common.loading}</Text>
         </View>
       ) : items.length === 0 ? (
         <View style={styles.center}>
           <Text style={styles.emptyIcon}>🧾</Text>
-          <Text style={styles.centerText}>暂无充电记录</Text>
+          <Text style={styles.centerText}>{t.history.empty}</Text>
         </View>
       ) : (
         <FlatList
@@ -101,19 +99,6 @@ const ChargingHistoryScreen = () => {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: COLORS.BACKGROUND },
-  header: {
-    height: 56,
-    backgroundColor: '#FFFFFF',
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: COLORS.BORDER,
-  },
-  backBtn: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
-  backText: { fontSize: 22, color: COLORS.TEXT_PRIMARY },
-  headerTitle: { flex: 1, textAlign: 'center', fontSize: 16, fontWeight: '800', color: COLORS.TEXT_PRIMARY },
-  headerRight: { width: 44 },
   errorText: { paddingHorizontal: 16, paddingTop: 10, color: COLORS.ERROR, fontWeight: '700' },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   centerText: { marginTop: 10, color: COLORS.TEXT_SECONDARY },

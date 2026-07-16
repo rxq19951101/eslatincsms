@@ -21,10 +21,13 @@ import { COLORS, API_BASE_URL } from '../../constants/config';
 import { useAppDispatch, useAppSelector } from '../../hooks/useRedux';
 import { loginWithEmail, clearError } from '../../store/slices/authSlice';
 import { saveRememberMe } from '../../utils/tokenManager';
+import { useI18n } from '../../i18n';
 
 type EmailLoginScreenNavigationProp = StackNavigationProp<RootStackParamList, 'EmailLogin'>;
 
 const EmailLoginScreen = () => {
+  const { t } = useI18n();
+
   const navigation = useNavigation<EmailLoginScreenNavigationProp>();
   const dispatch = useAppDispatch();
   const { isLoading, error } = useAppSelector((state) => state.auth);
@@ -37,18 +40,18 @@ const EmailLoginScreen = () => {
   const handleLogin = async () => {
     // 验证输入
     if (!email.trim()) {
-      Alert.alert('Error', 'Please enter your email');
+      Alert.alert(t.common.error, t.auth.enterEmail);
       return;
     }
     if (!password) {
-      Alert.alert('Error', 'Please enter your password');
+      Alert.alert(t.common.error, t.auth.enterPassword);
       return;
     }
 
     // 验证邮箱格式
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (!emailRegex.test(email)) {
-      Alert.alert('Error', 'Please enter a valid email address');
+      Alert.alert(t.common.error, t.auth.invalidEmail);
       return;
     }
 
@@ -75,10 +78,15 @@ const EmailLoginScreen = () => {
       navigation.navigate('LocationPermission');
     } catch (err: any) {
       console.error('❌ 登录失败:', err);
+      const msg = err?.message || t.common.error;
+      if (String(msg).toLowerCase().includes('email not verified')) {
+        navigation.navigate('EmailVerification', { email: email.trim().toLowerCase() });
+        return;
+      }
       Alert.alert(
-        '登录失败', 
-        err.message || 'An error occurred',
-        [{ text: '确定' }]
+        t.auth.loginFailed,
+        msg,
+        [{ text: t.common.ok }]
       );
     }
   };
@@ -104,17 +112,15 @@ const EmailLoginScreen = () => {
 
         {/* 标题 */}
         <View style={styles.header}>
-          <Text style={styles.title}>Hello there 👋</Text>
-          <Text style={styles.subtitle}>
-            Sign in to your account to continue
-          </Text>
+          <Text style={styles.title}>{t.auth.hello}</Text>
+          <Text style={styles.subtitle}>{t.auth.signInSubtitle}</Text>
         </View>
 
         {/* 表单 */}
         <View style={styles.form}>
           {/* 邮箱输入 */}
           <View style={styles.inputContainer}>
-            <Text style={styles.inputLabel}>Email</Text>
+            <Text style={styles.inputLabel}>{t.auth.email}</Text>
             <TextInput
               style={styles.input}
               placeholder="your.email@example.com"
@@ -130,11 +136,11 @@ const EmailLoginScreen = () => {
 
           {/* 密码输入 */}
           <View style={styles.inputContainer}>
-            <Text style={styles.inputLabel}>Password</Text>
+            <Text style={styles.inputLabel}>{t.auth.password}</Text>
             <View style={styles.passwordContainer}>
               <TextInput
                 style={[styles.input, styles.passwordInput]}
-                placeholder="Enter your password"
+                placeholder={t.auth.password}
                 placeholderTextColor={COLORS.TEXT_SECONDARY}
                 value={password}
                 onChangeText={setPassword}
@@ -162,11 +168,11 @@ const EmailLoginScreen = () => {
               <View style={[styles.checkbox, rememberMe && styles.checkboxChecked]}>
                 {rememberMe && <Text style={styles.checkmark}>✓</Text>}
               </View>
-              <Text style={styles.rememberMeText}>Remember me</Text>
+              <Text style={styles.rememberMeText}>{t.auth.rememberMe}</Text>
             </TouchableOpacity>
 
             <TouchableOpacity onPress={handleForgotPassword} disabled={isLoading}>
-              <Text style={styles.forgotPasswordText}>Forgot password?</Text>
+              <Text style={styles.forgotPasswordText}>{t.auth.forgotPassword}</Text>
             </TouchableOpacity>
           </View>
 
@@ -187,7 +193,7 @@ const EmailLoginScreen = () => {
             {isLoading ? (
               <ActivityIndicator color="#FFFFFF" />
             ) : (
-              <Text style={styles.signInButtonText}>Sign In</Text>
+              <Text style={styles.signInButtonText}>{t.auth.signIn}</Text>
             )}
           </TouchableOpacity>
         </View>

@@ -9,12 +9,17 @@ import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import type { StackNavigationProp } from '@react-navigation/stack';
 
 import { COLORS } from '../../constants/config';
+import { useI18n } from '../../i18n';
 import type { RootStackParamList, PaymentMethod } from '../../types';
 import { deletePaymentMethod, getPaymentMethods, setDefaultPaymentMethod } from '../../utils/paymentMethodsStorage';
+import ScreenHeader from '../../components/ui/ScreenHeader';
+import Badge from '../../components/ui/Badge';
 
 type Nav = StackNavigationProp<RootStackParamList, 'PaymentMethods'>;
 
 const PaymentMethodsScreen = () => {
+  const { t } = useI18n();
+
   const navigation = useNavigation<Nav>();
   const [methods, setMethods] = useState<PaymentMethod[]>([]);
   const [loading, setLoading] = useState(false);
@@ -39,10 +44,10 @@ const PaymentMethodsScreen = () => {
   );
 
   const onDelete = (id: string) => {
-    Alert.alert('删除支付方式', '确定要删除吗？', [
-      { text: '取消', style: 'cancel' },
+    Alert.alert(t.payment.deleteTitle, t.payment.deleteConfirm, [
+      { text: t.common.cancel, style: 'cancel' },
       {
-        text: '删除',
+        text: t.common.delete,
         style: 'destructive',
         onPress: async () => setMethods(await deletePaymentMethod(id)),
       },
@@ -62,12 +67,12 @@ const PaymentMethodsScreen = () => {
           <Text style={styles.title}>
             {label} {suffix}
           </Text>
-          <Text style={styles.subTitle}>{item.is_default ? '默认支付方式' : '点击设为默认'}</Text>
+          <Text style={styles.subTitle}>{item.is_default ? t.payment.default : t.payment.setDefault}</Text>
         </View>
         <View style={styles.right}>
-          {item.is_default && <Text style={styles.badge}>默认</Text>}
+          {item.is_default && <Badge label={t.payment.default} variant="success" style={styles.badge} />}
           <TouchableOpacity style={styles.deleteBtn} onPress={() => onDelete(item.id)}>
-            <Text style={styles.deleteText}>删除</Text>
+            <Text style={styles.deleteText}>{t.common.delete}</Text>
           </TouchableOpacity>
         </View>
       </TouchableOpacity>
@@ -76,22 +81,28 @@ const PaymentMethodsScreen = () => {
 
   return (
     <SafeAreaView style={styles.container}>
-      <View style={styles.header}>
-        <TouchableOpacity style={styles.backBtn} onPress={() => navigation.goBack()}>
-          <Text style={styles.backText}>←</Text>
-        </TouchableOpacity>
-        <Text style={styles.headerTitle}>支付方式</Text>
-        <TouchableOpacity style={styles.addBtn} onPress={() => navigation.navigate('AddPayment')}>
-          <Text style={styles.addText}>添加</Text>
-        </TouchableOpacity>
+      <ScreenHeader
+        title={t.payment.methodsDemo}
+        onBack={() => navigation.goBack()}
+        right={
+          <TouchableOpacity style={styles.addBtn} onPress={() => navigation.navigate('AddPayment')}>
+            <Text style={styles.addText}>{t.payment.add}</Text>
+          </TouchableOpacity>
+        }
+      />
+
+      <View style={styles.demoBanner}>
+        <Text style={styles.demoBannerText}>
+          {t.payment.demoHint}
+        </Text>
       </View>
 
       {methods.length === 0 ? (
         <View style={styles.center}>
           <Text style={styles.emptyIcon}>💳</Text>
-          <Text style={styles.centerText}>{loading ? '加载中...' : '暂无支付方式'}</Text>
+          <Text style={styles.centerText}>{loading ? t.common.loading : t.payment.empty}</Text>
           <TouchableOpacity style={styles.primaryBtn} onPress={() => navigation.navigate('AddPayment')}>
-            <Text style={styles.primaryText}>添加支付方式</Text>
+            <Text style={styles.primaryText}>{t.payment.addMethod}</Text>
           </TouchableOpacity>
         </View>
       ) : (
@@ -108,20 +119,18 @@ const PaymentMethodsScreen = () => {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: COLORS.BACKGROUND },
-  header: {
-    height: 56,
-    backgroundColor: '#FFFFFF',
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: COLORS.BORDER,
-  },
-  backBtn: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
-  backText: { fontSize: 22, color: COLORS.TEXT_PRIMARY },
-  headerTitle: { flex: 1, textAlign: 'center', fontSize: 16, fontWeight: '800', color: COLORS.TEXT_PRIMARY },
-  addBtn: { width: 64, height: 44, alignItems: 'flex-end', justifyContent: 'center' },
+  addBtn: { minWidth: 44, height: 44, alignItems: 'flex-end', justifyContent: 'center', paddingLeft: 8 },
   addText: { color: COLORS.PRIMARY, fontWeight: '900' },
+  demoBanner: {
+    marginHorizontal: 16,
+    marginBottom: 8,
+    padding: 12,
+    backgroundColor: '#FFFBEB',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#FDE68A',
+  },
+  demoBannerText: { fontSize: 13, color: COLORS.TEXT_PRIMARY, lineHeight: 20 },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 24 },
   emptyIcon: { fontSize: 56, marginBottom: 10 },
   centerText: { color: COLORS.TEXT_SECONDARY },
@@ -142,7 +151,7 @@ const styles = StyleSheet.create({
   title: { fontWeight: '900', color: COLORS.TEXT_PRIMARY },
   subTitle: { marginTop: 6, color: COLORS.TEXT_SECONDARY, fontSize: 12 },
   right: { alignItems: 'flex-end' },
-  badge: { color: COLORS.SUCCESS, fontWeight: '900', marginBottom: 6 },
+  badge: { marginBottom: 6 },
   deleteBtn: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 10, backgroundColor: '#FEE2E2' },
   deleteText: { color: COLORS.ERROR, fontWeight: '900', fontSize: 12 },
 });

@@ -124,6 +124,19 @@ export const logout = createAsyncThunk('auth/logout', async (_, { rejectWithValu
   }
 });
 
+/**
+ * 删除账户
+ */
+export const deleteAccount = createAsyncThunk('auth/deleteAccount', async (_, { rejectWithValue }) => {
+  try {
+    await authApi.deleteAccount();
+    await clearTokens();
+    return null;
+  } catch (error) {
+    return rejectWithValue(error);
+  }
+});
+
 const authSlice = createSlice({
   name: 'auth',
   initialState,
@@ -224,6 +237,23 @@ const authSlice = createSlice({
         state.isAuthenticated = false;
         state.isLoading = false;
         state.error = null;
+      });
+
+    // 删除账户
+    builder
+      .addCase(deleteAccount.pending, (state) => {
+        state.isLoading = true;
+        state.error = null;
+      })
+      .addCase(deleteAccount.fulfilled, (state) => {
+        state.user = null;
+        state.isAuthenticated = false;
+        state.isLoading = false;
+        state.error = null;
+      })
+      .addCase(deleteAccount.rejected, (state, action) => {
+        state.isLoading = false;
+        state.error = action.payload as ApiError;
       });
   },
 });

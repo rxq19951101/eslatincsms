@@ -3,6 +3,7 @@
  */
 
 import Constants from 'expo-constants';
+import { Platform } from 'react-native';
 
 // API基础URL
 // 开发环境：使用环境变量或自动检测局域网IP
@@ -39,21 +40,66 @@ const inferLanHostFromExpo = (): string | null => {
   return host;
 };
 
+const isProductionBuild = !__DEV__;
+
 const getApiBaseUrl = (): string => {
-  // 优先使用环境变量
-  if (process.env.EXPO_PUBLIC_API_URL) {
-    return process.env.EXPO_PUBLIC_API_URL;
+  const fromEnv = process.env.EXPO_PUBLIC_API_URL?.trim();
+  if (fromEnv) {
+    if (isProductionBuild && !fromEnv.startsWith('https://')) {
+      console.error(
+        '[Config] Production builds require EXPO_PUBLIC_API_URL with HTTPS (App Transport Security).'
+      );
+    }
+    return fromEnv.replace(/\/$/, '');
   }
-  // 真机（Expo Go / LAN）自动推导电脑 IP：例如 exp://192.168.20.124:8081 -> http://192.168.20.124:9000
+
+  if (isProductionBuild) {
+    console.error(
+      '[Config] EXPO_PUBLIC_API_URL is required for production builds. Set it in EAS secrets or .env.'
+    );
+    return 'https://api.eslatin.com.co';
+  }
+
+  // Web：按浏览器当前访问的主机推导 CSMS，避免沿用 Expo manifest 里的 LAN IP（本机 Chrome 常开 localhost:8081，API 误指向 192.168.* 会连不上）
+  if (Platform.OS === 'web') {
+    if (typeof window !== 'undefined' && window.location?.hostname) {
+      const hostname = window.location.hostname;
+      if (hostname === 'localhost' || hostname === '127.0.0.1') {
+        return 'http://localhost:9000';
+      }
+      return `http://${hostname}:9000`;
+    }
+    return 'http://localhost:9000';
+  }
+
   const lanHost = inferLanHostFromExpo();
   if (lanHost) {
     return `http://${lanHost}:9000`;
   }
-  // 开发环境默认使用 localhost（适用于模拟器）
   return 'http://localhost:9000';
 };
 
 export const API_BASE_URL = getApiBaseUrl();
+
+const extra = Constants.expoConfig?.extra as Record<string, string | undefined> | undefined;
+
+export const LEGAL_URLS = {
+  privacy:
+    process.env.EXPO_PUBLIC_PRIVACY_POLICY_URL?.trim() ||
+    extra?.privacyPolicyUrl ||
+    `${API_BASE_URL}/legal/privacy.html`,
+  terms:
+    process.env.EXPO_PUBLIC_TERMS_URL?.trim() ||
+    extra?.termsOfServiceUrl ||
+    `${API_BASE_URL}/legal/terms.html`,
+  supportEmail: extra?.supportEmail || 'support@eslatin.com.co',
+} as const;
+
+/** 应用内三方支付轨；默认关闭，上架后接 Wompi/MP 时设为 true */
+export const PAYMENT_RAILS_ENABLED =
+  (process.env.EXPO_PUBLIC_PAYMENT_RAILS_ENABLED || 'false').toLowerCase() === 'true';
+
+export const MIN_BALANCE_COP = Number(process.env.EXPO_PUBLIC_MIN_BALANCE_COP || 5000);
 
 // 默认租户ID（根据实际情况调整）
 export const DEFAULT_TENANT_ID = process.env.EXPO_PUBLIC_TENANT_ID || '0698b167-feaf-423e-a485-d8901b95e3de';
@@ -109,6 +155,15 @@ export const API_ENDPOINTS = {
     BALANCE: '/api/v1/app/wallet/balance',
     TOP_UP: '/api/v1/app/wallet/top-up',
     TRANSACTIONS: '/api/v1/app/wallet/transactions',
+    UNPAID_CHARGES: '/api/v1/app/wallet/unpaid-charges',
+    PAY_UNPAID_CHARGE: '/api/v1/app/wallet/pay-unpaid-charge',
+    SAVED_PAYMENT_METHODS: '/api/v1/app/wallet/saved-payment-methods',
+  },
+  // 支付相关
+  PAYMENTS: {
+    CREATE: '/api/v1/app/wallet/payments/create',  // Wompi（保留兼容）
+    CREATE_MP: '/api/v1/app/wallet/payments/create-mp',  // Mercado Pago
+    STATUS: (orderId: string) => `/api/v1/app/wallet/payments/${orderId}/status`,
   },
   // 充电记录（订单记录）
   TRANSACTIONS: {
@@ -159,7 +214,7 @@ export const MAP_CONFIG = {
   CLUSTER_RADIUS: 50, // 标记聚合半径（像素）
   MAX_ZOOM_LEVEL: 18,
   MIN_ZOOM_LEVEL: 8,
-  
+
   // 标记颜色配置
   MARKER_COLORS: {
     AVAILABLE: '#10B981', // 绿色 - 有空位
@@ -169,11 +224,24 @@ export const MAP_CONFIG = {
   },
 } as const;
 
+function resolveMercadoPagoPublicKey(): string {
+  const fromEnv = process.env.EXPO_PUBLIC_MERCADOPAGO_PUBLIC_KEY?.trim();
+  if (fromEnv) return fromEnv;
+
+  const fromExtra = extra?.mercadopagoPublicKey;
+  if (typeof fromExtra === 'string' && fromExtra.trim()) return fromExtra.trim();
+
+  if (!isProductionBuild) {
+    return process.env.EXPO_PUBLIC_MERCADOPAGO_PUBLIC_KEY_SANDBOX?.trim() || '';
+  }
+  return '';
+}
+
 // 应用主题色
 export const COLORS = {
-  PRIMARY: '#10B981', // 绿色
+  PRIMARY: '#10B981', // 品牌主色（绿色）
   PRIMARY_DARK: '#059669',
-  SECONDARY: '#3B82F6', // 蓝色
+  SECONDARY: '#3B82F6', // 蓝色，仅用于信息类强调，不作为主要交互色
   SUCCESS: '#10B981',
   WARNING: '#F59E0B',
   ERROR: '#EF4444',
@@ -184,7 +252,9 @@ export const COLORS = {
   BORDER: '#E5E7EB',
   DISABLED: '#D1D5DB',
   // iOS 风格颜色
-  IOS_BLUE: '#007AFF',
+  // 注意：IOS_BLUE 曾是 iOS 系统蓝，历史上与品牌绿色 PRIMARY 混用导致全局配色不一致。
+  // 统一为品牌主色，使 Button/TabBar 等系统级交互色与各页面自绘按钮保持一致。
+  IOS_BLUE: '#10B981',
   IOS_GRAY: '#8E8E93',
   IOS_LIGHT_GRAY: '#F2F2F7',
   IOS_SEPARATOR: '#C6C6C8',
@@ -254,4 +324,19 @@ export const IOS_STYLES = {
     BOLD: '700' as const,
     HEAVY: '800' as const,
   },
+  // Wompi 支付配置（保留兼容）
+  WOMPI: {
+    PUBLIC_KEY_SANDBOX: process.env.EXPO_PUBLIC_WOMPI_PUBLIC_KEY_SANDBOX || '',
+    PUBLIC_KEY_PROD: process.env.EXPO_PUBLIC_WOMPI_PUBLIC_KEY_PROD || '',
+    CHECKOUT_URL: process.env.EXPO_PUBLIC_WOMPI_CHECKOUT_URL || 'https://checkout.wompi.co/l',
+    ENVIRONMENT: process.env.EXPO_PUBLIC_WOMPI_ENVIRONMENT || 'sandbox',
+  },
+  // Mercado Pago 支付配置
+  MERCADOPAGO: {
+    PUBLIC_KEY: resolveMercadoPagoPublicKey(),
+    ENVIRONMENT: process.env.EXPO_PUBLIC_MERCADOPAGO_ENVIRONMENT || 'sandbox',
+  },
 } as const;
+
+// 导出 Mercado Pago Public Key（用于 API 调用）
+export const MERCADOPAGO_PUBLIC_KEY = IOS_STYLES.MERCADOPAGO.PUBLIC_KEY;

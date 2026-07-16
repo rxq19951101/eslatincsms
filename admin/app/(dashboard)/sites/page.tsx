@@ -201,7 +201,7 @@ export default function SitesPage() {
                         </div>
                       </td>
                       <td className="py-3 px-4 text-slate-300">{s.charge_points_count}</td>
-                      <td className="py-3 px-4 text-slate-300">{s.online_charge_points_count}</td>
+                      <td className="py-3 px-4 text-slate-300">{s.online_charge_points_count ?? 0}</td>
                       <td className="py-3 px-4 text-right">
                         <Button
                           variant="outline"

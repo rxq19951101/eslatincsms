@@ -18,6 +18,7 @@ import { useNavigation } from '@react-navigation/native';
 import type { StackNavigationProp } from '@react-navigation/stack';
 import type { RootStackParamList } from '../../types';
 import { COLORS } from '../../constants/config';
+import { useI18n } from '../../i18n';
 import { sendResetPasswordEmail } from '../../api/auth';
 
 type ForgotPasswordScreenNavigationProp = StackNavigationProp<
@@ -26,6 +27,8 @@ type ForgotPasswordScreenNavigationProp = StackNavigationProp<
 >;
 
 const ForgotPasswordScreen = () => {
+  const { t } = useI18n();
+
   const navigation = useNavigation<ForgotPasswordScreenNavigationProp>();
   const [email, setEmail] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -34,12 +37,12 @@ const ForgotPasswordScreen = () => {
   const handleSendResetLink = async () => {
     // 验证邮箱
     if (!email.trim()) {
-      Alert.alert('Error', 'Please enter your email');
+      Alert.alert(t.common.error, t.auth.enterEmail);
       return;
     }
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (!emailRegex.test(email)) {
-      Alert.alert('Error', 'Please enter a valid email address');
+      Alert.alert(t.common.error, t.auth.invalidEmail);
       return;
     }
 
@@ -48,7 +51,7 @@ const ForgotPasswordScreen = () => {
       await sendResetPasswordEmail(email.trim().toLowerCase());
       setEmailSent(true);
     } catch (error: any) {
-      Alert.alert('Error', error.message || 'Failed to send reset email');
+      Alert.alert(t.common.error, error.message || t.auth.resetFailed);
     } finally {
       setIsLoading(false);
     }
@@ -76,7 +79,7 @@ const ForgotPasswordScreen = () => {
               onPress={handleBackToLogin}
               activeOpacity={0.8}
             >
-              <Text style={styles.primaryButtonText}>Back to Sign In</Text>
+              <Text style={styles.primaryButtonText}>{t.auth.backToSignIn}</Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -140,7 +143,7 @@ const ForgotPasswordScreen = () => {
             onPress={handleBackToLogin}
             disabled={isLoading}
           >
-            <Text style={styles.backLinkText}>← Back to Sign In</Text>
+            <Text style={styles.backLinkText}>← {t.auth.backToSignIn}</Text>
           </TouchableOpacity>
         </View>
       </View>

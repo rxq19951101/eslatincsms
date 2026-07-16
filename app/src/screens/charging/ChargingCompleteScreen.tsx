@@ -1,5 +1,5 @@
 /**
- * 充电完成页（仅支持扫码充电）
+ * Pantalla de carga finalizada (solo flujo QR)
  */
 
 import React, { useEffect, useState } from 'react';
@@ -10,15 +10,19 @@ import type { RouteProp } from '@react-navigation/native';
 import type { StackNavigationProp } from '@react-navigation/stack';
 
 import { COLORS } from '../../constants/config';
+import { formatMoneyCOP } from '../../utils/formatMoney';
 import type { RootStackParamList } from '../../types';
 import { useAppDispatch, useAppSelector } from '../../hooks/useRedux';
 import { settleCharging, SettleResult } from '../../api/charging';
 import { fetchWalletBalance, fetchWalletTransactions } from '../../store/slices/walletSlice';
+import { useI18n } from '../../i18n';
 
 type R = RouteProp<RootStackParamList, 'ChargingComplete'>;
 type Nav = StackNavigationProp<RootStackParamList, 'ChargingComplete'>;
 
 const ChargingCompleteScreen = () => {
+  const { t } = useI18n();
+
   const route = useRoute<R>();
   const navigation = useNavigation<Nav>();
 
@@ -31,7 +35,6 @@ const ChargingCompleteScreen = () => {
   const [settleError, setSettleError] = useState<string | null>(null);
 
   useEffect(() => {
-    // 有 session 才能结算；结算幂等，多次调用不会重复扣费
     if (!lastStoppedSession) return;
     let cancelled = false;
     (async () => {
@@ -41,12 +44,15 @@ const ChargingCompleteScreen = () => {
         const res = await settleCharging(lastStoppedSession.id);
         if (cancelled) return;
         setSettleResult(res);
-        // 刷新钱包展示
         dispatch(fetchWalletBalance());
         dispatch(fetchWalletTransactions({ limit: 50, offset: 0 }));
       } catch (e: any) {
         if (cancelled) return;
-        const msg = e?.response?.data?.detail || e?.response?.data?.message || e?.message || '结算失败';
+        const msg =
+          e?.response?.data?.detail ||
+          e?.response?.data?.message ||
+          e?.message ||
+          t.charging.settleFail;
         setSettleError(msg);
       } finally {
         if (!cancelled) setSettling(false);
@@ -61,48 +67,54 @@ const ChargingCompleteScreen = () => {
     <SafeAreaView style={styles.container}>
       <View style={styles.card}>
         <Text style={styles.icon}>✅</Text>
-        <Text style={styles.title}>充电已结束</Text>
-        <Text style={styles.subTitle}>充电桩：{chargePointId}</Text>
+        <Text style={styles.title}>{t.charging.completeTitle}</Text>
+        <Text style={styles.subTitle}>{t.charging.charger.replace('{id}', String(chargePointId))}</Text>
 
         {lastStoppedSession && (
           <View style={styles.block}>
-            <Text style={styles.kv}>会话ID：{lastStoppedSession.id}</Text>
-            <Text style={styles.kv}>TransactionId：{lastStoppedSession.transaction_id}</Text>
+            <Text style={styles.kv}>
+              {t.charging.sessionId.replace('{id}', String(lastStoppedSession.id))}
+            </Text>
+            <Text style={styles.kv}>TransactionId: {lastStoppedSession.transaction_id}</Text>
           </View>
         )}
 
         {lastRemoteResult && (
           <View style={styles.notice}>
             <Text style={styles.noticeText}>
-              {lastRemoteResult.success ? '停止请求已发送：' : '停止请求失败：'}
+              {lastRemoteResult.success ? t.charging.stopOk : t.charging.stopFail}
               {lastRemoteResult.message}
             </Text>
           </View>
         )}
 
         <View style={styles.block}>
-          <Text style={styles.kvTitle}>结算</Text>
+          <Text style={styles.kvTitle}>{t.charging.settle}</Text>
           {settling && (
             <View style={styles.settleRow}>
               <ActivityIndicator size="small" color={COLORS.PRIMARY} />
-              <Text style={styles.settleText}>结算中...</Text>
+              <Text style={styles.settleText}>{t.charging.settling}</Text>
             </View>
           )}
           {!!settleError && <Text style={styles.errorText}>{settleError}</Text>}
           {!!settleResult && (
             <View style={{ marginTop: 8 }}>
               <Text style={styles.kv}>
-                {settleResult.already_settled ? '已结算过' : '本次扣费'}：$
-                {settleResult.charged_amount.toFixed(2)}
+                {settleResult.already_settled ? t.charging.alreadySettled : t.charging.chargedNow}:{' '}
+                {formatMoneyCOP(settleResult.charged_amount)}
               </Text>
               <Text style={styles.kv}>
-                余额：${settleResult.balance.toFixed(2)} {settleResult.currency}
+                {t.charging.balance}: {formatMoneyCOP(settleResult.balance)} ({settleResult.currency})
               </Text>
               {typeof settleResult.energy_kwh === 'number' && (
-                <Text style={styles.kv}>电量：{settleResult.energy_kwh.toFixed(3)} kWh</Text>
+                <Text style={styles.kv}>
+                  {t.charging.energy}: {settleResult.energy_kwh.toFixed(3)} kWh
+                </Text>
               )}
               {typeof settleResult.price_per_kwh === 'number' && (
-                <Text style={styles.kv}>电价：${settleResult.price_per_kwh.toFixed(2)}/kWh</Text>
+                <Text style={styles.kv}>
+                  {t.charging.pricePerKwh}: ${settleResult.price_per_kwh.toFixed(2)}/kWh
+                </Text>
               )}
             </View>
           )}
@@ -113,13 +125,13 @@ const ChargingCompleteScreen = () => {
             style={[styles.btn, styles.secondary]}
             onPress={() => navigation.navigate('MainTabs')}
           >
-            <Text style={styles.secondaryText}>返回首页</Text>
+            <Text style={styles.secondaryText}>{t.charging.home}</Text>
           </TouchableOpacity>
           <TouchableOpacity
             style={[styles.btn, styles.primary]}
             onPress={() => navigation.navigate('MainTabs')}
           >
-            <Text style={styles.primaryText}>继续扫码</Text>
+            <Text style={styles.primaryText}>{t.charging.scanAgain}</Text>
           </TouchableOpacity>
         </View>
       </View>
@@ -128,32 +140,25 @@ const ChargingCompleteScreen = () => {
 };
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: COLORS.BACKGROUND, padding: 16, justifyContent: 'center' },
-  card: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 16,
-    padding: 20,
-    borderWidth: 1,
-    borderColor: COLORS.BORDER,
-  },
-  icon: { fontSize: 56, textAlign: 'center', marginBottom: 10 },
-  title: { fontSize: 20, fontWeight: '900', color: COLORS.TEXT_PRIMARY, textAlign: 'center' },
-  subTitle: { marginTop: 8, color: COLORS.TEXT_SECONDARY, textAlign: 'center' },
-  block: { marginTop: 14 },
-  kvTitle: { color: COLORS.TEXT_SECONDARY, fontWeight: '900', marginBottom: 6 },
-  kv: { color: COLORS.TEXT_PRIMARY, fontWeight: '700', marginTop: 6 },
-  notice: { marginTop: 14, backgroundColor: '#ECFDF5', borderRadius: 12, padding: 10 },
-  noticeText: { color: '#065F46', fontWeight: '700' },
-  settleRow: { flexDirection: 'row', alignItems: 'center', marginTop: 6 },
-  settleText: { marginLeft: 10, color: COLORS.TEXT_SECONDARY },
-  errorText: { marginTop: 6, color: COLORS.ERROR, fontWeight: '800' },
-  row: { flexDirection: 'row', marginTop: 18 },
-  btn: { flex: 1, height: 46, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
-  secondary: { backgroundColor: '#E5E7EB', marginRight: 10 },
-  secondaryText: { color: COLORS.TEXT_PRIMARY, fontWeight: '900' },
+  container: { flex: 1, backgroundColor: COLORS.BACKGROUND, justifyContent: 'center', padding: 20 },
+  card: { backgroundColor: '#fff', borderRadius: 16, padding: 20 },
+  icon: { fontSize: 40, textAlign: 'center', marginBottom: 8 },
+  title: { fontSize: 22, fontWeight: '700', textAlign: 'center', marginBottom: 8 },
+  subTitle: { fontSize: 14, color: COLORS.TEXT_SECONDARY, textAlign: 'center', marginBottom: 16 },
+  block: { marginTop: 12 },
+  kvTitle: { fontSize: 16, fontWeight: '600', marginBottom: 4 },
+  kv: { fontSize: 14, color: COLORS.TEXT_PRIMARY, marginTop: 4 },
+  notice: { marginTop: 12, padding: 10, backgroundColor: '#F3F4F6', borderRadius: 8 },
+  noticeText: { fontSize: 13, color: COLORS.TEXT_SECONDARY },
+  settleRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 8 },
+  settleText: { marginLeft: 8, color: COLORS.TEXT_SECONDARY },
+  errorText: { color: COLORS.ERROR, marginTop: 8 },
+  row: { flexDirection: 'row', marginTop: 24, gap: 12 },
+  btn: { flex: 1, paddingVertical: 14, borderRadius: 12, alignItems: 'center' },
   primary: { backgroundColor: COLORS.PRIMARY },
-  primaryText: { color: '#FFFFFF', fontWeight: '900' },
+  secondary: { backgroundColor: '#E5E7EB' },
+  primaryText: { color: '#fff', fontWeight: '600' },
+  secondaryText: { color: COLORS.TEXT_PRIMARY, fontWeight: '600' },
 });
 
 export default ChargingCompleteScreen;
-

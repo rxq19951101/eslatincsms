@@ -51,6 +51,12 @@ async def run_one(args) -> None:
         firmware_version=args.firmware_version,
         serial_number=args.serial_number or args.charge_point_id,
         heartbeat_interval_sec=args.heartbeat_interval,
+        enable_payment_simulation=args.enable_payment,
+        payment_delay_seconds=args.payment_delay,
+        payment_amount=args.payment_amount,
+        payment_test_card=args.payment_test_card,
+        backend_api_url=args.backend_api_url,
+        backend_api_token=args.backend_api_token,
     )
     connector_ids = args.connector_id
     meterings = [
@@ -99,6 +105,12 @@ async def run_many(args) -> None:
             firmware_version=c.get("firmware_version", "1.0.0"),
             serial_number=c.get("serial_number") or cp_id,
             heartbeat_interval_sec=int(c.get("heartbeat_interval", 30)),
+            enable_payment_simulation=args.enable_payment if hasattr(args, "enable_payment") else c.get("enable_payment_simulation", True),
+            payment_delay_seconds=args.payment_delay if hasattr(args, "payment_delay") else c.get("payment_delay_seconds", 5),
+            payment_amount=args.payment_amount if hasattr(args, "payment_amount") else c.get("payment_amount"),
+            payment_test_card=args.payment_test_card if hasattr(args, "payment_test_card") else c.get("payment_test_card", "visa_approved"),
+            backend_api_url=args.backend_api_url if hasattr(args, "backend_api_url") else c.get("backend_api_url"),
+            backend_api_token=args.backend_api_token if hasattr(args, "backend_api_token") else c.get("backend_api_token"),
         )
         meterings = [
             MeteringProfile(
@@ -150,6 +162,14 @@ def build_parser() -> argparse.ArgumentParser:
     p1.add_argument("--gen-qr", action="store_true")
     p1.add_argument("--qr-out-dir", default="./out/qr")
     p1.add_argument("--qr-format", default="hash", choices=["hash", "query", "json"])
+    # 支付模拟参数
+    p1.add_argument("--enable-payment", action="store_true", default=True, help="启用支付模拟（默认启用）")
+    p1.add_argument("--disable-payment", action="store_false", dest="enable_payment", help="禁用支付模拟")
+    p1.add_argument("--payment-delay", type=int, default=5, help="支付延迟时间（秒，模拟用户操作）")
+    p1.add_argument("--payment-amount", type=float, default=None, help="支付金额（COP），默认 10000")
+    p1.add_argument("--payment-test-card", default="visa_approved", choices=["visa_approved", "master_approved", "pending", "rejected"], help="测试卡类型")
+    p1.add_argument("--backend-api-url", default=None, help="后端 API URL（例如 http://localhost:9000）")
+    p1.add_argument("--backend-api-token", default=None, help="后端 API 认证 token（如果需要）")
 
     p2 = sub.add_parser("run-many")
     p2.add_argument("--config", required=True, help="yaml/json")

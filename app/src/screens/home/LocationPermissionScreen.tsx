@@ -17,6 +17,7 @@ import { useNavigation } from '@react-navigation/native';
 import type { StackNavigationProp } from '@react-navigation/stack';
 import type { RootStackParamList } from '../../types';
 import { COLORS } from '../../constants/config';
+import { useI18n } from '../../i18n';
 
 type LocationPermissionScreenNavigationProp = StackNavigationProp<
   RootStackParamList,
@@ -24,6 +25,8 @@ type LocationPermissionScreenNavigationProp = StackNavigationProp<
 >;
 
 const LocationPermissionScreen = () => {
+  const { t } = useI18n();
+
   const navigation = useNavigation<LocationPermissionScreenNavigationProp>();
   const [isRequesting, setIsRequesting] = useState(false);
 
@@ -33,31 +36,23 @@ const LocationPermissionScreen = () => {
       const { status } = await Location.requestForegroundPermissionsAsync();
       
       if (status === 'granted') {
-        // 权限已授予，导航到主页面
-        navigation.replace('MainTabs');
+        navigation.replace('MainTabs', undefined);
       } else {
-        Alert.alert(
-          'Permission Denied',
-          'Location permission is required to find nearby charging stations. Please enable it in your device settings.',
-          [
-            { text: 'Cancel', style: 'cancel' },
-            { text: 'Open Settings', onPress: () => {
-              // TODO: 打开设置
-            }},
-          ]
-        );
+        Alert.alert(t.location.title, t.location.required, [
+          { text: t.common.cancel, style: 'cancel' },
+          { text: t.common.ok },
+        ]);
       }
     } catch (error) {
       console.error('Error requesting location permission:', error);
-      Alert.alert('Error', 'Failed to request location permission');
+      Alert.alert(t.common.error, t.location.failed);
     } finally {
       setIsRequesting(false);
     }
   };
 
   const handleSkip = () => {
-    // 跳过权限请求，直接进入主页面
-    navigation.replace('MainTabs');
+    navigation.replace('MainTabs', undefined);
   };
 
   return (
@@ -65,31 +60,25 @@ const LocationPermissionScreen = () => {
       <StatusBar barStyle="dark-content" />
 
       <View style={styles.content}>
-        {/* 图标区域 */}
         <View style={styles.iconContainer}>
           <View style={styles.iconCircle}>
             <Text style={styles.icon}>📍</Text>
           </View>
-          {/* 装饰圆圈 */}
           <View style={[styles.decorCircle, styles.decorCircle1]} />
           <View style={[styles.decorCircle, styles.decorCircle2]} />
         </View>
 
-        {/* 文本内容 */}
         <View style={styles.textContainer}>
-          <Text style={styles.title}>Enable Location Services</Text>
-          <Text style={styles.subtitle}>
-            We need your location to show nearby charging stations and provide accurate navigation.
-          </Text>
+          <Text style={styles.title}>{t.location.title}</Text>
+          <Text style={styles.subtitle}>{t.location.body}</Text>
           
           <View style={styles.featuresList}>
-            <FeatureItem icon="🔍" text="Find charging stations near you" />
-            <FeatureItem icon="🗺️" text="Get accurate navigation" />
-            <FeatureItem icon="⚡" text="View real-time availability" />
+            <FeatureItem icon="🔍" text="Encuentra estaciones cerca de ti" />
+            <FeatureItem icon="🗺️" text="Navegación precisa" />
+            <FeatureItem icon="⚡" text="Disponibilidad en tiempo real" />
           </View>
         </View>
 
-        {/* 按钮组 */}
         <View style={styles.buttonsContainer}>
           <TouchableOpacity
             style={styles.primaryButton}
@@ -98,7 +87,7 @@ const LocationPermissionScreen = () => {
             activeOpacity={0.8}
           >
             <Text style={styles.primaryButtonText}>
-              {isRequesting ? 'Requesting...' : 'Enable Location'}
+              {isRequesting ? t.common.loading : t.location.allow}
             </Text>
           </TouchableOpacity>
 
@@ -107,12 +96,10 @@ const LocationPermissionScreen = () => {
             onPress={handleSkip}
             disabled={isRequesting}
           >
-            <Text style={styles.skipButtonText}>Skip for now</Text>
+            <Text style={styles.skipButtonText}>{t.location.skip}</Text>
           </TouchableOpacity>
 
-          <Text style={styles.privacyText}>
-            Your location data is only used to provide services and is never shared with third parties.
-          </Text>
+          <Text style={styles.privacyText}>{t.legal.privacyIntro}</Text>
         </View>
       </View>
     </SafeAreaView>

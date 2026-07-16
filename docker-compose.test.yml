@@ -93,13 +93,19 @@ services:
     restart: unless-stopped
 
   admin:
-    build: ./admin
+    build:
+      context: ./admin
+      args:
+        NEXT_PUBLIC_GOOGLE_MAPS_API_KEY: ${NEXT_PUBLIC_GOOGLE_MAPS_API_KEY:-}
+        NEXT_PUBLIC_GOOGLE_MAP_ID: ${NEXT_PUBLIC_GOOGLE_MAP_ID:-}
+        NEXT_PUBLIC_CSMS_HTTP: ${NEXT_PUBLIC_CSMS_HTTP:-http://localhost:8001}
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8001}
     container_name: ocpp-admin-test
     ports:
       - "3002:3000"
     environment:
-      - NEXT_PUBLIC_CSMS_HTTP=http://localhost:8001
-      - NEXT_PUBLIC_API_BASE_URL=http://localhost:8001
+      - NEXT_PUBLIC_CSMS_HTTP=${NEXT_PUBLIC_CSMS_HTTP:-http://localhost:8001}
+      - NEXT_PUBLIC_API_BASE_URL=${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8001}
     depends_on:
       - csms
     networks:

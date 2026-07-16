@@ -9,12 +9,16 @@ import { useNavigation } from '@react-navigation/native';
 import type { StackNavigationProp } from '@react-navigation/stack';
 
 import { COLORS } from '../../constants/config';
+import { useI18n } from '../../i18n';
 import type { RootStackParamList, PaymentMethod } from '../../types';
 import { addPaymentMethod, getPaymentMethods, savePaymentMethods } from '../../utils/paymentMethodsStorage';
+import ScreenHeader from '../../components/ui/ScreenHeader';
 
 type Nav = StackNavigationProp<RootStackParamList, 'AddPayment'>;
 
 const AddPaymentScreen = () => {
+  const { t } = useI18n();
+
   const navigation = useNavigation<Nav>();
   const [type, setType] = useState<PaymentMethod['type']>('visa');
   const [lastFour, setLastFour] = useState('');
@@ -28,7 +32,7 @@ const AddPaymentScreen = () => {
 
   const onSave = async () => {
     if (!isLastFourValid) {
-      Alert.alert('输入有误', '卡号后四位需要是 4 位数字（也可以不填）');
+      Alert.alert(t.payment.lastFourAlertTitle, t.payment.lastFourAlertBody);
       return;
     }
     setSaving(true);
@@ -55,7 +59,7 @@ const AddPaymentScreen = () => {
 
       navigation.goBack();
     } catch {
-      Alert.alert('保存失败', '请稍后重试');
+      Alert.alert(t.common.error, t.payment.saveFailed);
     } finally {
       setSaving(false);
     }
@@ -63,16 +67,16 @@ const AddPaymentScreen = () => {
 
   return (
     <SafeAreaView style={styles.container}>
-      <View style={styles.header}>
-        <TouchableOpacity style={styles.backBtn} onPress={() => navigation.goBack()}>
-          <Text style={styles.backText}>←</Text>
-        </TouchableOpacity>
-        <Text style={styles.headerTitle}>添加支付方式</Text>
-        <View style={styles.headerRight} />
+      <ScreenHeader title={t.payment.addMethodDemo} onBack={() => navigation.goBack()} />
+
+      <View style={styles.demoBanner}>
+        <Text style={styles.demoBannerText}>
+          {t.payment.addMethodHint}
+        </Text>
       </View>
 
       <View style={styles.card}>
-        <Text style={styles.label}>类型</Text>
+        <Text style={styles.label}>{t.payment.type}</Text>
         <View style={styles.typeRow}>
           {([
             ['visa', 'VISA'],
@@ -91,21 +95,21 @@ const AddPaymentScreen = () => {
           ))}
         </View>
 
-        <Text style={[styles.label, { marginTop: 14 }]}>卡号后四位（可选）</Text>
+        <Text style={[styles.label, { marginTop: 14 }]}>{t.payment.lastFour}</Text>
         <TextInput
           value={lastFour}
           onChangeText={setLastFour}
-          placeholder="例如 4242"
+          placeholder={t.payment.lastFourPlaceholder}
           keyboardType="numeric"
           maxLength={4}
           style={styles.input}
         />
-        {!isLastFourValid && <Text style={styles.error}>请输入 4 位数字</Text>}
+        {!isLastFourValid && <Text style={styles.error}>{t.payment.lastFourInvalid}</Text>}
       </View>
 
       <View style={styles.bottomBar}>
         <TouchableOpacity style={[styles.btn, styles.primary, saving && styles.disabled]} disabled={saving} onPress={onSave}>
-          <Text style={styles.primaryText}>{saving ? '保存中...' : '保存'}</Text>
+          <Text style={styles.primaryText}>{saving ? t.payment.saving : t.common.save}</Text>
         </TouchableOpacity>
       </View>
     </SafeAreaView>
@@ -114,19 +118,16 @@ const AddPaymentScreen = () => {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: COLORS.BACKGROUND },
-  header: {
-    height: 56,
-    backgroundColor: '#FFFFFF',
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: COLORS.BORDER,
+  demoBanner: {
+    marginHorizontal: 16,
+    marginTop: 8,
+    padding: 12,
+    backgroundColor: '#FFFBEB',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#FDE68A',
   },
-  backBtn: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
-  backText: { fontSize: 22, color: COLORS.TEXT_PRIMARY },
-  headerTitle: { flex: 1, textAlign: 'center', fontSize: 16, fontWeight: '800', color: COLORS.TEXT_PRIMARY },
-  headerRight: { width: 44 },
+  demoBannerText: { fontSize: 13, color: COLORS.TEXT_PRIMARY, lineHeight: 20 },
   card: {
     margin: 16,
     backgroundColor: '#FFFFFF',

@@ -19,6 +19,7 @@ import { useNavigation } from '@react-navigation/native';
 import type { StackNavigationProp } from '@react-navigation/stack';
 import type { RootStackParamList } from '../../types';
 import { COLORS, PASSWORD_RULES } from '../../constants/config';
+import { useI18n } from '../../i18n';
 import { useAppDispatch, useAppSelector } from '../../hooks/useRedux';
 import { registerWithEmail } from '../../store/slices/authSlice';
 
@@ -28,6 +29,8 @@ type EmailRegisterScreenNavigationProp = StackNavigationProp<
 >;
 
 const EmailRegisterScreen = () => {
+  const { t } = useI18n();
+
   const navigation = useNavigation<EmailRegisterScreenNavigationProp>();
   const dispatch = useAppDispatch();
   const { isLoading } = useAppSelector((state) => state.auth);
@@ -72,48 +75,48 @@ const EmailRegisterScreen = () => {
   const handleRegister = async () => {
     // 验证全名
     if (!fullName.trim()) {
-      Alert.alert('Error', 'Please enter your full name');
+      Alert.alert(t.common.error, t.auth.enterFullName);
       return;
     }
 
     // 验证邮箱
     if (!email.trim()) {
-      Alert.alert('Error', 'Please enter your email');
+      Alert.alert(t.common.error, t.auth.enterEmail);
       return;
     }
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (!emailRegex.test(email)) {
-      Alert.alert('Error', 'Please enter a valid email address');
+      Alert.alert(t.common.error, t.auth.invalidEmail);
       return;
     }
 
     // 验证密码
     if (password.length < PASSWORD_RULES.MIN_LENGTH) {
-      Alert.alert('Error', `Password must be at least ${PASSWORD_RULES.MIN_LENGTH} characters`);
+      Alert.alert(t.common.error, t.auth.passwordMin.replace('{n}', String(PASSWORD_RULES.MIN_LENGTH)));
       return;
     }
     if (PASSWORD_RULES.REQUIRE_UPPERCASE && !/[A-Z]/.test(password)) {
-      Alert.alert('Error', 'Password must contain at least one uppercase letter');
+      Alert.alert(t.common.error, t.auth.passwordUpper);
       return;
     }
     if (PASSWORD_RULES.REQUIRE_LOWERCASE && !/[a-z]/.test(password)) {
-      Alert.alert('Error', 'Password must contain at least one lowercase letter');
+      Alert.alert(t.common.error, t.auth.passwordLower);
       return;
     }
     if (PASSWORD_RULES.REQUIRE_NUMBER && !/[0-9]/.test(password)) {
-      Alert.alert('Error', 'Password must contain at least one number');
+      Alert.alert(t.common.error, t.auth.passwordNumber);
       return;
     }
 
     // 验证密码确认
     if (password !== confirmPassword) {
-      Alert.alert('Error', 'Passwords do not match');
+      Alert.alert(t.common.error, t.auth.passwordMismatch);
       return;
     }
 
     // 验证是否同意条款
     if (!agreeToTerms) {
-      Alert.alert('Error', 'Please agree to the Terms and Conditions');
+      Alert.alert(t.common.error, t.auth.agreeTerms);
       return;
     }
 
@@ -129,7 +132,7 @@ const EmailRegisterScreen = () => {
       // 注册成功，导航到邮箱验证页面
       navigation.navigate('EmailVerification', { email: email.trim().toLowerCase() });
     } catch (err: any) {
-      Alert.alert('Registration Failed', err.message || 'An error occurred');
+      Alert.alert(t.auth.loginFailed, err.message || t.common.error);
     }
   };
 
@@ -157,7 +160,7 @@ const EmailRegisterScreen = () => {
 
         {/* 标题 */}
         <View style={styles.header}>
-          <Text style={styles.title}>Create Account 🎉</Text>
+          <Text style={styles.title}>{t.auth.signUp}</Text>
           <Text style={styles.subtitle}>
             Sign up to get started with EsLatin
           </Text>
@@ -167,7 +170,7 @@ const EmailRegisterScreen = () => {
         <View style={styles.form}>
           {/* 全名输入 */}
           <View style={styles.inputContainer}>
-            <Text style={styles.inputLabel}>Full Name</Text>
+            <Text style={styles.inputLabel}>{t.auth.fullName}</Text>
             <TextInput
               style={styles.input}
               placeholder="John Doe"
@@ -181,7 +184,7 @@ const EmailRegisterScreen = () => {
 
           {/* 邮箱输入 */}
           <View style={styles.inputContainer}>
-            <Text style={styles.inputLabel}>Email</Text>
+            <Text style={styles.inputLabel}>{t.auth.email}</Text>
             <TextInput
               style={styles.input}
               placeholder="your.email@example.com"
@@ -197,7 +200,7 @@ const EmailRegisterScreen = () => {
 
           {/* 密码输入 */}
           <View style={styles.inputContainer}>
-            <Text style={styles.inputLabel}>Password</Text>
+            <Text style={styles.inputLabel}>{t.auth.password}</Text>
             <View style={styles.passwordContainer}>
               <TextInput
                 style={[styles.input, styles.passwordInput]}
@@ -241,7 +244,7 @@ const EmailRegisterScreen = () => {
 
           {/* 确认密码输入 */}
           <View style={styles.inputContainer}>
-            <Text style={styles.inputLabel}>Confirm Password</Text>
+            <Text style={styles.inputLabel}>{t.auth.confirmPassword}</Text>
             <View style={styles.passwordContainer}>
               <TextInput
                 style={[styles.input, styles.passwordInput]}
@@ -276,7 +279,7 @@ const EmailRegisterScreen = () => {
             </View>
             <Text style={styles.termsText}>
               I agree to the{' '}
-              <Text style={styles.termsLink}>Terms and Conditions</Text>
+              <Text style={styles.termsLink}>{t.auth.termsLink}</Text>
             </Text>
           </TouchableOpacity>
 
@@ -290,7 +293,7 @@ const EmailRegisterScreen = () => {
             {isLoading ? (
               <ActivityIndicator color="#FFFFFF" />
             ) : (
-              <Text style={styles.signUpButtonText}>Sign Up</Text>
+              <Text style={styles.signUpButtonText}>{t.auth.signUp}</Text>
             )}
           </TouchableOpacity>
 
@@ -298,7 +301,7 @@ const EmailRegisterScreen = () => {
           <View style={styles.signinContainer}>
             <Text style={styles.signinText}>Already have an account? </Text>
             <TouchableOpacity onPress={handleSignInNavigation} disabled={isLoading}>
-              <Text style={styles.signinLink}>Sign In</Text>
+              <Text style={styles.signinLink}>{t.auth.signIn}</Text>
             </TouchableOpacity>
           </View>
         </View>

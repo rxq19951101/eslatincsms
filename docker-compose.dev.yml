@@ -1,7 +1,8 @@
 #
-# 开发环境 Docker Compose 配置
+# 开发环境 Docker Compose 配置（端口与主栈错开；数据库账号与生产一致 ocpp_user）
 # 使用端口: CSMS:8000, Admin:3001, DB:5433, Redis:6380, MQTT:1884/9002
 # 使用: docker compose -f docker-compose.dev.yml up -d
+# 若曾用旧版 local 用户初始化过卷，需: docker compose -f docker-compose.dev.yml down -v 后重建
 #
 
 services:
@@ -11,15 +12,15 @@ services:
     ports:
       - "5433:5432"
     environment:
-      - POSTGRES_USER=local
-      - POSTGRES_PASSWORD=local
+      - POSTGRES_USER=ocpp_user
+      - POSTGRES_PASSWORD=ocpp_password
       - POSTGRES_DB=ocpp
     volumes:
       - postgres_data_dev:/var/lib/postgresql/data
     networks:
       - ocppnet-dev
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U local -d ocpp"]
+      test: ["CMD-SHELL", "pg_isready -U ocpp_user -d ocpp"]
       interval: 5s
       timeout: 3s
       retries: 3
@@ -70,7 +71,7 @@ services:
     environment:
       - ENVIRONMENT=development
       - DEBUG=true
-      - DATABASE_URL=postgresql://local:local@db:5432/ocpp
+      - DATABASE_URL=postgresql://ocpp_user:ocpp_password@db:5432/ocpp
       - REDIS_URL=redis://redis:6379/0
       - MQTT_BROKER_HOST=mqtt-broker
       - MQTT_BROKER_PORT=1883
@@ -90,13 +91,19 @@ services:
     restart: unless-stopped
 
   admin:
-    build: ./admin
+    build:
+      context: ./admin
+      args:
+        NEXT_PUBLIC_GOOGLE_MAPS_API_KEY: ${NEXT_PUBLIC_GOOGLE_MAPS_API_KEY:-}
+        NEXT_PUBLIC_GOOGLE_MAP_ID: ${NEXT_PUBLIC_GOOGLE_MAP_ID:-}
+        NEXT_PUBLIC_CSMS_HTTP: ${NEXT_PUBLIC_CSMS_HTTP:-http://localhost:8000}
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
     container_name: ocpp-admin-dev
     ports:
       - "3001:3000"
     environment:
-      - NEXT_PUBLIC_CSMS_HTTP=http://localhost:8000
-      - NEXT_PUBLIC_API_BASE_URL=http://localhost:8000
+      - NEXT_PUBLIC_CSMS_HTTP=${NEXT_PUBLIC_CSMS_HTTP:-http://localhost:8000}
+      - NEXT_PUBLIC_API_BASE_URL=${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
     depends_on:
       - csms
     networks:

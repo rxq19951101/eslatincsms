@@ -221,6 +221,52 @@ export default function AlertsPage() {
           </div>
         )}
       </div>
+
+      <AlertRulesSection />
     </div>
+  );
+}
+
+interface AlertRule {
+  id: string;
+  name: string;
+  alert_type: string;
+  severity: string;
+  is_enabled: boolean;
+}
+
+function AlertRulesSection() {
+  const { data: rules, isLoading } = useSWR<AlertRule[]>(
+    API_ENDPOINTS.ALERT_RULES,
+    (url) => apiGet<AlertRule[]>(url)
+  );
+
+  return (
+    <Card className="bg-slate-800/80 backdrop-blur-sm border-slate-700">
+      <CardHeader>
+        <CardTitle className="text-white">告警规则</CardTitle>
+      </CardHeader>
+      <CardContent>
+        {isLoading ? (
+          <p className="text-slate-400">加载规则...</p>
+        ) : !rules?.length ? (
+          <p className="text-slate-400">暂无告警规则，可通过 API 创建</p>
+        ) : (
+          <div className="space-y-2">
+            {rules.map((rule) => (
+              <div key={rule.id} className="flex items-center justify-between p-3 bg-slate-700/30 rounded-lg">
+                <div>
+                  <p className="text-white font-medium">{rule.name}</p>
+                  <p className="text-slate-400 text-sm">{rule.alert_type} · {rule.severity}</p>
+                </div>
+                <Badge variant={rule.is_enabled ? 'default' : 'secondary'}>
+                  {rule.is_enabled ? '启用' : '禁用'}
+                </Badge>
+              </div>
+            ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
   );
 }

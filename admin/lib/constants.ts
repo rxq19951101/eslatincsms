@@ -32,6 +32,7 @@ export const API_ENDPOINTS = {
   
   // 交易
   TRANSACTIONS: '/api/v1/transactions',
+  TRANSACTIONS_ACTIVE: '/api/v1/transactions/active',
   
   // 统计
   STATISTICS_REVENUE: '/api/v1/admin/statistics/revenue',
@@ -51,6 +52,10 @@ export const API_ENDPOINTS = {
 
   // 管理员用户
   ADMIN_USERS: '/api/v1/admin/users',
+  END_USERS: '/api/v1/admin/end-users',
+  APP_USERS: '/api/v1/admin/app-users',
+  APP_USER_ADJUST_BALANCE: (id: string) => `/api/v1/admin/app-users/${id}/adjust-balance`,
+  ALERT_RULES: '/api/v1/admin/alerts/rules',
 
   // 租户成员
   MEMBERSHIPS: '/api/v1/admin/memberships',
@@ -62,6 +67,11 @@ export const API_ENDPOINTS = {
   OCPP_CHANGE_CONFIG: '/api/v1/ocpp_control/change-configuration',
   OCPP_GET_CONFIG: '/api/v1/ocpp_control/get-configuration',
   OCPP_UNLOCK: '/api/v1/ocpp_control/unlock-connector',
+  
+  // 支付管理（Wompi）
+  PAYMENTS: '/api/v1/admin/payments',
+  PAYMENT_DETAIL: (id: string) => `/api/v1/admin/payments/${id}`,
+  PAYMENT_RECONCILE: (id: string) => `/api/v1/admin/payments/${id}/reconcile`,
 } as const;
 
 // LocalStorage 键名
@@ -73,3 +83,4 @@ export const STORAGE_KEYS = {
 
 // 刷新间隔（毫秒）
 export const REFRESH_INTERVAL = 30000; // 30 秒
+export const ACTIVE_SESSION_REFRESH_INTERVAL = 5000; // 活跃会话 5 秒

@@ -16,6 +16,8 @@ import {
   Settings,
   Menu,
   X,
+  CreditCard,
+  Activity,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
@@ -23,6 +25,8 @@ const navigation = [
   { name: '仪表板', href: '/', icon: LayoutDashboard },
   { name: '站点管理', href: '/sites', icon: Zap },
   { name: '交易管理', href: '/transactions', icon: FileText },
+  { name: '活跃会话', href: '/sessions', icon: Activity },
+  { name: '支付管理', href: '/payments', icon: CreditCard },
   { name: '统计报表', href: '/statistics', icon: BarChart3 },
   { name: '告警管理', href: '/alerts', icon: Bell },
   { name: '用户管理', href: '/users', icon: Users },

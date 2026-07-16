@@ -37,7 +37,7 @@ def create_test_user():
         
         # 检查用户是否已存在
         existing_user = db.query(EndUser).filter(
-            EndUser.email == "test@eslatin.com"
+            EndUser.email == "test@eslatin.com.co"
         ).first()
         
         if existing_user:
@@ -51,7 +51,7 @@ def create_test_user():
         test_user = EndUser(
             tenant_id=tenant.id,
             phone="+1234567890",
-            email="test@eslatin.com",
+            email="test@eslatin.com.co",
             full_name="Test User",
             id_tag="TEST_USER_001",
             password_hash=hash_password("Test123456"),  # 密码: Test123456
@@ -68,7 +68,7 @@ def create_test_user():
         
         print("\n🎉 测试用户创建成功！")
         print("=" * 50)
-        print(f"Email: test@eslatin.com")
+        print(f"Email: test@eslatin.com.co")
         print(f"Password: Test123456")
         print(f"User ID: {test_user.id}")
         print(f"Tenant ID: {tenant.id}")

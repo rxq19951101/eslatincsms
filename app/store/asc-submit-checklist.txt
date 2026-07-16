@@ -1,0 +1,12 @@
+# ASC submit checklist (after TestFlight build exists)
+
+[ ] App created in App Store Connect with bundle com.eslatin.app
+[ ] Privacy Policy URL: https://api.eslatin.com.co/legal/privacy.html (must 200)
+[ ] Support URL or email: support@eslatin.com.co
+[ ] Age rating completed
+[ ] Screenshots 6.7" + 6.1" (map, scan, charging, wallet, account)
+[ ] Paste copy from asc-listing.es.txt
+[ ] App Privacy from asc-privacy-labels.txt
+[ ] Select TestFlight build
+[ ] Review notes + demo account from asc-listing.es.txt
+[ ] Submit for Review

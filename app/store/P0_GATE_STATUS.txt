@@ -1,0 +1,30 @@
+EsLatin App Store P0 — Gate status
+
+=== Deferred (user asked skip) ===
+U9 Review demo account   DEFERRED
+
+=== Done ===
+U5 Apple credentials     DONE
+  appleId=support@eslatin.com.co
+  appleTeamId=U3JDHH2G87
+  ascAppId=6790822403
+U7 Google Maps Key       DONE (EAS production env; restrict key in GCP still recommended)
+  EXPO_PUBLIC_GOOGLE_MAPS_API_KEY set for production
+
+=== Done (runtime — must keep processes up) ===
+Gate2 Cloudflare + local CSMS  OK (verified 200 on health/legal/docs)
+  cloudflared tunnel -> localhost:9000
+  docker: ocpp-db, ocpp-redis, ocpp-mqtt
+  uvicorn CSMS :9000
+
+=== Active next ===
+Keep cloudflared + CSMS :9000 running while testing / App Review
+Rebuild iOS with Maps Key + TestFlight resubmit
+ASC export compliance + Internal Testing
+ASC metadata / screenshots before store submit
+U9 Review demo account
+
+=== Domains ===
+API: https://api.eslatin.com.co
+Support: support@eslatin.com.co
+Review email (when ready): review@eslatin.com.co
