@@ -4,6 +4,7 @@
 #
 
 from typing import List, Optional
+from decimal import Decimal
 from uuid import UUID
 from sqlalchemy.orm import Session
 from sqlalchemy import and_
@@ -158,7 +159,7 @@ class EndUserService:
         id_tag: str,
         email: Optional[str] = None,
         full_name: Optional[str] = None,
-        balance: float = 0.0
+        balance: Decimal = Decimal("0")
     ) -> EndUser:
         """创建终端用户"""
         # 检查手机号和ID标签是否已存在（按租户）

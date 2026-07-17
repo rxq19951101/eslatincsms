@@ -40,21 +40,22 @@ async def get_current_app_user(
 
 
 class WalletBalanceResponse(BaseModel):
-    balance: float
+    balance: Decimal
     currency: str = "COP"
 
 
 class WalletTransactionResponse(BaseModel):
     id: str
     type: str
-    amount: float
+    amount: Decimal
     description: Optional[str] = None
     created_at: str
     charge_point_name: Optional[str] = None
 
 
 class TopUpRequest(BaseModel):
-    amount: float = Field(..., gt=0, description="充值金额（正数）")
+    amount: Decimal = Field(..., gt=0, description="充值金额（正数）")
+    idempotency_key: str = Field(..., min_length=8, description="充值幂等键")
 
 
 @router.get("/balance", response_model=WalletBalanceResponse, summary="获取钱包余额（终端用户）")
@@ -248,18 +249,15 @@ def top_up(
             if not app_user:
                 raise HTTPException(status_code=404, detail="User not found")
 
-            # 更新余额（直接写入 AppUser.balance）
-            current_balance = app_user.balance or Decimal("0")
-            try:
-                new_balance = Decimal(str(current_balance)) + amount
-            except Exception:
-                new_balance = amount
+            ledger_id = f"mock_topup_{app_user.id}_{req.idempotency_key}"
+            existing_tx = db.query(AppWalletTransaction).filter(AppWalletTransaction.id == ledger_id).first()
+            if existing_tx:
+                return WalletBalanceResponse(balance=Decimal(str(app_user.balance or 0)), currency="COP")
 
-            app_user.balance = new_balance
-
-            # 写入流水
+            app_user = db.query(AppUser).filter(AppUser.id == app_user.id).with_for_update().one()
+            app_user.balance = Decimal(str(app_user.balance or 0)) + amount
             tx = AppWalletTransaction(
-                id=generate_order_id(),  # 复用ID生成器，保证可读且唯一（无需严格语义）
+                id=ledger_id,
                 app_user_id=app_user.id,
                 operator_tenant_id=operator_tenant.id,
                 charge_point_id=None,
@@ -323,7 +321,7 @@ def top_up(
 class UnpaidChargeResponse(BaseModel):
     session_id: int
     charge_point_id: str
-    amount: float
+    amount: Decimal
     currency: str
     created_at: str
     payment_order_id: Optional[str] = None
@@ -502,4 +500,3 @@ def pay_unpaid_charge(
             params={"session_id": req.session_id}
         )
         raise
-

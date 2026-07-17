@@ -3,9 +3,11 @@
 # 使用pydantic-settings进行配置验证和管理
 #
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import List, Optional
 from functools import lru_cache
+import os
 
 
 class Settings(BaseSettings):
@@ -62,19 +64,9 @@ class Settings(BaseSettings):
     ws_ping_interval: int = 20
     ws_ping_timeout: int = 10
     ws_max_connections: int = 1000
-    enable_websocket_transport: bool = False  # 是否启用 WebSocket 传输（默认关闭，可通过环境变量启用）
+    enable_websocket_transport: bool = True
     
-    # HTTP传输配置
-    enable_http_transport: bool = False  # 是否启用 HTTP 传输（默认关闭，可通过环境变量启用）
-    http_ocpp_endpoint: str = "/ocpp"  # HTTP OCPP 端点前缀
     
-    # MQTT传输配置（默认通信模式）
-    enable_mqtt_transport: bool = True  # 是否启用 MQTT 传输（默认启用）
-    mqtt_broker_host: str = "localhost"  # MQTT broker 地址
-    mqtt_broker_port: int = 1883  # MQTT broker 端口
-    mqtt_username: Optional[str] = None  # MQTT 用户名（可选）
-    mqtt_password: Optional[str] = None  # MQTT 密码（可选）
-    mqtt_topic_prefix: str = "ocpp"  # MQTT 主题前缀
     
     # OCPP配置
     ocpp_heartbeat_interval: int = 30
@@ -108,9 +100,33 @@ class Settings(BaseSettings):
     # 启动充电所需最低钱包余额（COP）
     min_wallet_balance_to_start: float = 5000.0
 
+    @model_validator(mode="after")
+    def validate_production_security(self) -> "Settings":
+        """生产环境拒绝使用占位密钥或未认证的设备传输配置。"""
+        if self.environment.lower() != "production":
+            return self
+
+        if self.secret_key in {"", "your-secret-key-change-in-production"} or len(self.secret_key) < 32:
+            raise ValueError("Production SECRET_KEY must be configured and at least 32 characters")
+
+        encryption_key = os.getenv("ENCRYPTION_KEY", "").strip()
+        if not encryption_key:
+            raise ValueError("Production ENCRYPTION_KEY must be configured")
+
+        encryption_salt = os.getenv("ENCRYPTION_SALT", "").strip()
+        if not encryption_salt or encryption_salt == "ocpp_csms_salt":
+            raise ValueError("Production ENCRYPTION_SALT must be configured")
+
+        if os.getenv("OCPP_API_KEYS", "").strip() == "":
+            raise ValueError("Production OCPP_API_KEYS must be configured")
+
+        if os.getenv("OCPP_WS_REQUIRE_PRE_REGISTERED", "true").lower() not in {"true", "1", "yes"}:
+            raise ValueError("Production OCPP_WS_REQUIRE_PRE_REGISTERED must remain enabled")
+
+        return self
+
 
 @lru_cache()
 def get_settings() -> Settings:
     """获取配置实例（单例）"""
     return Settings()
-

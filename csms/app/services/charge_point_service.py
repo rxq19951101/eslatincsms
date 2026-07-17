@@ -478,6 +478,7 @@ class ChargePointService:
             
             for config_key, config_value, value_type in default_configs:
                 config = DeviceConfig(
+                    tenant_id=tenant_id,
                     device_serial_number=device_serial_number,
                     config_key=config_key,
                     config_value=config_value,
@@ -539,4 +540,3 @@ class ChargePointService:
         
         db.flush()
         logger.debug(f"创建充电桩默认配置: {charge_point_id}")
-

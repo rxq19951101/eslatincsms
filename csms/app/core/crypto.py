@@ -19,6 +19,8 @@ logger = logging.getLogger("ocpp_csms")
 _temp_key = Fernet.generate_key().decode()
 ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY", _temp_key)
 if ENCRYPTION_KEY == _temp_key:
+    if os.getenv("ENVIRONMENT", "development").lower() == "production":
+        raise RuntimeError("Production ENCRYPTION_KEY must be configured")
     logger.warning("使用临时生成的加密密钥，生产环境必须设置ENCRYPTION_KEY环境变量")
 
 

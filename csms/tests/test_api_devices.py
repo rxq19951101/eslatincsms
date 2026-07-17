@@ -10,9 +10,9 @@ from app.core.crypto import derive_password, decrypt_master_secret
 class TestDevicesAPI:
     """设备管理API测试类"""
     
-    def test_create_device_success(self, client: TestClient, db_session):
+    def test_create_device_success(self, admin_client: TestClient, db_session):
         """测试成功创建设备"""
-        response = client.post(
+        response = admin_client.post(
             "/api/v1/devices",
             json={
                 "serial_number": "123456789012345",
@@ -36,9 +36,9 @@ class TestDevicesAPI:
         assert device is not None
         assert device.mqtt_client_id == data["mqtt_client_id"]
     
-    def test_create_device_duplicate(self, client: TestClient, sample_device, db_session):
+    def test_create_device_duplicate(self, admin_client: TestClient, sample_device, db_session):
         """测试创建重复设备"""
-        response = client.post(
+        response = admin_client.post(
             "/api/v1/devices",
             json={
                 "serial_number": sample_device.serial_number,
@@ -46,12 +46,13 @@ class TestDevicesAPI:
             }
         )
         assert response.status_code == 400
-        assert "已存在" in response.json()["detail"]
+        assert response.json()["error"]["code"] == "HTTP_ERROR"
+        assert "已存在" in response.json()["error"]["message"]
     
-    def test_create_device_invalid_serial_length(self, client: TestClient):
+    def test_create_device_invalid_serial_length(self, admin_client: TestClient):
         """测试创建序列号长度无效的设备"""
         # 序列号太短
-        response = client.post(
+        response = admin_client.post(
             "/api/v1/devices",
             json={
                 "serial_number": "12345",  # 只有5位
@@ -61,7 +62,7 @@ class TestDevicesAPI:
         assert response.status_code == 422  # 验证错误
         
         # 序列号太长
-        response = client.post(
+        response = admin_client.post(
             "/api/v1/devices",
             json={
                 "serial_number": "12345678901234567890",  # 20位
@@ -70,9 +71,9 @@ class TestDevicesAPI:
         )
         assert response.status_code == 422
     
-    def test_create_device_with_type_code(self, client: TestClient, db_session):
+    def test_create_device_with_type_code(self, admin_client: TestClient, db_session):
         """测试使用设备类型代码创建设备"""
-        response = client.post(
+        response = admin_client.post(
             "/api/v1/devices",
             json={
                 "serial_number": "987654321098765",
@@ -83,9 +84,9 @@ class TestDevicesAPI:
         data = response.json()
         assert data["device_type_code"] == "zcf"
     
-    def test_create_device_invalid_type_code(self, client: TestClient):
+    def test_create_device_invalid_type_code(self, admin_client: TestClient):
         """测试使用设备类型代码（现在不再验证类型代码是否存在，直接使用）"""
-        response = client.post(
+        response = admin_client.post(
             "/api/v1/devices",
             json={
                 "serial_number": "111111111111111",
@@ -97,36 +98,36 @@ class TestDevicesAPI:
         data = response.json()
         assert data["device_type_code"] == "invalid_type"
     
-    def test_list_devices_empty(self, client: TestClient):
+    def test_list_devices_empty(self, admin_client: TestClient):
         """测试获取空设备列表"""
-        response = client.get("/api/v1/devices")
+        response = admin_client.get("/api/v1/devices")
         assert response.status_code == 200
         data = response.json()
         assert "devices" in data
         assert "total" in data
         assert isinstance(data["devices"], list)
     
-    def test_list_devices_with_data(self, client: TestClient, sample_device, db_session):
+    def test_list_devices_with_data(self, admin_client: TestClient, sample_device, db_session):
         """测试获取有数据的设备列表"""
-        response = client.get("/api/v1/devices")
+        response = admin_client.get("/api/v1/devices")
         assert response.status_code == 200
         data = response.json()
         assert data["total"] > 0
         assert any(d["serial_number"] == sample_device.serial_number for d in data["devices"])
     
-    def test_list_devices_filter_by_type(self, client: TestClient, sample_device, db_session):
+    def test_list_devices_filter_by_type(self, admin_client: TestClient, sample_device, db_session):
         """测试按设备类型筛选"""
-        response = client.get(
+        response = admin_client.get(
             f"/api/v1/devices?device_type_code={sample_device.type_code}"
         )
         assert response.status_code == 200
         data = response.json()
         assert all(d["device_type_code"] == sample_device.type_code for d in data["devices"])
     
-    def test_list_devices_filter_by_active(self, client: TestClient, sample_device, db_session):
+    def test_list_devices_filter_by_active(self, admin_client: TestClient, sample_device, db_session):
         """测试按激活状态筛选"""
         # 测试激活的设备
-        response = client.get("/api/v1/devices?is_active=true")
+        response = admin_client.get("/api/v1/devices?is_active=true")
         assert response.status_code == 200
         data = response.json()
         assert all(d["is_active"] is True for d in data["devices"])
@@ -134,12 +135,12 @@ class TestDevicesAPI:
         # 测试未激活的设备
         sample_device.is_active = False
         db_session.commit()
-        response = client.get("/api/v1/devices?is_active=false")
+        response = admin_client.get("/api/v1/devices?is_active=false")
         assert response.status_code == 200
         data = response.json()
         assert all(d["is_active"] is False for d in data["devices"])
     
-    def test_list_devices_pagination(self, client: TestClient, db_session):
+    def test_list_devices_pagination(self, admin_client: TestClient, db_session, sample_tenant):
         """测试设备列表分页"""
         # 创建多个设备
         from app.services.charge_point_service import ChargePointService
@@ -148,20 +149,21 @@ class TestDevicesAPI:
             ChargePointService.get_or_create_device(
                 db=db_session,
                 device_serial_number=serial,
-                vendor="Test Vendor"
+                vendor="Test Vendor",
+                tenant_id=sample_tenant.id,
             )
         db_session.commit()
         
         # 测试分页
-        response = client.get("/api/v1/devices?skip=0&limit=2")
+        response = admin_client.get("/api/v1/devices?skip=0&limit=2")
         assert response.status_code == 200
         data = response.json()
         assert len(data["devices"]) <= 2
         assert data["total"] >= 5
     
-    def test_get_device_detail(self, client: TestClient, sample_device, db_session):
+    def test_get_device_detail(self, admin_client: TestClient, sample_device, db_session):
         """测试获取设备详情"""
-        response = client.get(f"/api/v1/devices/{sample_device.serial_number}")
+        response = admin_client.get(f"/api/v1/devices/{sample_device.serial_number}")
         assert response.status_code == 200
         data = response.json()
         assert data["serial_number"] == sample_device.serial_number
@@ -170,15 +172,16 @@ class TestDevicesAPI:
         assert data["mqtt_username"] == sample_device.mqtt_username
         assert len(data["mqtt_password"]) == 12
     
-    def test_get_device_not_found(self, client: TestClient):
+    def test_get_device_not_found(self, admin_client: TestClient):
         """测试获取不存在的设备"""
-        response = client.get("/api/v1/devices/999999999999999")
+        response = admin_client.get("/api/v1/devices/999999999999999")
         assert response.status_code == 404
-        assert "不存在" in response.json()["detail"]
+        assert response.json()["error"]["code"] == "HTTP_ERROR"
+        assert "不存在" in response.json()["error"]["message"]
     
-    def test_get_device_password(self, client: TestClient, sample_device, db_session):
+    def test_get_device_password(self, admin_client: TestClient, sample_device, db_session):
         """测试获取设备MQTT密码"""
-        response = client.get(f"/api/v1/devices/{sample_device.serial_number}/password")
+        response = admin_client.get(f"/api/v1/devices/{sample_device.serial_number}/password")
         assert response.status_code == 200
         data = response.json()
         assert data["serial_number"] == sample_device.serial_number
@@ -191,19 +194,19 @@ class TestDevicesAPI:
         expected_password = derive_password(master_secret, sample_device.serial_number)
         assert data["mqtt_password"] == expected_password
     
-    def test_get_device_password_not_found(self, client: TestClient):
+    def test_get_device_password_not_found(self, admin_client: TestClient):
         """测试获取不存在设备的密码"""
-        response = client.get("/api/v1/devices/999999999999999/password")
+        response = admin_client.get("/api/v1/devices/999999999999999/password")
         assert response.status_code == 404
     
-    def test_activate_device(self, client: TestClient, sample_device, db_session):
+    def test_activate_device(self, admin_client: TestClient, sample_device, db_session):
         """测试激活设备"""
         # 先停用设备
         sample_device.is_active = False
         db_session.commit()
         
         # 激活设备
-        response = client.put(
+        response = admin_client.put(
             f"/api/v1/devices/{sample_device.serial_number}/activate?is_active=true"
         )
         assert response.status_code == 200
@@ -214,14 +217,14 @@ class TestDevicesAPI:
         db_session.refresh(sample_device)
         assert sample_device.is_active is True
     
-    def test_deactivate_device(self, client: TestClient, sample_device, db_session):
+    def test_deactivate_device(self, admin_client: TestClient, sample_device, db_session):
         """测试停用设备"""
         # 先激活设备
         sample_device.is_active = True
         db_session.commit()
         
         # 停用设备
-        response = client.put(
+        response = admin_client.put(
             f"/api/v1/devices/{sample_device.serial_number}/activate?is_active=false"
         )
         assert response.status_code == 200
@@ -232,21 +235,21 @@ class TestDevicesAPI:
         db_session.refresh(sample_device)
         assert sample_device.is_active is False
     
-    def test_activate_device_not_found(self, client: TestClient):
+    def test_activate_device_not_found(self, admin_client: TestClient):
         """测试激活不存在的设备"""
-        response = client.put(
+        response = admin_client.put(
             "/api/v1/devices/999999999999999/activate?is_active=true"
         )
         assert response.status_code == 404
     
-    def test_device_password_consistency(self, client: TestClient, sample_device, db_session):
+    def test_device_password_consistency(self, admin_client: TestClient, sample_device, db_session):
         """测试设备密码的一致性（多次调用返回相同密码）"""
         # 第一次获取密码
-        response1 = client.get(f"/api/v1/devices/{sample_device.serial_number}/password")
+        response1 = admin_client.get(f"/api/v1/devices/{sample_device.serial_number}/password")
         password1 = response1.json()["mqtt_password"]
         
         # 第二次获取密码
-        response2 = client.get(f"/api/v1/devices/{sample_device.serial_number}/password")
+        response2 = admin_client.get(f"/api/v1/devices/{sample_device.serial_number}/password")
         password2 = response2.json()["mqtt_password"]
         
         # 密码应该相同
@@ -257,10 +260,10 @@ class TestDevicesAPI:
         expected_password = derive_password(master_secret, sample_device.serial_number)
         assert password1 == expected_password
     
-    def test_create_device_auto_device_type(self, client: TestClient, db_session):
+    def test_create_device_auto_device_type(self, admin_client: TestClient, db_session):
         """测试自动推断设备类型代码"""
         # 使用新的vendor，应该自动推断设备类型代码
-        response = client.post(
+        response = admin_client.post(
             "/api/v1/devices",
             json={
                 "serial_number": "555555555555555",
@@ -280,4 +283,3 @@ class TestDevicesAPI:
         assert device is not None
         assert device.master_secret_encrypted is not None
         assert device.type_code == "default"
-

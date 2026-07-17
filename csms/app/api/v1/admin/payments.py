@@ -16,6 +16,8 @@ from app.core.api_logging import log_api_request, log_api_response, log_api_erro
 from app.core.auth import get_current_user
 from app.database.base import get_db, SuperSessionLocal
 from app.database.models import PaymentOrder, PaymentWebhookEvent, AppUser
+from app.api.v1.app.payments import _apply_refund_ledger
+from app.domain.payment import transition_status
 from app.services.wompi_service import get_wompi_service
 from app.services.mercadopago_service import get_mercadopago_service
 
@@ -41,7 +43,7 @@ class PaymentOrderListItem(BaseModel):
     app_user_id: str
     user_email: Optional[str]
     type: str
-    amount: float
+    amount: Decimal
     currency: str
     payment_provider: str
     reference: Optional[str]  # Wompi
@@ -87,7 +89,7 @@ class ReconcileResponse(BaseModel):
 
 
 class RefundRequest(BaseModel):
-    amount: Optional[float] = Field(None, description="退款金额（None 表示全额退款）")
+    amount: Optional[Decimal] = Field(None, description="退款金额（None 表示全额退款）")
 
 
 class RefundResponse(BaseModel):
@@ -432,7 +434,9 @@ async def refund_payment_order(
             
             if refund_result.get("success"):
                 # 更新订单状态
-                order.status = "refunded"
+                settled_refund_amount = refund_amount or Decimal(str(order.amount))
+                _apply_refund_ledger(sdb, order, settled_refund_amount)
+                order.status = transition_status(order.status, "refunded")
                 sdb.commit()
                 
                 logger.info(

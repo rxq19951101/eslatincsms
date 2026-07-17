@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy import func, and_, or_
 from datetime import datetime, timezone, timedelta
+from decimal import Decimal
 
 from app.database.base import get_db
 from app.database.models import (
@@ -44,7 +45,7 @@ class DashboardSummaryResponse(BaseModel):
     # 订单统计
     today_orders: int
     today_energy_kwh: float
-    today_revenue: float
+    today_revenue: Decimal
     
     # 用户统计
     total_users: int
@@ -85,7 +86,7 @@ class DashboardSiteItem(BaseModel):
 
     orders_count: int
     energy_kwh: float
-    revenue: float
+    revenue: Decimal
 
 
 # ==================== 仪表板端点 ====================
@@ -105,21 +106,11 @@ async def get_dashboard_summary(
     - 用户统计
     - 告警统计
     """
-    # #region agent log
-    all_headers = dict(request.headers)
-    x_tenant_id_header = request.headers.get("X-Tenant-Id") or request.headers.get("x-tenant-id")
-    logger.info(f"[DEBUG] /dashboard/summary ENTRY - method={request.method}, path={request.url.path}, X-Tenant-Id={x_tenant_id_header}, current_user_id={current_user.id if current_user else None}, is_super_admin={current_user.is_super_admin if current_user else None}, all_headers={all_headers}")
-    # #endregion
-    
     # 获取 tenant_id（super_admin 可能为 None）
-    # #region agent log
     try:
         tenant_id = tenant_id_context.get()
-        logger.info(f"[DEBUG] /dashboard/summary - tenant_id_context.get() SUCCESS: {tenant_id}")
-    except LookupError as e:
+    except LookupError:
         tenant_id = None
-        logger.warning(f"[DEBUG] /dashboard/summary - tenant_id_context.get() raised LookupError: {e}, tenant_id=None")
-    # #endregion
     
     # 构建基础查询（多租户过滤）
     # RLS 会自动过滤，但为了性能，我们也在应用层添加过滤
@@ -257,21 +248,11 @@ async def get_dashboard_trends(
     - 收入趋势（过去N天）
     - 订单趋势（过去N天）
     """
-    # #region agent log
-    all_headers = dict(request.headers)
-    x_tenant_id_header = request.headers.get("X-Tenant-Id") or request.headers.get("x-tenant-id")
-    logger.info(f"[DEBUG] /dashboard/trends ENTRY - method={request.method}, path={request.url.path}, X-Tenant-Id={x_tenant_id_header}, current_user_id={current_user.id if current_user else None}, is_super_admin={current_user.is_super_admin if current_user else None}")
-    # #endregion
-    
     # 获取 tenant_id（super_admin 可能为 None）
-    # #region agent log
     try:
         tenant_id = tenant_id_context.get()
-        logger.info(f"[DEBUG] /dashboard/trends - tenant_id_context.get() SUCCESS: {tenant_id}")
-    except LookupError as e:
+    except LookupError:
         tenant_id = None
-        logger.warning(f"[DEBUG] /dashboard/trends - tenant_id_context.get() raised LookupError: {e}, tenant_id=None")
-    # #endregion
     
     # 计算日期范围
     end_date = datetime.now(timezone.utc).replace(hour=23, minute=59, second=59)

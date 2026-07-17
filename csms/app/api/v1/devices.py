@@ -14,7 +14,6 @@ from app.database.models import Device
 from app.core.permissions import get_current_admin_user
 from app.database.base import tenant_id_context
 from app.services.charge_point_service import ChargePointService
-from app.core.mqtt_auth import MQTTAuthService
 from app.core.crypto import derive_password, decrypt_master_secret
 from app.core.logging_config import get_logger
 
@@ -27,7 +26,7 @@ router = APIRouter()
 
 class CreateDeviceRequest(BaseModel):
     """创建设备请求"""
-    serial_number: str = Field(..., description="设备序列号", min_length=1, max_length=100)
+    serial_number: str = Field(..., description="设备序列号", min_length=15, max_length=15)
     vendor: Optional[str] = Field(None, description="设备厂商（用于推断设备类型）")
     device_type_code: Optional[str] = Field(None, description="设备类型代码（如：zcf, tesla, abb）")
 
@@ -88,9 +87,9 @@ def create_device(
     if not tenant_id:
         raise HTTPException(status_code=403, detail="Tenant ID required")
     
-    # 检查设备是否已存在（按租户）
+    # serial_number 是设备主键，且 MQTT 用户名/客户端 ID 也要求全局唯一；
+    # 因此这里不能只按 tenant_id 查询，否则会绕过实际数据库约束并在 flush 时抛出 500。
     existing_device = db.query(Device).filter(
-        Device.tenant_id == tenant_id,
         Device.serial_number == req.serial_number
     ).first()
     
@@ -300,6 +299,7 @@ def get_device_password(
 def toggle_device_status(
     serial_number: str,
     is_active: bool = Query(..., description="是否激活"),
+    current_user_obj = Depends(get_current_admin_user),
     db: Session = Depends(get_db)
 ):
     """激活或停用设备"""
@@ -325,4 +325,3 @@ def toggle_device_status(
         "is_active": is_active,
         "message": f"设备已{'激活' if is_active else '停用'}"
     }
-

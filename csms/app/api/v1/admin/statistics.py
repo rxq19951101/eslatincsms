@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from typing import List, Optional
 from uuid import UUID
 from datetime import datetime, timezone, timedelta
+from decimal import Decimal
 from app.database.base import get_db, tenant_id_context, is_super_admin_context
 from app.core.permissions import get_current_admin_user
 from app.services.report_service import ReportService
@@ -23,7 +24,7 @@ router = APIRouter()
 
 class RevenueDataPoint(BaseModel):
     date: str
-    total_revenue: float
+    total_revenue: Decimal
     total_energy_kwh: float
     invoice_count: int
 

@@ -28,7 +28,7 @@ class AppUserResponse(BaseModel):
     email: str
     phone: Optional[str] = None
     full_name: Optional[str] = None
-    balance: float
+    balance: Decimal
     status: str
     has_unpaid_charges: bool = False
     email_verified: bool = False
@@ -37,13 +37,13 @@ class AppUserResponse(BaseModel):
 
 class AdjustBalanceRequest(BaseModel):
     """amount > 0 入账，amount < 0 扣减；调整后余额不得为负。"""
-    amount: float = Field(..., description="调整金额（可为负）")
+    amount: Decimal = Field(..., description="调整金额（可为负）")
     description: Optional[str] = Field(None, description="流水备注")
 
 
 class AdjustBalanceResponse(BaseModel):
     id: str
-    balance: float
+    balance: Decimal
     currency: str = "COP"
     transaction_id: str
 

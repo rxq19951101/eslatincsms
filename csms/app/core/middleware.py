@@ -10,6 +10,7 @@ from typing import Callable
 from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp
+from app.core.observability import trace_id_context
 
 logger = logging.getLogger("ocpp_csms")
 
@@ -71,7 +72,7 @@ class LoggingMiddleware(BaseHTTPMiddleware):
         # 记录请求开始（如果需要）
         if should_log_request:
             logger.info(
-                f"[API请求] {request.method} {request.url.path} | "
+                f"[API请求] trace_id={trace_id_context.get()} {request.method} {request.url.path} | "
                 f"客户端: {client_host} | "
                 f"查询参数: {query_params if query_params else '无'}",
                 extra={
@@ -82,6 +83,7 @@ class LoggingMiddleware(BaseHTTPMiddleware):
                     "user_agent": user_agent,
                     "query_params": query_params,
                     "request_body": body,
+                    "trace_id": trace_id_context.get(),
                 }
             )
         
@@ -120,6 +122,7 @@ class LoggingMiddleware(BaseHTTPMiddleware):
                         "process_time": process_time,
                         "client_host": client_host,
                         "response_size": response_body_size,
+                        "trace_id": trace_id_context.get(),
                     }
                 )
             
@@ -188,4 +191,3 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         hits.append(now)
         self._hits[client] = hits
         return await call_next(request)
-

@@ -4,6 +4,8 @@
 #
 
 import logging
+import hashlib
+import json
 import os
 import re
 from typing import Dict, Any, Optional, Tuple
@@ -379,7 +381,10 @@ class OCPPMessageHandler:
         else:
             should_close = False
         try:
-            from app.database.models import ChargingSession
+            from app.database.models import ChargingSession, ChargePoint, OCPPMessageEvent
+
+            if self._claim_inbound_message(db, charge_point_id, "StartTransaction", payload):
+                return {"transactionId": payload.get("transactionId", 0), "idTagInfo": {"status": "Accepted"}}
             
             transaction_id = payload.get("transactionId") or int(datetime.now().timestamp())
             id_tag = str(payload.get("idTag", ""))
@@ -456,7 +461,8 @@ class OCPPMessageHandler:
         else:
             should_close = False
         try:
-            from app.database.models import ChargingSession
+            if self._claim_inbound_message(db, charge_point_id, "StopTransaction", payload):
+                return {"idTagInfo": {"status": "Accepted"}}
             
             transaction_id = payload.get("transactionId")
             meter_stop = payload.get("meterStop")
@@ -502,6 +508,8 @@ class OCPPMessageHandler:
             should_close = False
         try:
             from app.database.models import ChargingSession
+            if self._claim_inbound_message(db, charge_point_id, "MeterValues", payload):
+                return {}
             
             transaction_id = payload.get("transactionId")
             meter_value = payload.get("meterValue", [])
@@ -517,7 +525,7 @@ class OCPPMessageHandler:
                 if session:
                     # 处理meter values
                     # OCPP格式：meterValue是一个数组，每个元素包含connectorId和sampledValue
-                    for mv in meter_value:
+                    for index, mv in enumerate(meter_value):
                         connector_id = mv.get("connectorId")
                         sampled_values = mv.get("sampledValue", [])
                         
@@ -540,7 +548,10 @@ class OCPPMessageHandler:
                             session_id=session.id,
                             value=value,
                             connector_id=connector_id,
-                            sampled_value=sampled_values if sampled_values else None
+                            sampled_value=sampled_values if sampled_values else None,
+                            idempotency_key=self._meter_idempotency_key(
+                                charge_point_id, transaction_id, mv, index
+                            ),
                         )
             
             return {}
@@ -553,6 +564,48 @@ class OCPPMessageHandler:
         finally:
             if should_close:
                 db.close()
+
+    @staticmethod
+    def _message_key(action: str, payload: Dict[str, Any]) -> str:
+        raw = json.dumps({"action": action, "payload": payload}, sort_keys=True, separators=(",", ":"), default=str)
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    @classmethod
+    def _meter_idempotency_key(cls, charge_point_id: str, transaction_id: int, meter_value: Dict[str, Any], index: int) -> str:
+        raw = json.dumps({
+            "charge_point_id": charge_point_id,
+            "transaction_id": transaction_id,
+            "meter_value": meter_value,
+            "index": index,
+        }, sort_keys=True, separators=(",", ":"), default=str)
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    @classmethod
+    def _claim_inbound_message(cls, db: Session, charge_point_id: str, action: str, payload: Dict[str, Any]) -> bool:
+        """在当前领域事务中登记一条入站消息；返回 True 表示此前已处理。"""
+        from app.database.models import ChargePoint, OCPPMessageEvent
+
+        cp = db.query(ChargePoint).filter(ChargePoint.id == charge_point_id).first()
+        if not cp or not cp.tenant_id:
+            raise ValueError(f"Charge point tenant not found: {charge_point_id}")
+        key = cls._message_key(action, payload)
+        existing = db.query(OCPPMessageEvent).filter(
+            OCPPMessageEvent.tenant_id == cp.tenant_id,
+            OCPPMessageEvent.charge_point_id == charge_point_id,
+            OCPPMessageEvent.action == action,
+            OCPPMessageEvent.message_key == key,
+        ).first()
+        if existing:
+            return True
+        db.add(OCPPMessageEvent(
+            tenant_id=cp.tenant_id,
+            charge_point_id=charge_point_id,
+            action=action,
+            message_key=key,
+            payload=payload,
+        ))
+        db.flush()
+        return False
     
     async def handle_authorize(
         self,

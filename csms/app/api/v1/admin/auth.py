@@ -238,20 +238,11 @@ async def get_current_user_info(
     current_user: dict = Depends(get_current_user)
 ):
     """获取当前管理员信息（包含默认租户）"""
-    # #region agent log
-    all_headers = dict(request.headers)
-    x_tenant_id_header = request.headers.get("X-Tenant-Id") or request.headers.get("x-tenant-id")
-    logger.info(f"[DEBUG] /me ENTRY - method={request.method}, path={request.url.path}, X-Tenant-Id={x_tenant_id_header}, current_user_from_depends={current_user}")
-    # #endregion
-    
-    # #region agent log
     from app.database.base import tenant_id_context
     try:
         tenant_id_from_context = tenant_id_context.get()
-        logger.info(f"[DEBUG] /me - tenant_id_from_context: {tenant_id_from_context}")
     except LookupError:
-        logger.info(f"[DEBUG] /me - tenant_id_from_context: None (LookupError)")
-    # #endregion
+        tenant_id_from_context = None
     
     from uuid import UUID
     user_id = UUID(current_user["user_id"])
@@ -262,10 +253,6 @@ async def get_current_user_info(
     db: Session = SuperSessionLocal()
     
     try:
-        # #region agent log
-        logger.info(f"[DEBUG] /me - Querying user info with SuperSessionLocal, user_id={user_id}, is_super_admin={is_super_admin}")
-        # #endregion
-        
         # 获取用户信息
         admin_user = AdminUserService.get_admin_user_by_id(db, user_id)
         if not admin_user:

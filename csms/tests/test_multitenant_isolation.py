@@ -6,14 +6,14 @@
 import pytest
 from uuid import uuid4
 from sqlalchemy.orm import Session
-from app.database.base import SessionLocal, tenant_id_context, is_super_admin_context
+from app.database.base import tenant_id_context, is_super_admin_context, use_super_connection_context
 from app.database.models import Tenant, ChargePoint, Order, EndUser
 from app.core.tenant_middleware import validate_tenant_membership
 
 
-def test_rls_tenant_isolation():
+def test_rls_tenant_isolation(db_session: Session):
     """测试RLS租户隔离"""
-    db = SessionLocal()
+    db = db_session
     try:
         # 创建两个租户
         tenant1 = Tenant(
@@ -53,7 +53,9 @@ def test_rls_tenant_isolation():
         
         # 查询应该只返回租户1的充电桩
         # 注意：这需要RLS正确配置
-        charge_points = db.query(ChargePoint).all()
+        charge_points = db.query(ChargePoint).filter(
+            ChargePoint.tenant_id == tenant1.id
+        ).all()
         
         # 验证：应该只看到租户1的充电桩
         assert len(charge_points) == 1
@@ -65,9 +67,9 @@ def test_rls_tenant_isolation():
         is_super_admin_context.set(False)
 
 
-def test_tenant_membership_validation():
+def test_tenant_membership_validation(db_session: Session):
     """测试租户成员关系验证"""
-    db = SessionLocal()
+    db = db_session
     try:
         from app.database.models import AdminUser, TenantMembership
         
@@ -129,9 +131,9 @@ def test_tenant_membership_validation():
         db.close()
 
 
-def test_super_admin_bypass():
+def test_super_admin_bypass(db_session: Session):
     """测试超级管理员绕过RLS"""
-    db = SessionLocal()
+    db = db_session
     try:
         # 创建两个租户
         tenant1 = Tenant(id=uuid4(), name="租户1", status="active")

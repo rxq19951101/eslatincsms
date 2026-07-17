@@ -30,11 +30,11 @@ logger = logging.getLogger("ocpp_csms")
 @dataclass
 class SettlementResult:
     already_settled: bool
-    balance: float
+    balance: Decimal
     currency: str
-    charged_amount: float
+    charged_amount: Decimal
     energy_kwh: float = 0.0
-    price_per_kwh: float = 0.0
+    price_per_kwh: Decimal = Decimal("0")
     invoice_id: Optional[str] = None
 
 
@@ -159,15 +159,15 @@ class BillingService:
             bal = Decimal(str(app_user.balance or 0))
             return SettlementResult(
                 already_settled=True,
-                balance=float(bal),
+                balance=bal,
                 currency="COP",
-                charged_amount=float(invoice.total_amount),
+                charged_amount=Decimal(str(invoice.total_amount)),
                 energy_kwh=float(invoice.energy_kwh),
-                price_per_kwh=float(
+                price_per_kwh=Decimal(str(
                     invoice.energy_cost / invoice.energy_kwh
                     if invoice.energy_kwh and float(invoice.energy_kwh) > 0
                     else 0
-                ),
+                )),
                 invoice_id=invoice.id,
             )
 
@@ -181,9 +181,9 @@ class BillingService:
             bal = Decimal(str(app_user.balance or 0))
             return SettlementResult(
                 already_settled=True,
-                balance=float(bal),
+                balance=bal,
                 currency="COP",
-                charged_amount=float(abs(existing_tx.amount)),
+                charged_amount=Decimal(str(abs(existing_tx.amount))),
                 invoice_id=None,
             )
         return None
@@ -197,6 +197,11 @@ class BillingService:
         """
         完整结算：PricingSnapshot → Invoice → Payment → 钱包扣款 → AppWalletTransaction
         """
+        # 同一会话的并发 Stop/结算请求串行化，保证钱包只扣一次。
+        session = db.query(ChargingSession).filter(
+            ChargingSession.id == session.id
+        ).with_for_update().one()
+        app_user = db.query(AppUser).filter(AppUser.id == app_user.id).with_for_update().one()
         if session.end_time is None and session.meter_stop is None:
             raise ValueError("Session not finished")
 
@@ -312,10 +317,10 @@ class BillingService:
 
         return SettlementResult(
             already_settled=False,
-            balance=float(app_user.balance or 0),
+            balance=Decimal(str(app_user.balance or 0)),
             currency="COP",
-            charged_amount=float(total),
+            charged_amount=Decimal(str(total)),
             energy_kwh=float(costs["energy_kwh"]),
-            price_per_kwh=float(costs["price_per_kwh"]),
+            price_per_kwh=Decimal(str(costs["price_per_kwh"])),
             invoice_id=invoice_id,
         )

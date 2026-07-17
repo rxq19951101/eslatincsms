@@ -14,6 +14,7 @@ logger = logging.getLogger("ocpp_csms")
 class TransportType(str, Enum):
     """传输类型"""
     WEBSOCKET = "websocket"
+    # 保留枚举值仅用于旧 API 兼容；TransportManager 不再创建这些适配器。
     HTTP = "http"
     MQTT = "mqtt"
 
@@ -94,4 +95,3 @@ class TransportAdapter(ABC):
         except Exception as e:
             logger.error(f"[{charge_point_id}] 消息处理错误: {e}", exc_info=True)
             return {"error": str(e)}
-

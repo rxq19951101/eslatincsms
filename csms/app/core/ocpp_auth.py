@@ -36,15 +36,14 @@ def verify_charge_point_pre_registered(charge_point_id: str) -> bool:
 
 def verify_ocpp_api_key(headers: dict) -> bool:
     """
-    可选 API Key 校验。若配置了 OCPP_API_KEYS 则必须匹配；
-    未配置时跳过（依赖预注册校验）。
+    API Key 校验。生产环境必须配置并匹配 OCPP_API_KEYS。
     """
     keys_env = os.getenv("OCPP_API_KEYS", "").strip()
     if not keys_env:
-        return True
+        return os.getenv("ENVIRONMENT", "development").lower() != "production"
     valid_keys = {k.strip() for k in keys_env.split(",") if k.strip()}
     if not valid_keys:
-        return True
+        return os.getenv("ENVIRONMENT", "development").lower() != "production"
     api_key = (
         headers.get("x-api-key")
         or headers.get("X-API-Key")

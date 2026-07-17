@@ -86,9 +86,13 @@ class MessageRouter:
             "timeout": timeout,
         }
         
-        # 发布到Redis Pub/Sub
-        channel = f"ocpp:route:{charger_id}"
-        manager.redis_client.publish(channel, json.dumps(message))
+        # 写入可靠 Stream；消费者重启后可从 pending 消息继续处理。
+        manager.redis_client.xadd(
+            manager.ROUTE_STREAM,
+            {"message": json.dumps(message)},
+            maxlen=100000,
+            approximate=True,
+        )
         
         # 等待响应（通过Redis键值对）
         response_key = f"ocpp:response:{message_id}"
@@ -160,4 +164,3 @@ class MessageRouter:
 
 # 全局消息路由器实例
 message_router = MessageRouter()
-

@@ -1,7 +1,7 @@
 #
 # 生产环境 Docker Compose 配置
 # 使用: docker compose -f docker-compose.prod.yml up -d
-# 注意：密码已硬编码，便于测试和调试
+# 生产部署必须通过环境变量或 secret provider 注入凭据。
 #
 
 services:
@@ -9,9 +9,9 @@ services:
     image: postgres:15-alpine
     container_name: ocpp-db-prod
     environment:
-      - POSTGRES_USER=ocpp_user
-      - POSTGRES_PASSWORD=ocpp_password
-      - POSTGRES_DB=ocpp
+      - POSTGRES_USER=${DB_USER:?DB_USER must be set}
+      - POSTGRES_PASSWORD=${DB_PASSWORD:?DB_PASSWORD must be set}
+      - POSTGRES_DB=${DB_NAME:?DB_NAME must be set}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     networks:
@@ -34,16 +34,16 @@ services:
   redis:
     image: redis:7-alpine
     container_name: ocpp-redis-prod
-    command: redis-server --appendonly yes --protected-mode no
+    command: ["sh", "-c", "exec redis-server --appendonly yes --requirepass \"$${REDIS_PASSWORD}\""]
     environment:
-      - REDIS_PASSWORD=
+      - REDIS_PASSWORD=${REDIS_PASSWORD:?REDIS_PASSWORD must be set}
     volumes:
       - redis_data:/data
       # 不挂载配置文件，避免冲突
     networks:
       - ocppnet
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "redis-cli -a \"$${REDIS_PASSWORD}\" ping"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -65,15 +65,13 @@ services:
     environment:
       - ENVIRONMENT=production
       - DEBUG=false
-      - DATABASE_URL=postgresql://ocpp_user:ocpp_password@db:5432/ocpp
-      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
-      - ENCRYPTION_KEY=${ENCRYPTION_KEY:-}
-      - SECRET_KEY=${SECRET_KEY:-}
-      - ENCRYPTION_SALT=${ENCRYPTION_SALT:-ocpp_csms_salt}
-      - MQTT_BROKER_HOST=${MQTT_BROKER_HOST:-mqtt-broker}
-      - MQTT_BROKER_PORT=${MQTT_BROKER_PORT:-1883}
-      - MQTT_USERNAME=${MQTT_USERNAME:-}
-      - MQTT_PASSWORD=${MQTT_PASSWORD:-}
+      - DATABASE_URL=${DATABASE_URL:?DATABASE_URL must be set}
+      - REDIS_URL=${REDIS_URL:?REDIS_URL must be set}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY:?ENCRYPTION_KEY must be set}
+      - SECRET_KEY=${SECRET_KEY:?SECRET_KEY must be set}
+      - ENCRYPTION_SALT=${ENCRYPTION_SALT:?ENCRYPTION_SALT must be set}
+      - OCPP_WS_REQUIRE_PRE_REGISTERED=true
+      - OCPP_API_KEYS=${OCPP_API_KEYS:?OCPP_API_KEYS must be set}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - LOG_FORMAT=${LOG_FORMAT:-json}
       - DOCS_URL=${DOCS_URL:-None}
@@ -83,8 +81,12 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      mqtt-broker:
-        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9000/readyz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
     networks:
       - ocppnet
     restart: unless-stopped
@@ -101,34 +103,6 @@ services:
         reservations:
           cpus: '1'
           memory: 1G
-
-  # MQTT Broker
-  mqtt-broker:
-    image: eclipse-mosquitto:2.0
-    container_name: ocpp-mqtt-prod
-    ports:
-      - "${MQTT_BROKER_PORT:-1883}:1883"
-      - "${MQTT_BROKER_WS_PORT:-9001}:9001"
-    volumes:
-      - mqtt_data:/mosquitto/data
-      - mqtt_log:/mosquitto/log
-      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
-    # 允许匿名连接（生产环境应配置认证）
-    # 使用默认配置，允许所有连接
-    networks:
-      - ocppnet
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "mosquitto_pub -h localhost -t test -m 'healthcheck' && mosquitto_sub -h localhost -t test -C 1 -W 2 || exit 0"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 10s
-    deploy:
-      resources:
-        limits:
-          cpus: '0.5'
-          memory: 256M
 
   # Admin管理界面
   admin:
@@ -169,10 +143,6 @@ volumes:
   postgres_data:
     driver: local
   redis_data:
-    driver: local
-  mqtt_data:
-    driver: local
-  mqtt_log:
     driver: local
 
 networks:

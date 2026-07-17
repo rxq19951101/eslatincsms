@@ -18,6 +18,7 @@ from app.core.permissions import get_current_admin_user
 from app.database.base import get_db, tenant_id_context
 from app.database.models import ChargePoint, EVSE, EVSEStatus, Site, Tariff
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 
 # 与站点详情、充电桩列表一致：5 分钟内有 EVSE 心跳视为在线
 ONLINE_THRESHOLD_SECONDS = 300
@@ -92,15 +93,15 @@ class SiteDetailResponse(BaseModel):
 class SitePricingUpdateRequest(BaseModel):
     """站点级基础电价（作为默认价）"""
 
-    base_price_per_kwh: float = Field(..., gt=0, description="基础电价（每kWh）")
-    service_fee: Optional[float] = Field(None, ge=0, description="服务费（可选）")
+    base_price_per_kwh: Decimal = Field(..., gt=0, description="基础电价（每kWh）")
+    service_fee: Optional[Decimal] = Field(None, ge=0, description="服务费（可选）")
 
 
 class SitePricingResponse(BaseModel):
     site_id: str
     tariff_id: int
-    base_price_per_kwh: float
-    service_fee: float
+    base_price_per_kwh: Decimal
+    service_fee: Decimal
     valid_from: str
 
 
@@ -702,4 +703,3 @@ def create_charge_point_in_site(
         "connector_type": req.connector_type,
         "qr_codes": qr_urls,  # 二维码URL列表
     }
-

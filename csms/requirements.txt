@@ -28,7 +28,6 @@ httpx==0.27.2
 # Mercado Pago SDK
 mercadopago==2.2.0
 # MQTT客户端
-paho-mqtt==2.1.0
 # 二维码生成
 qrcode[pil]==7.4.2
 # 测试

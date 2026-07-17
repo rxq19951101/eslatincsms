@@ -3,6 +3,7 @@ Pytest 配置和共享fixtures
 """
 import pytest
 import os
+import uuid
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.pool import StaticPool
@@ -91,6 +92,7 @@ def get_app():
 # 保存原始的SessionLocal
 import app.database.base
 _original_session_local = app.database.base.SessionLocal
+_original_super_session_local = app.database.base.SuperSessionLocal
 
 
 @pytest.fixture(scope="function")
@@ -115,9 +117,23 @@ def db_session():
         # 如果表不存在，重新创建
         Base.metadata.create_all(bind=engine)
     
-    # Mock SessionLocal以使用测试引擎
-    # 直接替换为TestingSessionLocal，这样所有调用都会返回绑定到测试引擎的会话
+    # 统一替换所有已导入的会话工厂。
+    # 业务模块中既有动态从 app.database.base 导入，也有模块级别别名；
+    # 只替换 base.SessionLocal 会让后者继续访问真实的内存引擎。
     app.database.base.SessionLocal = TestingSessionLocal
+    app.database.base.SuperSessionLocal = TestingSessionLocal
+    patched_factories = []
+    for module in list(sys.modules.values()):
+        if module is None:
+            continue
+        module_dict = getattr(module, "__dict__", {})
+        for name, original in (
+            ("SessionLocal", _original_session_local),
+            ("SuperSessionLocal", _original_super_session_local),
+        ):
+            if module_dict.get(name) is original:
+                patched_factories.append((module, name, original))
+                module_dict[name] = TestingSessionLocal
     
     # 创建初始会话用于测试
     session = TestingSessionLocal()
@@ -126,8 +142,10 @@ def db_session():
         yield session
     finally:
         session.close()
-        # 恢复原始SessionLocal（每个测试结束后恢复，避免影响其他测试）
+        for module, name, original in patched_factories:
+            setattr(module, name, original)
         app.database.base.SessionLocal = _original_session_local
+        app.database.base.SuperSessionLocal = _original_super_session_local
         Base.metadata.drop_all(bind=engine)
 
 
@@ -160,6 +178,13 @@ def client(db_session: Session):
         from app.main import app
         logger.info("  - app.main导入成功")
         logger.info(f"  - app对象: {app}")
+        # app.main 可能在导入时加载审计模型；确保测试引擎包含完整元数据。
+        Base.metadata.create_all(bind=db_session.get_bind())
+        # tenant_middleware 在某些测试顺序下会保留模块级会话别名，
+        # 这里再次绑定，避免审计日志写入另一套 SQLite 内存数据库。
+        import app.core.tenant_middleware as tenant_middleware_module
+        import app.database.base as database_base
+        tenant_middleware_module.SessionLocal = database_base.SessionLocal
     except Exception as e:
         logger.error(f"步骤1失败: 导入app.main失败: {e}", exc_info=True)
         raise
@@ -276,10 +301,53 @@ def client(db_session: Session):
 
 
 @pytest.fixture
-def sample_site(db_session: Session):
+def admin_client(client, db_session: Session):
+    """带真实 admin audience JWT 的管理端测试客户端。"""
+    from app.core.auth import create_access_token, get_password_hash
+
+    tenant = db_session.query(Tenant).first()
+    if tenant is None:
+        tenant = Tenant(id=uuid.uuid4(), name="管理端测试租户", status="active")
+        db_session.add(tenant)
+        db_session.flush()
+
+    admin = AdminUser(
+        id=uuid.uuid4(),
+        username="test-admin",
+        email="test-admin@example.com",
+        password_hash=get_password_hash("test-password"),
+        is_active=True,
+        is_super_admin=True,
+    )
+    db_session.add(admin)
+    db_session.commit()
+
+    token = create_access_token({
+        "user_id": str(admin.id),
+        "user_type": "admin",
+        "aud": "admin",
+    })
+    client.headers.update({"Authorization": f"Bearer {token}"})
+    client.headers.update({"X-Tenant-Id": str(tenant.id)})
+    return client
+
+
+@pytest.fixture
+def sample_tenant(db_session: Session):
+    """创建供共享测试数据使用的租户。"""
+    tenant = Tenant(id=uuid.uuid4(), name="测试租户", status="active")
+    db_session.add(tenant)
+    db_session.commit()
+    db_session.refresh(tenant)
+    return tenant
+
+
+@pytest.fixture
+def sample_site(db_session: Session, sample_tenant: Tenant):
     """创建示例站点"""
     site = Site(
         id="test_site_1",
+        tenant_id=sample_tenant.id,
         name="测试站点",
         address="测试地址",
         latitude=39.9042,
@@ -292,7 +360,7 @@ def sample_site(db_session: Session):
 
 
 @pytest.fixture
-def sample_device(db_session: Session):
+def sample_device(db_session: Session, sample_tenant: Tenant):
     """创建示例设备（每个设备独立存储master_secret）"""
     # 使用真实的加密逻辑创建master_secret
     try:
@@ -309,6 +377,7 @@ def sample_device(db_session: Session):
     
     device = Device(
         serial_number="123456789012345",
+        tenant_id=sample_tenant.id,
         type_code="zcf",
         mqtt_client_id="zcf&123456789012345",
         mqtt_username="123456789012345",
@@ -327,6 +396,7 @@ def sample_charge_point(db_session: Session, sample_site: Site, sample_device: D
     """创建示例充电桩"""
     charge_point = ChargePoint(
         id="CP-TEST-001",
+        tenant_id=sample_site.tenant_id,
         site_id=sample_site.id,
         vendor="测试厂商",
         model="测试型号",
@@ -343,6 +413,7 @@ def sample_charge_point(db_session: Session, sample_site: Site, sample_device: D
 def sample_evse(db_session: Session, sample_charge_point: ChargePoint):
     """创建示例EVSE"""
     evse = EVSE(
+        tenant_id=sample_charge_point.tenant_id,
         charge_point_id=sample_charge_point.id,
         evse_id=1,
         connector_type="Type2",
@@ -358,6 +429,7 @@ def sample_evse(db_session: Session, sample_charge_point: ChargePoint):
 def sample_evse_status(db_session: Session, sample_evse: EVSE, sample_charge_point: ChargePoint):
     """创建示例EVSE状态"""
     evse_status = EVSEStatus(
+        tenant_id=sample_charge_point.tenant_id,
         evse_id=sample_evse.id,
         charge_point_id=sample_charge_point.id,
         status="Available",
@@ -367,4 +439,3 @@ def sample_evse_status(db_session: Session, sample_evse: EVSE, sample_charge_poi
     db_session.commit()
     db_session.refresh(evse_status)
     return evse_status
-

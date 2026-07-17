@@ -51,6 +51,8 @@ def get_current_admin_user(
     current_user: dict = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> AdminUser:
+    if current_user.get("aud") != "admin" or current_user.get("user_type") != "admin":
+        raise HTTPException(status_code=403, detail="Admin token required")
     user_id = UUID(current_user["user_id"])
     admin_user = db.query(AdminUser).filter(AdminUser.id == user_id).first()
     if not admin_user:

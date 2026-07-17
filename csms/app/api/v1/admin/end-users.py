@@ -8,6 +8,7 @@ from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from uuid import UUID
+from decimal import Decimal
 from app.database.base import get_db
 from app.database.models import EndUser
 from app.core.auth import get_current_user
@@ -27,14 +28,14 @@ class CreateEndUserRequest(BaseModel):
     id_tag: str
     email: Optional[EmailStr] = None
     full_name: Optional[str] = None
-    balance: float = 0.0
+    balance: Decimal = Decimal("0")
 
 
 class UpdateEndUserRequest(BaseModel):
     email: Optional[EmailStr] = None
     full_name: Optional[str] = None
     status: Optional[str] = None
-    balance: Optional[float] = None
+    balance: Optional[Decimal] = None
 
 
 class EndUserResponse(BaseModel):
@@ -44,7 +45,7 @@ class EndUserResponse(BaseModel):
     email: Optional[str]
     full_name: Optional[str]
     id_tag: str
-    balance: float
+    balance: Decimal
     status: str
     last_login_at: Optional[str]
     created_at: str

@@ -27,14 +27,17 @@ logging.basicConfig(
 )
 logger = logging.getLogger("ocpp_csms")
 
-# MQTT 传输支持
+# WebSocket OCPP 传输
 try:
     from app.ocpp.transport_manager import transport_manager, TransportType
     from app.core.config import get_settings
-    MQTT_AVAILABLE = True
+    TRANSPORT_AVAILABLE = True
 except ImportError as e:
-    logger.warning(f"MQTT 传输不可用: {e}")
-    MQTT_AVAILABLE = False
+    logger.warning(f"WebSocket 传输不可用: {e}")
+    TRANSPORT_AVAILABLE = False
+
+# 旧代码分支仍读取该名称；它不再代表 MQTT，仅表示传输管理器可用。
+MQTT_AVAILABLE = TRANSPORT_AVAILABLE
 
 # 历史记录支持
 try:
@@ -51,7 +54,7 @@ except ImportError as e:
 
 # 数据库支持
 try:
-    from app.database import init_db, check_db_health, SessionLocal
+    from app.database import check_db_health, SessionLocal
     from datetime import datetime, timezone as tz
     DATABASE_AVAILABLE = True
 except ImportError as e:
@@ -62,7 +65,6 @@ except ImportError as e:
 try:
     from app.services.ocpp_message_handler import ocpp_message_handler
     from app.services.charge_point_service import ChargePointService
-    from app.core.mqtt_auth import MQTTAuthService
     OCPP_SERVICE_AVAILABLE = True
 except ImportError as e:
     logger.warning(f"OCPP服务不可用: {e}")
@@ -79,71 +81,18 @@ async def lifespan(app: FastAPI):
         try:
             # 等待数据库就绪（最多重试5次，每次等待3秒）
             if check_db_health(max_retries=5, retry_delay=3.0):
-                init_db()
-                logger.info("数据库表已初始化")
+                logger.info("数据库连接正常；schema 由 Alembic 管理")
             else:
                 logger.error("数据库连接失败，跳过表初始化。请检查数据库配置和连接。")
         except Exception as e:
             logger.error(f"数据库初始化失败: {e}", exc_info=True)
     
-    if MQTT_AVAILABLE:
+    if TRANSPORT_AVAILABLE:
         try:
-            settings = get_settings()
-            
-            # 准备启用的传输方式列表
-            enabled_transports = []
-            
-            # 检查并配置 MQTT
-            if settings.enable_mqtt_transport:
-                enabled_transports.append(TransportType.MQTT)
-                # 在 Docker 容器中，优先使用环境变量，否则使用 mqtt-broker（Docker 服务名）
-                mqtt_host = os.getenv("MQTT_BROKER_HOST")
-                if not mqtt_host:
-                    # 检查是否在 Docker 网络中（通过检查是否能解析 mqtt-broker）
-                    try:
-                        import socket
-                        socket.gethostbyname("mqtt-broker")
-                        mqtt_host = "mqtt-broker"
-                        logger.info("检测到 Docker 网络，使用 mqtt-broker 作为 MQTT broker 地址")
-                    except:
-                        mqtt_host = settings.mqtt_broker_host or "localhost"
-                
-                # 如果检测到 Docker 网络，临时修改配置
-                if mqtt_host != settings.mqtt_broker_host:
-                    # 直接修改 settings 对象（因为它是单例）
-                    settings.mqtt_broker_host = mqtt_host
-            
-            # 检查并配置 HTTP（可通过环境变量 ENABLE_HTTP_TRANSPORT 启用）
-            # 环境变量优先级高于配置文件
-            enable_http = os.getenv("ENABLE_HTTP_TRANSPORT", "").lower() in ("true", "1", "yes")
-            if enable_http or settings.enable_http_transport:
-                enabled_transports.append(TransportType.HTTP)
-                logger.info("HTTP 传输已启用（通过环境变量或配置）")
-            
-            # 检查并配置 WebSocket（可通过环境变量 ENABLE_WEBSOCKET_TRANSPORT 启用）
-            # 环境变量优先级高于配置文件
-            # 默认启用 WebSocket（因为 /ocpp 端点需要它）
-            enable_ws = os.getenv("ENABLE_WEBSOCKET_TRANSPORT", "true").lower() in ("true", "1", "yes")
-            if enable_ws or getattr(settings, 'enable_websocket_transport', True):
-                enabled_transports.append(TransportType.WEBSOCKET)
-                logger.info("WebSocket 传输已启用（通过环境变量或配置）")
-            
-            # 初始化传输管理器
-            if enabled_transports:
-                # 先初始化传输管理器
-                await transport_manager.initialize(enabled_transports)
-                # 然后设置消息处理器（确保所有适配器都已创建）
-                transport_manager.set_message_handler(handle_ocpp_message)
-                logger.info(f"传输管理器已初始化，启用了 {len(enabled_transports)} 种传输方式: {[t.value for t in enabled_transports]}")
-                # 验证消息处理器已设置
-                for transport_type, adapter in transport_manager.adapters.items():
-                    if adapter.message_handler:
-                        logger.info(f"{transport_type.value} 适配器消息处理器已设置")
-                    else:
-                        logger.warning(f"{transport_type.value} 适配器消息处理器未设置")
+            await transport_manager.initialize([TransportType.WEBSOCKET])
+            transport_manager.set_message_handler(handle_ocpp_message)
         except Exception as e:
-            logger.error(f"传输管理器初始化失败: {e}", exc_info=True)
-            # 不阻止应用启动，只是某些传输方式不可用
+            logger.error(f"WebSocket 传输初始化失败: {e}", exc_info=True)
     
     # 初始化 Redis 离线检测（测试环境禁用）
     is_test_env = os.getenv("ENVIRONMENT") == "test" or os.getenv("TESTING") == "true"
@@ -196,7 +145,7 @@ async def lifespan(app: FastAPI):
                 logger.info("后台任务已取消")
     
     # 关闭传输管理器
-    if MQTT_AVAILABLE:
+    if TRANSPORT_AVAILABLE:
         try:
             await transport_manager.shutdown()
             logger.info("传输管理器已关闭")
@@ -210,14 +159,27 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+# 所有 HTTP/参数校验错误统一输出 {success, error} 契约。
+from fastapi.exceptions import RequestValidationError
+from app.core.exceptions import (
+    http_exception_handler,
+    validation_exception_handler,
+    general_exception_handler,
+)
+app.add_exception_handler(HTTPException, http_exception_handler)
+app.add_exception_handler(RequestValidationError, validation_exception_handler)
+app.add_exception_handler(Exception, general_exception_handler)
+
 # 添加请求日志中间件
 try:
     from app.core.middleware import LoggingMiddleware, SecurityHeadersMiddleware, RateLimitMiddleware
+    from app.core.observability import TraceMetricsMiddleware
     from app.core.config import get_settings as _get_settings
     _settings = _get_settings()
     if _settings.rate_limit_enabled:
         app.add_middleware(RateLimitMiddleware, requests_per_minute=_settings.rate_limit_per_minute)
     app.add_middleware(SecurityHeadersMiddleware)
+    app.add_middleware(TraceMetricsMiddleware)
     app.add_middleware(LoggingMiddleware)
     logger.info("请求日志、安全头与限流中间件已启用")
 except ImportError:
@@ -236,20 +198,25 @@ async def auth_middleware(request: Request, call_next):
     # 跳过非业务路径
     if request.url.path.startswith(("/health", "/metrics", "/docs", "/redoc", "/openapi.json")):
         return await call_next(request)
+
+    # 租户中间件通常已经完成数据库身份确认，避免重复查询并覆盖可信身份。
+    if getattr(request.state, "current_user", None) is not None:
+        return await call_next(request)
     
     # 从请求中提取token
     from app.core.auth import get_token_from_request
     token_payload = get_token_from_request(request)
-    
+
     if token_payload:
-        # 创建用户对象（简化版，实际应该从数据库查询）
-        class CurrentUser:
-            def __init__(self, payload):
-                self.id = uuid.UUID(payload["user_id"])
-                self.user_type = payload.get("user_type", "admin")
-                self.is_super_admin = payload.get("global_role") == "super_admin" or payload.get("is_super_admin", False)
-        
-        request.state.current_user = CurrentUser(token_payload)
+        # 仅使用数据库确认后的身份，不能直接信任 JWT 中的角色 claims。
+        from app.core.tenant_middleware import (
+            expected_audience_for_path,
+            load_authenticated_user,
+        )
+        expected_audience = expected_audience_for_path(request.url.path)
+        if expected_audience and token_payload.get("aud") != expected_audience:
+            raise HTTPException(status_code=401, detail="Invalid token audience")
+        request.state.current_user = load_authenticated_user(token_payload)
     else:
         request.state.current_user = None
     
@@ -380,60 +347,19 @@ async def handle_ocpp_message(charge_point_id: str, action: str, payload: Dict[s
 
 # ---- Helper function to send OCPP messages from CSMS to Charge Point ----
 async def send_ocpp_call(charge_point_id: str, action: str, payload: Dict[str, Any], timeout: float = 5.0) -> Dict[str, Any]:
-    """
-    发送OCPP调用从CSMS到充电桩，并等待响应。
-    优先使用 MQTT 传输，如果没有 MQTT 连接则使用 WebSocket。
-    返回响应数据或错误信息。
-    """
-    # 优先使用 MQTT 传输
-    if MQTT_AVAILABLE and hasattr(transport_manager, 'adapters'):
-        # 检查 transport_manager 是否已初始化（adapters不为空）
-        adapters_count = len(transport_manager.adapters) if transport_manager.adapters else 0
-        logger.info(f"[{charge_point_id}] send_ocpp_call检查: adapters={adapters_count}, adapters_keys={list(transport_manager.adapters.keys()) if transport_manager.adapters else []}")
-        if adapters_count > 0:
-            is_conn = transport_manager.is_connected(charge_point_id)
-            logger.info(f"[{charge_point_id}] send_ocpp_call检查: is_connected={is_conn}")
-            # 如果是MQTT适配器，检查_connected_chargers
-            mqtt_adapter = transport_manager.adapters.get(TransportType.MQTT)
-            if mqtt_adapter and hasattr(mqtt_adapter, '_connected_chargers'):
-                logger.info(f"[{charge_point_id}] MQTT _connected_chargers: {list(mqtt_adapter._connected_chargers)}")
-            if is_conn:
-                try:
-                    logger.info(f"[{charge_point_id}] 通过 MQTT 发送 OCPP 调用: {action}")
-                    result = await transport_manager.send_message(
-                        charge_point_id,
-                        action,
-                        payload,
-                        preferred_transport=TransportType.MQTT,
-                        timeout=timeout
-                    )
-                    logger.info(f"[{charge_point_id}] MQTT OCPP 调用完成: {action}, 结果: {result}")
-                    return {"success": True, "data": result, "transport": "MQTT"}
-                except Exception as e:
-                    logger.error(f"[{charge_point_id}] 通过 MQTT 发送 OCPP 调用失败: {e}", exc_info=True)
-                    # 如果 MQTT 失败，尝试 WebSocket（如果有）
-    
-        # Fallback: 使用 transport_manager 的 WebSocket 适配器
-        try:
-            if transport_manager and hasattr(transport_manager, 'adapters'):
-                ws_adapter = transport_manager.adapters.get(TransportType.WEBSOCKET)
-                if ws_adapter and transport_manager.is_connected(charge_point_id):
-                    logger.info(f"[{charge_point_id}] send_ocpp_call 通过 transport_manager WebSocket 发送: {action}")
-                    result = await transport_manager.send_message(
-                        charge_point_id,
-                        action,
-                        payload,
-                        preferred_transport=TransportType.WEBSOCKET,
-                        timeout=timeout
-                    )
-                    logger.info(f"[{charge_point_id}] WebSocket OCPP 调用完成: {action}, 结果: {result}")
-                    return {"success": True, "data": result, "transport": "WebSocket"}
-        except Exception as e:
-            logger.error(f"[{charge_point_id}] transport_manager WebSocket 发送失败: {e}", exc_info=True)
-    
-    # 如果都没有连接，抛出错误
-    logger.warning(f"[{charge_point_id}] 发送OCPP调用失败: 设备未连接 (transport_manager可用: {MQTT_AVAILABLE}, adapters: {len(transport_manager.adapters) if MQTT_AVAILABLE and hasattr(transport_manager, 'adapters') else 0})")
-    raise HTTPException(status_code=404, detail=f"Charger {charge_point_id} is not connected (MQTT or WebSocket)")
+    """仅通过 WebSocket 发送 OCPP 调用。"""
+    if not TRANSPORT_AVAILABLE or not transport_manager.is_connected(charge_point_id):
+        raise HTTPException(status_code=404, detail=f"Charger {charge_point_id} is not connected via WebSocket")
+    try:
+        result = await transport_manager.send_message(
+            charge_point_id, action, payload,
+            preferred_transport=TransportType.WEBSOCKET,
+            timeout=timeout,
+        )
+        return {"success": True, "data": result, "transport": "WebSocket"}
+    except Exception as exc:
+        logger.error(f"[{charge_point_id}] WebSocket OCPP 调用失败: {exc}", exc_info=True)
+        raise HTTPException(status_code=502, detail="WebSocket OCPP request failed")
 
 
 def now_iso() -> str:
@@ -992,7 +918,23 @@ class HealthResponse(BaseModel):
     ts: str
     database: Optional[str] = None
     redis: Optional[str] = None
-    mqtt: Optional[str] = None
+    websocket: Optional[str] = None
+
+
+@app.get("/livez", tags=["REST"])
+def liveness() -> Dict[str, Any]:
+    """进程存活探针，不访问外部依赖。"""
+    return {"ok": True, "ts": now_iso()}
+
+
+@app.get("/readyz", tags=["REST"])
+def readiness() -> Dict[str, Any]:
+    """依赖就绪探针，供编排器决定是否接收流量。"""
+    result = health()
+    result_data = result.model_dump() if hasattr(result, "model_dump") else result.dict()
+    if not result.ok:
+        raise HTTPException(status_code=503, detail=result_data)
+    return result_data
 
 
 @app.get("/health", response_model=HealthResponse, tags=["REST"])
@@ -1000,7 +942,6 @@ def health() -> HealthResponse:
     """健康检查（含依赖探测）。"""
     db_status = "unknown"
     redis_status = "unknown"
-    mqtt_status = "skipped"
 
     if DATABASE_AVAILABLE:
         try:
@@ -1015,16 +956,13 @@ def health() -> HealthResponse:
     except Exception:
         redis_status = "error"
 
-    if MQTT_AVAILABLE and os.getenv("ENABLE_MQTT_TRANSPORT", "false").lower() in ("true", "1", "yes"):
-        mqtt_status = "configured"
-
     ok = db_status != "error" and redis_status != "error"
     return HealthResponse(
         ok=ok,
         ts=now_iso(),
         database=db_status,
         redis=redis_status,
-        mqtt=mqtt_status,
+        websocket="configured" if TRANSPORT_AVAILABLE else "unavailable",
     )
 
 
@@ -1112,36 +1050,6 @@ def get_supported_ocpp_features() -> Dict[str, Any]:
             "description": "使用 ocpp_validator.py 工具检测实体充电桩"
         }
     }
-
-
-# ---- HTTP OCPP 端点（如果启用 HTTP 传输）----
-@app.post("/ocpp/{charge_point_id}", tags=["OCPP"])
-@app.get("/ocpp/{charge_point_id}", tags=["OCPP"])
-async def ocpp_http(charge_point_id: str, request: Request):
-    """
-    HTTP OCPP 端点
-    - POST: 充电桩发送 OCPP 消息
-    - GET: 充电桩轮询获取待处理的 CSMS 消息
-    """
-    if not MQTT_AVAILABLE or not hasattr(transport_manager, 'adapters'):
-        raise HTTPException(status_code=503, detail="传输管理器未初始化")
-    
-    settings = get_settings()
-    if not settings.enable_http_transport:
-        raise HTTPException(status_code=503, detail="HTTP 传输未启用")
-    
-    # 获取 HTTP 适配器
-    http_adapter = transport_manager.get_adapter(TransportType.HTTP)
-    if not http_adapter:
-        raise HTTPException(status_code=503, detail="HTTP 传输适配器不可用")
-    
-    try:
-        return await http_adapter.handle_http_request(charge_point_id, request)
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"[{charge_point_id}] HTTP OCPP 请求处理错误: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.websocket("/ocpp/{charge_point_id_path}")
@@ -1749,4 +1657,3 @@ except Exception as e:
     logger.error(error_msg, exc_info=True)
     print(f"ERROR: {error_msg}", file=sys.stderr)
     sys.stderr.flush()
-

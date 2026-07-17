@@ -23,6 +23,7 @@ from app.services.wompi_service import get_wompi_service
 from app.services.mercadopago_service import get_mercadopago_service
 from app.services.payment_providers.base import CreatePaymentCommand
 from app.services.payment_providers.registry import get_payment_provider_registry
+from app.domain.payment import transition_status
 from app.core.id_generator import generate_order_id
 from app.core.config import get_settings
 from email_validator import validate_email, EmailNotValidError
@@ -63,15 +64,16 @@ async def get_current_app_user(
 class CreatePaymentRequest(BaseModel):
     """Wompi 支付请求（保留兼容）"""
     type: str = Field(..., description="订单类型：top_up 或 charging")
-    amount: float = Field(..., gt=0, description="支付金额")
+    amount: Decimal = Field(..., gt=0, description="支付金额")
     currency: str = Field("COP", description="货币（默认 COP）")
+    idempotency_key: Optional[str] = Field(None, description="支付创建幂等键")
     metadata: Optional[Dict[str, Any]] = Field(None, description="元数据（充电支付时需要 session_id）")
 
 
 class CreateMercadoPagoPaymentRequest(BaseModel):
     """Mercado Pago 支付请求"""
     type: str = Field(..., description="订单类型：top_up 或 charging")
-    amount: float = Field(..., gt=0, description="支付金额")
+    amount: Decimal = Field(..., gt=0, description="支付金额")
     currency: str = Field("COP", description="货币（默认 COP）")
     token: str = Field(..., description="前端获取的 card token")
     email: str = Field(..., description="用户邮箱（MP 强制要求）")
@@ -104,7 +106,7 @@ class MercadoPagoPaymentResponse(BaseModel):
     payment_id: str
     status: str
     external_reference: str
-    amount: float
+    amount: Decimal
     currency: str
 
 
@@ -113,7 +115,7 @@ class PaymentStatusResponse(BaseModel):
     status: str
     wompi_transaction_id: Optional[str] = None
     mercadopago_payment_id: Optional[str] = None
-    amount: float
+    amount: Decimal
     currency: str
     paid_at: Optional[str] = None
     expires_at: str
@@ -140,20 +142,27 @@ def _apply_approved_business_logic(
     provider_ref: Optional[str] = None,
 ) -> None:
     if order.type == "top_up":
-        current_balance = app_user.balance or Decimal("0")
-        app_user.balance = current_balance + order.amount
+        app_user = db.query(AppUser).filter(AppUser.id == app_user.id).with_for_update().one()
+        ledger_id = f"payment_topup_{order.id}"
+        ledger = db.query(AppWalletTransaction).filter(AppWalletTransaction.id == ledger_id).first()
+        if ledger:
+            return
+        current_balance = Decimal(str(app_user.balance or 0))
+        app_user.balance = current_balance + Decimal(str(order.amount))
         operator_tenant = db.query(Tenant).order_by(Tenant.created_at.asc()).first()
-        if operator_tenant:
-            tx = AppWalletTransaction(
-                id=generate_order_id(),
-                app_user_id=app_user.id,
-                operator_tenant_id=operator_tenant.id,
-                charge_point_id=None,
-                type="top_up",
-                amount=order.amount,
-                description=f"{provider_display_name} 充值（订单 {provider_ref or order.id}）",
-            )
-            db.add(tx)
+        if not operator_tenant:
+            raise ValueError("No operator tenant available for wallet ledger")
+        tx = AppWalletTransaction(
+            id=ledger_id,
+            app_user_id=app_user.id,
+            payment_order_id=order.id,
+            operator_tenant_id=operator_tenant.id,
+            charge_point_id=None,
+            type="top_up",
+            amount=Decimal(str(order.amount)),
+            description=f"{provider_display_name} 充值（订单 {provider_ref or order.id}）",
+        )
+        db.add(tx)
         logger.info(
             f"[APP API] {provider_display_name} top-up completed: user={app_user.id}, "
             f"amount={order.amount}, new_balance={app_user.balance}"
@@ -171,6 +180,30 @@ def _apply_approved_business_logic(
                 )
 
 
+def _apply_refund_ledger(db: Session, order: PaymentOrder, amount: Decimal) -> None:
+    """把退款作为反向账本分录落库，订单状态只是账务状态的投影。"""
+    amount = Decimal(str(amount))
+    if amount <= 0 or amount > Decimal(str(order.amount)):
+        raise ValueError("Invalid refund amount")
+    user = db.query(AppUser).filter(AppUser.id == order.app_user_id).with_for_update().one()
+    ledger_id = f"payment_refund_{order.id}"
+    if db.query(AppWalletTransaction).filter(AppWalletTransaction.id == ledger_id).first():
+        return
+    user.balance = Decimal(str(user.balance or 0)) - amount
+    tenant = db.query(Tenant).order_by(Tenant.created_at.asc()).first()
+    if tenant:
+        db.add(AppWalletTransaction(
+            id=ledger_id,
+            app_user_id=user.id,
+            payment_order_id=order.id,
+            operator_tenant_id=tenant.id,
+            charge_point_id=None,
+            type="refund",
+            amount=-amount,
+            description=f"支付退款（订单 {order.id}）",
+        ))
+
+
 def _create_order_from_command(
     db: Session,
     current_user_obj: AppUser,
@@ -181,6 +214,19 @@ def _create_order_from_command(
     app_user = db.query(AppUser).filter(AppUser.id == current_user_obj.id).first()
     if not app_user:
         raise ValueError("App user not found")
+
+    if command.idempotency_key:
+        existing = db.query(PaymentOrder).filter(
+            PaymentOrder.app_user_id == app_user.id,
+            PaymentOrder.idempotency_key == command.idempotency_key,
+        ).first()
+        if existing:
+            checkout = {}
+            if existing.payment_provider == "wompi" and existing.reference:
+                checkout = get_wompi_service().create_payment_checkout_data(
+                    existing.reference, Decimal(str(existing.amount)), existing.currency, existing.redirect_url
+                )
+            return existing, checkout
 
     _validate_common_request(command.order_type, command.metadata)
     registry = get_payment_provider_registry()
@@ -198,6 +244,7 @@ def _create_order_from_command(
         amount=command.amount,
         currency=command.currency.upper(),
         payment_provider=command.provider,
+        idempotency_key=command.idempotency_key,
         reference=result.provider_order_ref if command.provider == "wompi" else None,
         integrity_signature=(result.checkout_payload or {}).get("integrity_signature") if command.provider == "wompi" else None,
         external_reference=result.provider_order_ref if command.provider == "mercadopago" else None,
@@ -206,7 +253,7 @@ def _create_order_from_command(
         redirect_url=result.redirect_url,
         expires_at=expires_at,
         payment_deadline_at=payment_deadline_at,
-        metadata=command.metadata or {},
+        order_metadata=command.metadata or {},
     )
     if result.status == "approved":
         order.paid_at = datetime.now(timezone.utc)
@@ -306,6 +353,7 @@ def create_payment_order(
                 amount=Decimal(str(req.amount)),
                 currency=req.currency.upper(),
                 metadata=req.metadata or {},
+                idempotency_key=req.idempotency_key,
             )
             order, checkout_payload = _create_order_from_command(db, current_user_obj, command)
             return CreatePaymentResponse(
@@ -461,11 +509,10 @@ async def handle_mercadopago_webhook(
             logger.warning("X-Request-Id not found in headers")
             x_request_id = data_id  # 使用 payment_id 作为 fallback
         
-        # 验证签名
-        if x_signature:
-            if not mp_service.verify_webhook_signature(x_signature, x_request_id, data_id):
-                logger.error("Webhook signature verification failed")
-                raise HTTPException(status_code=401, detail="Invalid signature")
+        # 签名是强制要求；不能把未签名回调当作开发环境例外放行。
+        if not x_signature or not x_request_id or not mp_service.verify_webhook_signature(x_signature, x_request_id, data_id):
+            logger.error("Webhook signature verification failed")
+            raise HTTPException(status_code=401, detail="Invalid signature")
         
         # 主动反查支付状态（重要：MP 推送不可信，必须反查）
         payment_info = mp_service.get_payment_status(data_id)
@@ -490,6 +537,10 @@ async def handle_mercadopago_webhook(
         if not order:
             logger.error(f"Order not found for payment_id: {data_id}, external_reference: {external_ref}")
             raise HTTPException(status_code=404, detail="Order not found")
+
+        if order.mercadopago_payment_id and order.mercadopago_payment_id != data_id:
+            raise HTTPException(status_code=400, detail="Payment/order ownership mismatch")
+        order = db.query(PaymentOrder).filter(PaymentOrder.id == order.id).with_for_update().one()
         
         # 金额/币种校验（防串单/篡改）
         if mp_amount != order.amount or mp_currency != order.currency:
@@ -540,14 +591,12 @@ async def handle_mercadopago_webhook(
         old_status = order.status
         
         # 如果已经是终态，不允许回退
-        if old_status in terminal_states and internal_status != old_status:
-            logger.warning(
-                f"Status rollback prevented: order={order.id}, "
-                f"old_status={old_status}, new_status={internal_status}"
-            )
+        try:
+            internal_status = transition_status(old_status, internal_status)
+        except ValueError:
+            logger.warning("Payment status transition rejected: order=%s %s -> %s", order.id, old_status, internal_status)
             internal_status = old_status
-        else:
-            order.status = internal_status
+        order.status = internal_status
         
         # 更新订单信息
         order.mercadopago_payment_id = data_id
@@ -559,30 +608,9 @@ async def handle_mercadopago_webhook(
         # 业务逻辑处理（与 Wompi 相同）
         if internal_status == "approved":
             if order.type == "top_up":
-                # 充值：更新钱包余额
-                app_user = db.query(AppUser).filter(AppUser.id == order.app_user_id).first()
+                app_user = db.query(AppUser).filter(AppUser.id == order.app_user_id).with_for_update().one_or_none()
                 if app_user:
-                    current_balance = app_user.balance or Decimal("0")
-                    app_user.balance = current_balance + order.amount
-                    
-                    # 写入充值流水
-                    operator_tenant = db.query(Tenant).order_by(Tenant.created_at.asc()).first()
-                    if operator_tenant:
-                        tx = AppWalletTransaction(
-                            id=generate_order_id(),
-                            app_user_id=app_user.id,
-                            operator_tenant_id=operator_tenant.id,
-                            charge_point_id=None,
-                            type="top_up",
-                            amount=order.amount,
-                            description=f"Mercado Pago 充值（订单 {external_ref or data_id}）",
-                        )
-                        db.add(tx)
-                    
-                    logger.info(
-                        f"[APP API] MercadoPago top-up completed: user={app_user.id}, "
-                        f"amount={order.amount}, new_balance={app_user.balance}"
-                    )
+                    _apply_approved_business_logic(db, order, app_user, "MercadoPago", external_ref or data_id)
             
             elif order.type == "charging":
                 # 充电支付：标记充电会话为已支付
@@ -744,12 +772,13 @@ async def handle_wompi_webhook(
         transaction_status = wompi_transaction.get("status")
         transaction_state = wompi_transaction.get("status_message") or transaction_status
         
-        # 状态推进规则：只能向终态推进，不允许回退
-        terminal_states = ["approved", "declined", "voided", "error"]
+        # 状态推进规则：由领域状态机统一处理，乱序回调不会覆盖已完成状态。
         old_status = order.status
         
         # 状态映射
         status_mapping = {
+            "PENDING": "processing",
+            "IN_PROCESS": "processing",
             "APPROVED": "approved",
             "DECLINED": "declined",
             "VOIDED": "voided",
@@ -759,14 +788,12 @@ async def handle_wompi_webhook(
         new_status = status_mapping.get(transaction_status.upper(), "error")
         
         # 如果已经是终态，不允许回退
-        if old_status in terminal_states and new_status != old_status:
-            logger.warning(
-                f"Status rollback prevented: order={order.id}, "
-                f"old_status={old_status}, new_status={new_status}"
-            )
+        try:
+            new_status = transition_status(old_status, new_status)
+        except ValueError:
+            logger.warning("Payment status transition rejected: order=%s %s -> %s", order.id, old_status, new_status)
             new_status = old_status
-        else:
-            order.status = new_status
+        order.status = new_status
         
         # 更新订单信息
         order.wompi_transaction_id = transaction_id
@@ -778,30 +805,9 @@ async def handle_wompi_webhook(
         # 业务逻辑处理
         if new_status == "approved":
             if order.type == "top_up":
-                # 充值：更新钱包余额
-                app_user = db.query(AppUser).filter(AppUser.id == order.app_user_id).first()
+                app_user = db.query(AppUser).filter(AppUser.id == order.app_user_id).with_for_update().one_or_none()
                 if app_user:
-                    current_balance = app_user.balance or Decimal("0")
-                    app_user.balance = current_balance + order.amount
-                    
-                    # 写入充值流水
-                    operator_tenant = db.query(Tenant).order_by(Tenant.created_at.asc()).first()
-                    if operator_tenant:
-                        tx = AppWalletTransaction(
-                            id=generate_order_id(),
-                            app_user_id=app_user.id,
-                            operator_tenant_id=operator_tenant.id,
-                            charge_point_id=None,
-                            type="top_up",
-                            amount=order.amount,
-                            description=f"Wompi 充值（订单 {reference}）",
-                        )
-                        db.add(tx)
-                    
-                    logger.info(
-                        f"[APP API] Top-up completed: user={app_user.id}, "
-                        f"amount={order.amount}, new_balance={app_user.balance}"
-                    )
+                    _apply_approved_business_logic(db, order, app_user, "Wompi", reference)
             
             elif order.type == "charging":
                 # 充电支付：标记充电会话为已支付

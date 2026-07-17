@@ -127,20 +127,23 @@ def verify_token(token: str, audience: Optional[str] = None) -> Optional[Dict[st
             "options": decode_options,
         }
         
-        # 只有在提供了 audience 时才验证
+        # 路由提供 audience 时严格校验；否则至少要求合法 issuer 和 audience。
         if audience:
             decode_kwargs["audience"] = audience
             decode_kwargs["issuer"] = "csms-platform"
             decode_options["verify_aud"] = True
             decode_options["require_iss"] = True
         else:
-            # 不提供 audience 时不验证，但验证 issuer（如果存在）
             decode_kwargs["issuer"] = "csms-platform"
             decode_options["verify_aud"] = False
+            # python-jose requires an explicit audience value when verify_aud is enabled;
+            # require the claim structurally, then validate its value below.
             decode_options["require_aud"] = False
-            decode_options["require_iss"] = False
+            decode_options["require_iss"] = True
         
         payload = jwt.decode(**decode_kwargs)
+        if not audience and payload.get("aud") not in {"admin", "app"}:
+            return None
         return payload
     except JWTError as e:
         # 调试：打印错误信息
@@ -151,6 +154,7 @@ def verify_token(token: str, audience: Optional[str] = None) -> Optional[Dict[st
 
 
 async def get_current_user(
+    request: Request,
     credentials: HTTPAuthorizationCredentials = Security(security)
 ) -> Dict[str, Any]:
     """
@@ -163,29 +167,38 @@ async def get_current_user(
     - aud: Token audience
     - jti: JWT ID
     """
-    # #region agent log
-    import logging
-    logger = logging.getLogger("ocpp_csms")
-    logger.warning(f"[DEBUG] get_current_user ENTRY - has_token={credentials.credentials is not None}, token_prefix={credentials.credentials[:20] + '...' if credentials.credentials else None}")
-    # #endregion
-    
     token = credentials.credentials
     payload = verify_token(token)
     
-    # #region agent log
-    logger.warning(f"[DEBUG] get_current_user - JWT verified, payload_exists={payload is not None}, user_id={payload.get('user_id') if payload else None}, user_type={payload.get('user_type') if payload else None}, is_super_admin={payload.get('global_role') == 'super_admin' if payload else None}")
-    # #endregion
-    
     if payload is None:
-        # #region agent log
-        logger.error(f"[DEBUG] get_current_user - JWT verification FAILED, raising 401")
-        # #endregion
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="无效的认证令牌",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    
+
+    path = request.url.path
+    app_route = path.startswith("/api/v1/app/")
+    admin_route = path.startswith("/api/v1/admin/") or path.startswith((
+        "/api/v1/chargers",
+        "/api/v1/sites",
+        "/api/v1/transactions",
+        "/api/v1/orders",
+        "/api/v1/ocpp",
+        "/api/v1/admin",
+        "/api/v1/charger-management",
+        "/api/v1/statistics",
+        "/api/v1/devices",
+        "/api/v1/dashboard",
+    ))
+    expected_audience = "app" if app_route else "admin" if admin_route else None
+    if expected_audience and payload.get("aud") != expected_audience:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token audience",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
     return payload
 
 
@@ -209,7 +222,7 @@ def require_audience(audience: str):
 
 
 def get_token_from_request(request: Request) -> Optional[Dict[str, Any]]:
-    """从请求中提取并验证 token（不验证audience，因为可能是admin或app）"""
+    """从请求中提取并验证 token，要求 issuer 和 audience 合法。"""
     authorization = request.headers.get("Authorization")
     if not authorization:
         return None
@@ -221,13 +234,10 @@ def get_token_from_request(request: Request) -> Optional[Dict[str, Any]]:
     except ValueError:
         return None
     
-    # 先不验证audience来获取payload（用于中间件识别用户类型）
-    # 如果需要严格验证，可以在具体的API端点中使用 verify_token(token, audience="admin")
     try:
         from jose import jwt
         from app.core.config import get_settings
         settings = get_settings()
-        # 不验证audience，只验证签名和其他标准字段
         payload = jwt.decode(
             token,
             settings.secret_key,
@@ -237,11 +247,12 @@ def get_token_from_request(request: Request) -> Optional[Dict[str, Any]]:
                 "verify_exp": True,
                 "verify_iat": True,
                 "verify_nbf": True,
-                "verify_aud": False,  # 不验证audience
+                "verify_aud": False,
                 "require_aud": False,
-                "require_iss": False  # 不要求issuer（在中间件阶段）
-            }
+                "require_iss": True,
+            },
+            issuer="csms-platform",
         )
-        return payload
+        return payload if payload.get("aud") in {"admin", "app"} else None
     except Exception:
         return None

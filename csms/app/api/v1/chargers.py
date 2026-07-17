@@ -15,6 +15,7 @@ from app.core.permissions import get_current_admin_user
 from app.core.permissions import has_permission
 from app.services.role_service import MembershipRoleService
 from datetime import datetime, timezone
+from decimal import Decimal
 
 logger = get_logger("ocpp_csms")
 
@@ -31,15 +32,15 @@ class CreateChargerRequest(BaseModel):
 class ChargerPricingUpdateRequest(BaseModel):
     """充电桩级覆盖价（优先于站点默认价）"""
 
-    base_price_per_kwh: float
-    service_fee: Optional[float] = None
+    base_price_per_kwh: Decimal
+    service_fee: Optional[Decimal] = None
 
 
 class ChargerPricingResponse(BaseModel):
     charge_point_id: str
     tariff_id: int
-    base_price_per_kwh: float
-    service_fee: float
+    base_price_per_kwh: Decimal
+    service_fee: Decimal
     valid_from: str
 
 
@@ -711,4 +712,3 @@ def generate_all_charger_qr_codes(
         "success_count": len(results),
         "error_count": len(errors),
     }
-

@@ -4,13 +4,14 @@ Revision ID: 001_baseline
 Revises:
 Create Date: 2026-06-09
 
-Existing deployments created via init_db()/create_all should stamp this revision:
+Existing databases created by the development bootstrap can stamp this revision:
   alembic stamp 001_baseline
-Fresh installs run upgrade to create tables via SQLAlchemy metadata.
+Fresh installs create the current model metadata through this migration.
 """
 
 from alembic import op
 import sqlalchemy as sa
+from app.database import Base
 
 revision = "001_baseline"
 down_revision = None
@@ -19,10 +20,10 @@ depends_on = None
 
 
 def upgrade() -> None:
-    # Baseline: schema managed by app.database.models + init_db on first boot.
-    # Use `alembic stamp 001_baseline` on DBs already initialized with create_all.
-    pass
+    bind = op.get_bind()
+    Base.metadata.create_all(bind=bind)
 
 
 def downgrade() -> None:
-    pass
+    bind = op.get_bind()
+    Base.metadata.drop_all(bind=bind)

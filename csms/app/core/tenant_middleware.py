@@ -6,6 +6,7 @@
 from fastapi import Request, HTTPException
 from typing import Optional
 import uuid
+from types import SimpleNamespace
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
 from app.database.base import (
@@ -145,6 +146,79 @@ def should_use_super_connection(current_user, tenant_id_header) -> bool:
     return True
 
 
+def load_authenticated_user(token_payload):
+    """从数据库确认 token 对应用户，禁止 JWT claims 直接授予平台权限。"""
+    try:
+        user_id = uuid.UUID(str(token_payload["user_id"]))
+    except (KeyError, ValueError, TypeError) as exc:
+        raise HTTPException(status_code=401, detail="Invalid authenticated user") from exc
+
+    user_type = token_payload.get("user_type")
+    audience = token_payload.get("aud")
+    if user_type == "admin" and audience != "admin":
+        raise HTTPException(status_code=401, detail="Invalid admin token audience")
+    if user_type == "end_user" and audience != "app":
+        raise HTTPException(status_code=401, detail="Invalid app token audience")
+
+    if user_type == "admin":
+        from app.database.models import AdminUser
+        from app.database.base import SuperSessionLocal
+        db = SuperSessionLocal()
+        try:
+            user = db.query(AdminUser).filter(AdminUser.id == user_id).first()
+            if not user or not user.is_active:
+                raise HTTPException(status_code=401, detail="User account is inactive or not found")
+            return SimpleNamespace(
+                id=user.id,
+                user_type="admin",
+                is_super_admin=bool(user.is_super_admin),
+            )
+        finally:
+            db.close()
+
+    if user_type == "end_user":
+        from app.database.models import EndUser
+        from app.database.base import SessionLocal
+        db = SessionLocal()
+        try:
+            user = db.query(EndUser).filter(EndUser.id == user_id).first()
+            if not user or user.status != "active":
+                raise HTTPException(status_code=401, detail="User account is inactive or not found")
+            return SimpleNamespace(
+                id=user.id,
+                user_type="end_user",
+                is_super_admin=False,
+            )
+        finally:
+            db.close()
+
+    raise HTTPException(status_code=401, detail="Unsupported token user type")
+
+
+def expected_audience_for_path(path: str) -> Optional[str]:
+    if path.startswith("/api/v1/admin/"):
+        return "admin"
+    if path.startswith("/api/v1/app/"):
+        return "app"
+    return None
+
+
+def is_public_auth_path(path: str) -> bool:
+    """公开认证接口白名单；其余 /api/v1 请求必须先通过身份认证。"""
+    public_paths = (
+        "/api/v1/admin/auth/login",
+        "/api/v1/admin/auth/refresh",
+        "/api/v1/app/auth/register",
+        "/api/v1/app/auth/login",
+        "/api/v1/app/auth/refresh",
+        "/api/v1/app/auth/register-email",
+        "/api/v1/app/auth/login-email",
+        "/api/v1/app/auth/resend-verification",
+        "/api/v1/app/auth/verify-email",
+    )
+    return path.startswith(public_paths)
+
+
 async def tenant_middleware(request: Request, call_next):
     """
     租户中间件 - 在请求处理前验证 tenant_id
@@ -155,83 +229,60 @@ async def tenant_middleware(request: Request, call_next):
     3. 设置上下文变量（tenant_id, is_super_admin, use_super_connection）
     4. 在请求结束后清理上下文
     """
-    # 跳过非业务路径和认证相关路径（如 /health, /docs, /auth/login, /auth/refresh 等）
-    # /me 接口也应该跳过租户检查，因为它用于获取用户自己的信息（包括 tenant_id）
-    skip_paths = (
-        "/health", "/docs", "/redoc", "/openapi.json",
-        "/api/v1/admin/auth/login", "/api/v1/admin/auth/refresh", "/api/v1/admin/auth/me"
-    )
+    # 健康检查和文档公开；认证接口由 is_public_auth_path 明确白名单。
+    skip_paths = ("/health", "/docs", "/redoc", "/openapi.json")
     if any(request.url.path.startswith(path) for path in skip_paths):
         return await call_next(request)
     
     # 从 request.state 获取当前用户（由认证中间件设置）
     current_user = getattr(request.state, 'current_user', None)
     
-    # 如果不存在，兜底从 Authorization Bearer 解析一次，避免中间件顺序导致的空值
+    # 如果不存在，兜底从 Authorization Bearer 解析一次，避免中间件顺序导致的空值。
     if current_user is None:
         try:
             from app.core.auth import get_token_from_request
             token_payload = get_token_from_request(request)
             if token_payload:
-                class CurrentUser:
-                    def __init__(self, payload):
-                        self.id = uuid.UUID(payload["user_id"])
-                        self.user_type = payload.get("user_type", "admin")
-                        self.is_super_admin = payload.get("global_role") == "super_admin" or payload.get("is_super_admin", False)
-                current_user = CurrentUser(token_payload)
+                expected_audience = expected_audience_for_path(request.url.path)
+                if expected_audience and token_payload.get("aud") != expected_audience:
+                    raise HTTPException(status_code=401, detail="Invalid token audience")
+                current_user = load_authenticated_user(token_payload)
                 request.state.current_user = current_user
-        except Exception as e:
-            logger.error(f"[DEBUG] tenant_middleware - Fallback parse token failed: {e}", exc_info=True)
+        except Exception:
+            if request.headers.get("Authorization"):
+                raise
+            logger.debug("No authenticated user in tenant middleware")
     
-    # #region agent log
-    logger.warning(f"[DEBUG] tenant_middleware ENTRY - path={request.url.path}, has_current_user={current_user is not None}, current_user_id={current_user.id if current_user else None}, current_user_type={current_user.user_type if current_user else None}, is_super_admin={current_user.is_super_admin if current_user else False}")
-    # #endregion
-    
-    # 如果没有当前用户（未认证的请求，如登录接口），跳过租户检查
+    # 所有 API v1 路由默认要求认证，只有显式白名单的认证接口公开。
     if not current_user:
-        logger.warning(f"[DEBUG] tenant_middleware - No current_user, skipping tenant check")
+        if request.url.path.startswith("/api/v1") and not is_public_auth_path(request.url.path):
+            raise HTTPException(status_code=401, detail="Authentication required")
         return await call_next(request)
     
     # 提取 tenant_id（简化中间件日志，详细日志在路由层面）
     tenant_id_header = request.headers.get("X-Tenant-Id") or request.headers.get("x-tenant-id")
     
-    # #region agent log
-    logger.warning(f"[DEBUG] tenant_middleware - X-Tenant-Id header: {tenant_id_header}, all_headers_X-Tenant-Id={request.headers.get('X-Tenant-Id')}, all_headers_x-tenant-id={request.headers.get('x-tenant-id')}")
-    # #endregion
-    
     try:
         tenant_id = get_tenant_id_from_request(request, current_user)
-        logger.warning(f"[DEBUG] tenant_middleware - get_tenant_id_from_request returned: {tenant_id}")
     except Exception as e:
-        logger.error(f"[DEBUG] tenant_middleware - Error getting tenant_id from request: {e}", exc_info=True)
+        logger.error("Unable to resolve tenant context", exc_info=True)
         tenant_id = None
     
     # 如果还没有 tenant_id，且用户不是 super_admin，尝试从用户的默认租户获取
     if not tenant_id and current_user and current_user.user_type == "admin" and not current_user.is_super_admin:
-        logger.warning(f"[DEBUG] tenant_middleware - No tenant_id found, trying to get default tenant for user {current_user.id}")
         try:
             default_tenant_id = get_user_default_tenant(current_user.id)
             if default_tenant_id:
                 tenant_id = default_tenant_id
-                logger.warning(f"[DEBUG] tenant_middleware - Auto-resolved tenant_id from user default tenant: {tenant_id} for user {current_user.id}")
-            else:
-                logger.warning(f"[DEBUG] tenant_middleware - User {current_user.id} has no default tenant")
         except Exception as e:
-            logger.error(f"[DEBUG] tenant_middleware - Failed to auto-resolve tenant_id for user {current_user.id}: {e}", exc_info=True)
+            logger.error("Failed to resolve user's default tenant", exc_info=True)
     
-    # #region agent log
-    logger.warning(f"[DEBUG] tenant_middleware - Before tenant_id check: tenant_id={tenant_id}, is_super_admin={current_user.is_super_admin if current_user else False}, user_type={current_user.user_type if current_user else None}")
-    # #endregion
-    
-    # 硬规则：管理员请求必须提供 tenant_id（除非是 super admin）
-    # super_admin 可以不需要 tenant_id（可以访问所有租户）
-    if current_user and current_user.user_type == "admin":
-        if not current_user.is_super_admin and not tenant_id:
-            logger.error(f"[DEBUG] tenant_middleware - TENANT_REQUIRED ERROR - user_id={current_user.id}, tenant_id_header={tenant_id_header}, tenant_id_resolved={tenant_id}")
-            raise HTTPException(
-                status_code=403,
-                detail="TENANT_REQUIRED: Tenant ID must be set for non-super-admin requests. Please provide X-Tenant-Id header or ensure user has a default tenant."
-            )
+    # 硬规则：任何非 super admin 的已认证业务请求都必须解析出 tenant_id。
+    if current_user and not current_user.is_super_admin and not tenant_id:
+        raise HTTPException(
+            status_code=403,
+            detail="TENANT_REQUIRED: Tenant context could not be resolved for this request."
+        )
     
     # 判断是否使用 super 连接
     use_super_connection = should_use_super_connection(current_user, tenant_id_header)
@@ -297,9 +348,6 @@ async def tenant_middleware(request: Request, call_next):
             )
     
     # 设置上下文变量
-    # #region agent log
-    logger.warning(f"[DEBUG] tenant_middleware - Setting context: tenant_id={tenant_id}, is_super_admin={current_user.is_super_admin if current_user else False}, use_super_connection={use_super_connection}")
-    # #endregion
     tenant_id_context.set(tenant_id)
     is_super_admin_context.set(
         current_user.is_super_admin if current_user else False

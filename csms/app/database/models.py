@@ -6,12 +6,16 @@
 from datetime import datetime, timezone
 from sqlalchemy import (
     Column, Integer, String, Float, Boolean, 
-    DateTime, Text, ForeignKey, JSON, Index, Numeric, UniqueConstraint
+    DateTime, Text, ForeignKey, JSON, Index, Numeric, UniqueConstraint, CheckConstraint
 )
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import relationship
 import uuid
 from app.database.base import Base
+
+# PostgreSQL uses JSONB in production; SQLite can use JSON for the fast unit
+# suite. The variant preserves one model contract across both dialects.
+PortableJSON = JSON().with_variant(JSONB, "postgresql")
 
 
 # ==================== 站点和资产层 ====================
@@ -256,6 +260,10 @@ class ChargingSession(Base):
         Index('idx_sessions_charge_point', 'charge_point_id'),
         Index('idx_sessions_transaction_unique', 'charge_point_id', 'evse_id', 'transaction_id', unique=True),
         Index('idx_charging_sessions_tenant_id', 'tenant_id'),
+        CheckConstraint(
+            "status IN ('ongoing', 'completed', 'cancelled')",
+            name='ck_charging_sessions_status'
+        ),
     )
 
 
@@ -270,6 +278,8 @@ class MeterValue(Base):
     session_id = Column(Integer, ForeignKey("charging_sessions.id"), nullable=False, index=True)
     
     connector_id = Column(Integer, nullable=True)
+    # 入站 OCPP 消息的稳定幂等键；允许为空以兼容没有消息 UUID 的旧设备。
+    idempotency_key = Column(String(255), nullable=True)
     timestamp = Column(DateTime(timezone=True), nullable=False, index=True)
     
     # 计量数据
@@ -284,6 +294,59 @@ class MeterValue(Base):
         Index('idx_meter_values_timestamp', 'timestamp'),
         Index('idx_meter_values_session', 'session_id'),
         Index('idx_meter_values_tenant_id', 'tenant_id'),
+        UniqueConstraint('session_id', 'idempotency_key', name='uq_meter_values_session_idempotency'),
+    )
+
+
+class OCPPMessageEvent(Base):
+    """OCPP 入站消息去重记录。
+
+    message_key 由传输层消息 ID 或规范化请求体生成。记录和领域写入使用同一事务，
+    因而断线重连/重放时可以安全返回幂等结果。
+    """
+    __tablename__ = "ocpp_message_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    charge_point_id = Column(String(100), ForeignKey("charge_points.id"), nullable=False, index=True)
+    action = Column(String(100), nullable=False)
+    message_key = Column(String(255), nullable=False)
+    payload = Column(PortableJSON, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False, index=True)
+
+    tenant = relationship("Tenant")
+    charge_point = relationship("ChargePoint")
+
+    __table_args__ = (
+        UniqueConstraint('tenant_id', 'charge_point_id', 'action', 'message_key', name='uq_ocpp_message_event_key'),
+        Index('idx_ocpp_message_events_cp_action', 'charge_point_id', 'action'),
+    )
+
+
+class OutboxEvent(Base):
+    """事务 Outbox：领域状态变更和待发送设备命令的可靠事件记录。"""
+    __tablename__ = "outbox_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    aggregate_type = Column(String(100), nullable=False)
+    aggregate_id = Column(String(100), nullable=False)
+    event_type = Column(String(100), nullable=False)
+    idempotency_key = Column(String(255), nullable=False)
+    payload = Column(PortableJSON, nullable=False)
+    status = Column(String(20), nullable=False, default="pending")
+    attempts = Column(Integer, nullable=False, default=0)
+    available_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False, index=True)
+    published_at = Column(DateTime(timezone=True), nullable=True)
+    last_error = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False, index=True)
+
+    tenant = relationship("Tenant")
+
+    __table_args__ = (
+        UniqueConstraint('tenant_id', 'idempotency_key', name='uq_outbox_tenant_idempotency'),
+        Index('idx_outbox_pending', 'status', 'available_at'),
+        Index('idx_outbox_aggregate', 'aggregate_type', 'aggregate_id'),
     )
 
 
@@ -377,6 +440,8 @@ class Tariff(Base):
         Index('idx_tariffs_charge_point', 'charge_point_id'),
         Index('idx_tariffs_valid', 'valid_from', 'valid_until'),
         Index('idx_tariffs_tenant_id', 'tenant_id'),
+        CheckConstraint('base_price_per_kwh >= 0', name='ck_tariffs_base_price_nonnegative'),
+        CheckConstraint('service_fee >= 0', name='ck_tariffs_service_fee_nonnegative'),
     )
 
 
@@ -411,6 +476,8 @@ class PricingSnapshot(Base):
         Index('idx_pricing_snapshots_session', 'session_id'),
         Index('idx_pricing_snapshots_order', 'order_id'),
         Index('idx_pricing_snapshots_tenant_id', 'tenant_id'),
+        CheckConstraint('price_per_kwh >= 0', name='ck_pricing_snapshots_price_nonnegative'),
+        CheckConstraint('service_fee >= 0', name='ck_pricing_snapshots_service_fee_nonnegative'),
     )
 
 
@@ -460,6 +527,7 @@ class Invoice(Base):
         Index('idx_invoices_order', 'order_id'),
         Index('idx_invoices_issued_at', 'issued_at'),
         Index('idx_invoices_tenant_id', 'tenant_id'),
+        UniqueConstraint('session_id', name='uq_invoices_session'),
     )
 
 
@@ -547,6 +615,7 @@ class AppWalletTransaction(Base):
 
     id = Column(String(100), primary_key=True, index=True)
     app_user_id = Column(UUID(as_uuid=True), ForeignKey("app_users.id", ondelete="CASCADE"), nullable=False, index=True)
+    payment_order_id = Column(UUID(as_uuid=True), ForeignKey("payment_orders.id", ondelete="SET NULL"), nullable=True, index=True)
 
     operator_tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
     charge_point_id = Column(String(100), ForeignKey("charge_points.id"), nullable=True, index=True)
@@ -566,6 +635,7 @@ class AppWalletTransaction(Base):
         Index("idx_app_wallet_tx_user", "app_user_id", "created_at"),
         Index("idx_app_wallet_tx_operator_tenant", "operator_tenant_id"),
         Index("idx_app_wallet_tx_charge_point", "charge_point_id"),
+        UniqueConstraint("payment_order_id", "type", name="uq_app_wallet_tx_payment_type"),
     )
 
 
@@ -616,6 +686,7 @@ class PaymentOrder(Base):
     
     # 支付提供商
     payment_provider = Column(String(50), nullable=False, default="wompi", index=True)  # 'wompi' 或 'mercadopago'
+    idempotency_key = Column(String(255), nullable=True, index=True)
     
     # Wompi 相关（保留用于兼容）
     reference = Column(String(128), nullable=True, unique=True, index=True)  # 唯一参考号，格式：ESL-YYYYMMDD-{6位随机字符}
@@ -635,7 +706,7 @@ class PaymentOrder(Base):
     payment_deadline_at = Column(DateTime(timezone=True), nullable=True)  # 支付截止时间（充电支付场景）
     
     # 元数据（JSONB）
-    order_metadata = Column("metadata", JSONB, nullable=True)  # 存储额外信息，如充电 session_id、charge_point_id、site_id（映射到数据库的metadata字段）
+    order_metadata = Column("metadata", PortableJSON, nullable=True)  # 存储额外信息，如充电 session_id、charge_point_id、site_id（映射到数据库的metadata字段）
     
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False, index=True)
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
@@ -649,6 +720,12 @@ class PaymentOrder(Base):
         Index("idx_payment_orders_status", "status"),
         Index("idx_payment_orders_type", "type"),
         Index("idx_payment_orders_provider", "payment_provider"),
+        UniqueConstraint("app_user_id", "idempotency_key", name="uq_payment_orders_user_idempotency"),
+        CheckConstraint('amount > 0', name='ck_payment_orders_amount_positive'),
+        CheckConstraint(
+            "status IN ('created', 'processing', 'approved', 'declined', 'voided', 'error', 'expired', 'refunded')",
+            name='ck_payment_orders_status'
+        ),
     )
 
 
@@ -676,7 +753,7 @@ class PaymentWebhookEvent(Base):
     
     event_type = Column(String(100), nullable=True)  # transaction.updated, payment.created, payment.updated 等
     
-    payload = Column(JSONB, nullable=True)  # 存储原始 webhook 数据
+    payload = Column(PortableJSON, nullable=True)  # 存储原始 webhook 数据
     
     processed = Column(Boolean, nullable=False, default=False)  # 是否已处理
     processed_at = Column(DateTime(timezone=True), nullable=True)  # 处理时间

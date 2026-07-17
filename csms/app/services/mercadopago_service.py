@@ -218,8 +218,8 @@ class MercadoPagoService:
             bool: 签名是否有效
         """
         if not self.webhook_secret:
-            logger.warning("MercadoPago webhook secret not configured. Skipping signature verification.")
-            return True  # 开发环境可能没有配置，允许通过
+            logger.error("MercadoPago webhook secret is required")
+            return False
         
         try:
             # 解析 x-signature header

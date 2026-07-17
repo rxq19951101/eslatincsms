@@ -12,10 +12,11 @@ from app.database.models import (
 class TestDatabaseModels:
     """数据库模型测试类"""
     
-    def test_site_creation(self, db_session):
+    def test_site_creation(self, db_session, sample_tenant):
         """测试创建站点"""
         site = Site(
             id="test_site_1",
+            tenant_id=sample_tenant.id,
             name="测试站点",
             address="测试地址",
             latitude=39.9042,
@@ -32,6 +33,7 @@ class TestDatabaseModels:
         """测试创建充电桩"""
         charge_point = ChargePoint(
             id="CP-TEST-001",
+            tenant_id=sample_site.tenant_id,
             site_id=sample_site.id,
             vendor="测试厂商",
             model="测试型号"
@@ -42,7 +44,7 @@ class TestDatabaseModels:
         assert charge_point.id == "CP-TEST-001"
         assert charge_point.site_id == sample_site.id
     
-    def test_device_creation(self, db_session):
+    def test_device_creation(self, db_session, sample_tenant):
         """测试创建设备（每个设备独立存储master_secret）"""
         try:
             from app.core.crypto import encrypt_master_secret
@@ -57,6 +59,7 @@ class TestDatabaseModels:
         
         device = Device(
             serial_number="123456789012345",
+            tenant_id=sample_tenant.id,
             type_code="zcf",
             mqtt_client_id="zcf&123456789012345",
             mqtt_username="123456789012345",
@@ -73,6 +76,7 @@ class TestDatabaseModels:
     def test_evse_creation(self, db_session, sample_charge_point):
         """测试创建EVSE"""
         evse = EVSE(
+            tenant_id=sample_charge_point.tenant_id,
             charge_point_id=sample_charge_point.id,
             evse_id=1,
             connector_type="Type2",
@@ -88,6 +92,7 @@ class TestDatabaseModels:
     def test_evse_connector_type_default(self, db_session, sample_charge_point):
         """测试EVSE connector_type 默认值"""
         evse = EVSE(
+            tenant_id=sample_charge_point.tenant_id,
             charge_point_id=sample_charge_point.id,
             evse_id=2
             # 不指定 connector_type，应该使用默认值
@@ -100,6 +105,7 @@ class TestDatabaseModels:
     def test_charging_session_creation(self, db_session, sample_charge_point, sample_evse):
         """测试创建充电会话"""
         session = ChargingSession(
+            tenant_id=sample_charge_point.tenant_id,
             charge_point_id=sample_charge_point.id,
             evse_id=sample_evse.id,
             transaction_id=12345,
@@ -116,11 +122,13 @@ class TestDatabaseModels:
         """测试 transaction_id 组合唯一约束 (charge_point_id, evse_id, transaction_id)"""
         # 创建两个不同的 EVSE
         evse1 = EVSE(
+            tenant_id=sample_charge_point.tenant_id,
             charge_point_id=sample_charge_point.id,
             evse_id=1,
             connector_type="Type2"
         )
         evse2 = EVSE(
+            tenant_id=sample_charge_point.tenant_id,
             charge_point_id=sample_charge_point.id,
             evse_id=2,
             connector_type="CCS2"
@@ -130,6 +138,7 @@ class TestDatabaseModels:
         
         # 在同一个充电桩的不同 EVSE 可以使用相同的 transaction_id
         session1 = ChargingSession(
+            tenant_id=sample_charge_point.tenant_id,
             charge_point_id=sample_charge_point.id,
             evse_id=evse1.id,
             transaction_id=99999,
@@ -138,6 +147,7 @@ class TestDatabaseModels:
             status="ongoing"
         )
         session2 = ChargingSession(
+            tenant_id=sample_charge_point.tenant_id,
             charge_point_id=sample_charge_point.id,
             evse_id=evse2.id,
             transaction_id=99999,  # 相同的 transaction_id，但不同的 evse_id
@@ -156,6 +166,7 @@ class TestDatabaseModels:
         # 尝试在同一个 (charge_point_id, evse_id) 创建相同的 transaction_id 应该失败
         from sqlalchemy.exc import IntegrityError
         session3 = ChargingSession(
+            tenant_id=sample_charge_point.tenant_id,
             charge_point_id=sample_charge_point.id,
             evse_id=evse1.id,  # 相同的 evse_id
             transaction_id=99999,  # 相同的 transaction_id
@@ -171,6 +182,7 @@ class TestDatabaseModels:
     def test_device_event_creation(self, db_session, sample_charge_point, sample_device):
         """测试创建设备事件"""
         event = DeviceEvent(
+            tenant_id=sample_charge_point.tenant_id,
             charge_point_id=sample_charge_point.id,
             device_serial_number=sample_device.serial_number,
             event_type="heartbeat",
@@ -186,6 +198,7 @@ class TestDatabaseModels:
         """测试创建订单"""
         order = Order(
             id="ORDER-TEST-001",  # Order.id是主键，必须提供
+            tenant_id=sample_charge_point.tenant_id,
             charge_point_id=sample_charge_point.id,
             user_id="TEST_USER_001",
             id_tag="TAG_001",  # id_tag是必填字段
@@ -201,6 +214,7 @@ class TestDatabaseModels:
     def test_tariff_creation(self, db_session, sample_site):
         """测试创建定价规则"""
         tariff = Tariff(
+            tenant_id=sample_site.tenant_id,
             site_id=sample_site.id,
             name="测试定价",
             base_price_per_kwh=1.5,
@@ -213,4 +227,3 @@ class TestDatabaseModels:
         
         assert tariff.base_price_per_kwh == 1.5
         assert tariff.is_active is True
-

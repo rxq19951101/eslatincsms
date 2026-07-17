@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from datetime import datetime, timezone
+from decimal import Decimal
 
 from app.database.base import get_db, tenant_id_context
 from app.database.models import ChargePoint, Site, Tariff, EVSE, EVSEStatus
@@ -37,7 +38,7 @@ class CreateChargerRequest(BaseModel):
     latitude: Optional[float] = Field(None, description="纬度")
     longitude: Optional[float] = Field(None, description="经度")
     address: Optional[str] = Field(None, description="地址")
-    price_per_kwh: float = Field(2700.0, description="每度电价格 (COP/kWh)")
+    price_per_kwh: Decimal = Field(Decimal("2700.0"), description="每度电价格 (COP/kWh)")
 
 
 class UpdateChargerLocationRequest(BaseModel):
@@ -51,7 +52,7 @@ class UpdateChargerLocationRequest(BaseModel):
 class UpdateChargerPricingRequest(BaseModel):
     """更新充电桩定价请求"""
     charger_id: str = Field(..., description="充电桩ID")
-    price_per_kwh: float = Field(..., gt=0, description="每度电价格 (COP/kWh)")
+    price_per_kwh: Decimal = Field(..., gt=0, description="每度电价格 (COP/kWh)")
     charging_rate: Optional[float] = Field(None, description="充电速率 (kW)")
 
 
@@ -806,4 +807,3 @@ def get_charger_status(
         f"连接状态: {'已连接' if is_connected else '未连接'} | "
         f"配置完整: {is_configured and has_location and has_pricing}"
     )
-
