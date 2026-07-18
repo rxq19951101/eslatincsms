@@ -23,6 +23,7 @@ class TestDatabaseQueries:
         from datetime import datetime, timezone
         
         session = ChargingSession(
+            tenant_id=sample_charge_point.tenant_id,
             charge_point_id=sample_charge_point.id,
             evse_id=sample_evse.id,
             transaction_id=9999,
@@ -35,6 +36,7 @@ class TestDatabaseQueries:
         
         # 创建计量值，使用session_id（正确的列名）
         meter = MeterValue(
+            tenant_id=sample_charge_point.tenant_id,
             session_id=session.id,  # 使用正确的列名
             value=100,
             timestamp=datetime.now(timezone.utc)
@@ -59,6 +61,7 @@ class TestDatabaseQueries:
         
         # 创建会话
         session = ChargingSession(
+            tenant_id=sample_charge_point.tenant_id,
             charge_point_id=sample_charge_point.id,
             evse_id=sample_evse.id,
             transaction_id=8888,
@@ -71,6 +74,7 @@ class TestDatabaseQueries:
         
         # 创建计量值
         meter = MeterValue(
+            tenant_id=sample_charge_point.tenant_id,
             session_id=session.id,  # 外键指向charging_sessions.id
             value=200,
             timestamp=datetime.now(timezone.utc)
@@ -96,6 +100,7 @@ class TestDatabaseQueries:
         """测试使用session_id查询计量值"""
         # 创建充电会话
         session = ChargingSession(
+            tenant_id=sample_charge_point.tenant_id,
             charge_point_id=sample_charge_point.id,
             evse_id=sample_evse.id,
             transaction_id=3001,
@@ -141,6 +146,7 @@ class TestDatabaseQueries:
         
         # 创建充电会话
         session = ChargingSession(
+            tenant_id=sample_charge_point.tenant_id,
             charge_point_id=sample_charge_point.id,
             evse_id=sample_evse.id,
             transaction_id=transaction_id,
@@ -174,30 +180,35 @@ class TestDatabaseQueries:
             assert meter.session_id == session.id
             assert meter.session.transaction_id == transaction_id
     
-    def test_meter_values_relationship(self, db_session: Session):
+    def test_meter_values_relationship(self, db_session: Session, sample_tenant):
         """测试MeterValue和ChargingSession的关系"""
         # 创建充电会话
         from app.database.models import Site, EVSE, ChargePoint
         
         site = Site(
             id="test_site_query",
+            tenant_id=sample_tenant.id,
             name="Test Site",
             address="Test Address",
-            latitude=0.0,
-            longitude=0.0
+            latitude=1.0,
+            longitude=1.0
         )
         db_session.add(site)
+        db_session.flush()
         
         cp = ChargePoint(
             id="CP-QUERY-001",
+            tenant_id=sample_tenant.id,
             site_id=site.id,
             vendor="Test",
             model="Test",
             is_active=True
         )
         db_session.add(cp)
+        db_session.flush()
         
         evse = EVSE(
+            tenant_id=sample_tenant.id,
             charge_point_id=cp.id,
             evse_id=1,
             connector_type="Type2"
@@ -207,6 +218,7 @@ class TestDatabaseQueries:
         db_session.refresh(evse)
         
         session = ChargingSession(
+            tenant_id=sample_tenant.id,
             charge_point_id=cp.id,
             evse_id=evse.id,
             transaction_id=5001,
@@ -232,4 +244,3 @@ class TestDatabaseQueries:
         assert len(session.meter_values) == 1
         assert session.meter_values[0].value == 100
         assert session.meter_values[0].session_id == session.id  # 正确的列名
-

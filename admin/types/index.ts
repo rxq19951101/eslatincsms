@@ -15,16 +15,18 @@ export interface Tenant {
   is_primary: boolean;
 }
 
+export type SubscriptionPlan = 'free' | 'pro' | 'enterprise';
+
 // 租户管理（超级管理员视角）
 export interface TenantRecord {
   id: string;
   name: string;
   domain?: string | null;
   status: string;
-  subscription_plan: string;
+  subscription_plan: SubscriptionPlan;
   max_charge_points: number;
   max_users: number;
-  settings: Record<string, any>;
+  settings: Record<string, unknown>;
   created_at: string;
   updated_at: string;
 }
@@ -53,6 +55,33 @@ export interface MembershipRecord {
   status: string;
   created_at: string;
   updated_at: string;
+}
+
+export interface TenantProvisionResponse {
+  tenant: TenantRecord;
+  admin: AdminUserRecord;
+  membership_id: string;
+}
+
+export interface TenantProvisionResult extends TenantProvisionResponse {
+  temporary_password: string;
+}
+
+export interface TenantProvisionRequest {
+  tenant: {
+    name: string;
+    domain: string | null;
+    subscription_plan: SubscriptionPlan;
+    max_charge_points: number;
+    max_users: number;
+    settings: Record<string, unknown>;
+  };
+  admin: {
+    username: string;
+    email: string;
+    password: string;
+    full_name: string | null;
+  };
 }
 
 // 认证相关类型
@@ -135,7 +164,8 @@ export interface DashboardSiteItem {
 
 // 充电桩相关类型
 export interface ChargePoint {
-  id: string;
+  id: string; // Internal database UUID; never use as the OCPP command identity.
+  ocpp_identity: string; // External charger identity used by OCPP commands and UI.
   vendor?: string;
   model?: string;
   status: string;
@@ -171,6 +201,7 @@ export interface EVSE {
 // 站点管理类型（Admin Web）
 export interface SiteListItem {
   id: string;
+  site_code: string;
   name: string;
   address: string;
   latitude: number;
@@ -185,7 +216,8 @@ export interface SiteListItem {
 }
 
 export interface SiteDetailChargePoint {
-  id: string;
+  id: string; // Internal database UUID.
+  ocpp_identity?: string; // External charger identity safe for operator display.
   vendor?: string | null;
   model?: string | null;
   status: string;
@@ -196,6 +228,7 @@ export interface SiteDetailChargePoint {
 
 export interface SiteDetail {
   id: string;
+  site_code: string;
   name: string;
   address: string;
   latitude: number;
@@ -215,7 +248,7 @@ export interface BindChargePointsRequest {
 }
 
 export interface CreateChargePointInSiteRequest {
-  id: string; // charge_point_id（硬件码）
+  id: string; // 兼容 API 字段；语义为 ocpp_identity
   vendor?: string;
   model?: string;
   connector_count?: number;
@@ -225,8 +258,9 @@ export interface CreateChargePointInSiteRequest {
 // 交易相关类型
 export interface Transaction {
   id: string;
-  transaction_id: string;
-  charge_point_id: string;
+  transaction_id: string | number;
+  charge_point_id: string; // Internal ChargePoint UUID used for database relations.
+  ocpp_identity?: string; // External identity, when included by the API, for display only.
   id_tag: string;
   user_id?: string;
   start_time: string;
@@ -238,14 +272,22 @@ export interface Transaction {
 
 // 告警相关类型
 export interface Alert {
-  id: string;
-  type: string;
+  id: string; // Internal alert UUID.
+  alert_type: string;
   severity: 'critical' | 'warning' | 'info';
-  charge_point_id?: string;
+  charge_point_id?: string; // Internal ChargePoint UUID used for API relations.
+  ocpp_identity?: string; // External charger identity safe for operator display.
+  evse_id?: number;
+  title: string;
   description: string;
   status: 'pending' | 'acknowledged' | 'resolved';
+  tenant_id: string;
+  metadata: Record<string, unknown>;
+  acknowledged_by?: string;
+  acknowledged_at?: string;
+  resolved_at?: string;
   created_at: string;
-  updated_at?: string;
+  updated_at: string;
 }
 
 // API 错误类型

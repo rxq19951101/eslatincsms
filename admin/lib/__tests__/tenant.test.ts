@@ -17,7 +17,7 @@ describe('tenant utilities', () => {
     });
   });
 
-  describe('getTenantId - 优先级测试', () => {
+  describe('getTenantId - 受控上下文测试', () => {
     const mockUser: AdminUser = {
       id: '1',
       username: 'admin',
@@ -27,7 +27,7 @@ describe('tenant utilities', () => {
       tenant_list: [],
     };
 
-    it('优先级1: 应该优先使用 URL Query 参数', () => {
+    it('忽略 URL Query 参数，避免外部链接覆盖工作租户', () => {
       // 模拟 URL 参数
       Object.defineProperty(window, 'location', {
         value: { search: '?tenant=query-tenant-id' },
@@ -36,16 +36,17 @@ describe('tenant utilities', () => {
       });
       
       const tenantId = getTenantId(mockUser);
-      expect(tenantId).toBe('query-tenant-id');
+      expect(tenantId).toBe('default-tenant-id');
     });
 
-    it('优先级2: 应该使用 localStorage 中的 tenant_id', () => {
-      localStorage.setItem(STORAGE_KEYS.CURRENT_TENANT_ID, 'local-tenant-id');
+    it('只接受用户所属租户的 localStorage tenant_id', () => {
+      localStorage.setItem(STORAGE_KEYS.CURRENT_TENANT_ID, 'default-tenant-id');
       const tenantId = getTenantId(mockUser);
-      expect(tenantId).toBe('local-tenant-id');
+      expect(tenantId).toBe('default-tenant-id');
     });
 
-    it('优先级3: 应该使用用户的默认租户', () => {
+    it('拒绝不属于用户的 localStorage 租户并回退默认租户', () => {
+      localStorage.setItem(STORAGE_KEYS.CURRENT_TENANT_ID, 'foreign-tenant-id');
       const tenantId = getTenantId(mockUser);
       expect(tenantId).toBe('default-tenant-id');
     });

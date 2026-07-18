@@ -8,16 +8,23 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from uuid import UUID
-from app.database.base import get_db
-from app.database.models import Role, TenantMembershipRole
+from app.database.base import get_db, tenant_id_context
+from app.database.models import Role, TenantMembershipRole, TenantMembership
 from app.core.auth import get_current_user
-from app.core.permissions import get_current_admin_user
+from app.core.permissions import get_current_admin_user, require_permission
 from app.services.role_service import RoleService, MembershipRoleService
 from app.core.logging_config import get_logger
 
 logger = get_logger("ocpp_csms")
 
 router = APIRouter()
+
+
+def _scoped_role_query(db: Session, role_id: UUID, admin):
+    query = db.query(Role).filter(Role.id == role_id)
+    if not admin.is_super_admin:
+        query = query.filter(Role.tenant_id == tenant_id_context.get())
+    return query
 
 
 # ==================== 请求/响应模型 ====================
@@ -55,7 +62,7 @@ class AssignRoleRequest(BaseModel):
 @router.get("", response_model=List[RoleResponse], summary="获取角色列表")
 async def list_roles(
     scope: Optional[str] = Query(None),
-    current_user: dict = Depends(get_current_user),
+    current_user_obj=Depends(require_permission("roles.read")),
     db: Session = Depends(get_db)
 ):
     """获取角色列表（系统角色 + 租户角色）"""
@@ -87,7 +94,7 @@ async def list_roles(
 @router.post("", response_model=RoleResponse, summary="创建角色")
 async def create_role(
     request_data: CreateRoleRequest,
-    current_user: dict = Depends(get_current_user),
+    current_user_obj=Depends(require_permission("roles.write")),
     db: Session = Depends(get_db)
 ):
     """创建角色（租户自定义）"""
@@ -125,11 +132,11 @@ async def create_role(
 @router.get("/{role_id}", response_model=RoleResponse, summary="获取角色详情")
 async def get_role(
     role_id: UUID,
-    current_user: dict = Depends(get_current_user),
+    current_user_obj=Depends(require_permission("roles.read")),
     db: Session = Depends(get_db)
 ):
     """获取角色详情"""
-    role = RoleService.get_role_by_id(db, role_id)
+    role = _scoped_role_query(db, role_id, current_user_obj).first()
     if not role:
         raise HTTPException(status_code=404, detail="Role not found")
     
@@ -149,11 +156,14 @@ async def get_role(
 async def update_role(
     role_id: UUID,
     request_data: UpdateRoleRequest,
-    current_user: dict = Depends(get_current_user),
+    current_user_obj=Depends(require_permission("roles.write")),
     db: Session = Depends(get_db)
 ):
     """更新角色"""
     try:
+        role = _scoped_role_query(db, role_id, current_user_obj).first()
+        if not role:
+            raise HTTPException(status_code=404, detail="Role not found")
         role = RoleService.update_role(
             db=db,
             role_id=role_id,
@@ -182,10 +192,13 @@ async def update_role(
 @router.delete("/{role_id}", summary="删除角色")
 async def delete_role(
     role_id: UUID,
-    current_user: dict = Depends(get_current_user),
+    current_user_obj=Depends(require_permission("roles.write")),
     db: Session = Depends(get_db)
 ):
     """删除角色"""
+    role = _scoped_role_query(db, role_id, current_user_obj).first()
+    if not role:
+        raise HTTPException(status_code=404, detail="Role not found")
     success = RoleService.delete_role(db, role_id)
     if not success:
         raise HTTPException(status_code=404, detail="Role not found")
@@ -196,11 +209,11 @@ async def delete_role(
 @router.get("/{role_id}/permissions", summary="获取角色权限")
 async def get_role_permissions(
     role_id: UUID,
-    current_user: dict = Depends(get_current_user),
+    current_user_obj=Depends(require_permission("roles.read")),
     db: Session = Depends(get_db)
 ):
     """获取角色权限列表"""
-    role = RoleService.get_role_by_id(db, role_id)
+    role = _scoped_role_query(db, role_id, current_user_obj).first()
     if not role:
         raise HTTPException(status_code=404, detail="Role not found")
     
@@ -214,10 +227,18 @@ async def get_role_permissions(
 async def assign_role_to_membership(
     membership_id: UUID,
     request_data: AssignRoleRequest,
-    current_user: dict = Depends(get_current_user),
+    current_user_obj=Depends(require_permission("roles.write")),
     db: Session = Depends(get_db)
 ):
     """为用户分配角色"""
+    membership = db.query(TenantMembership).filter(
+        TenantMembership.id == membership_id
+    ).first()
+    role = _scoped_role_query(db, request_data.role_id, current_user_obj).first()
+    if not membership or not role:
+        raise HTTPException(status_code=404, detail="Membership or role not found")
+    if not current_user_obj.is_super_admin and membership.tenant_id != tenant_id_context.get():
+        raise HTTPException(status_code=404, detail="Membership or role not found")
     try:
         membership_role = MembershipRoleService.assign_role_to_membership(
             db=db,
@@ -234,10 +255,18 @@ async def assign_role_to_membership(
 async def remove_role_from_membership(
     membership_id: UUID,
     role_id: UUID,
-    current_user: dict = Depends(get_current_user),
+    current_user_obj=Depends(require_permission("roles.write")),
     db: Session = Depends(get_db)
 ):
     """从用户中移除角色"""
+    membership = db.query(TenantMembership).filter(
+        TenantMembership.id == membership_id
+    ).first()
+    role = _scoped_role_query(db, role_id, current_user_obj).first()
+    if not membership or not role:
+        raise HTTPException(status_code=404, detail="Membership or role not found")
+    if not current_user_obj.is_super_admin and membership.tenant_id != tenant_id_context.get():
+        raise HTTPException(status_code=404, detail="Membership or role not found")
     success = MembershipRoleService.remove_role_from_membership(
         db=db,
         membership_id=membership_id,

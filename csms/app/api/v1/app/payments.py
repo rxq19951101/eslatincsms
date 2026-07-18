@@ -144,7 +144,9 @@ def _apply_approved_business_logic(
     if order.type == "top_up":
         app_user = db.query(AppUser).filter(AppUser.id == app_user.id).with_for_update().one()
         ledger_id = f"payment_topup_{order.id}"
-        ledger = db.query(AppWalletTransaction).filter(AppWalletTransaction.id == ledger_id).first()
+        ledger = db.query(AppWalletTransaction).filter(
+            AppWalletTransaction.transaction_number == ledger_id
+        ).first()
         if ledger:
             return
         current_balance = Decimal(str(app_user.balance or 0))
@@ -153,7 +155,7 @@ def _apply_approved_business_logic(
         if not operator_tenant:
             raise ValueError("No operator tenant available for wallet ledger")
         tx = AppWalletTransaction(
-            id=ledger_id,
+            transaction_number=ledger_id,
             app_user_id=app_user.id,
             payment_order_id=order.id,
             operator_tenant_id=operator_tenant.id,
@@ -187,13 +189,15 @@ def _apply_refund_ledger(db: Session, order: PaymentOrder, amount: Decimal) -> N
         raise ValueError("Invalid refund amount")
     user = db.query(AppUser).filter(AppUser.id == order.app_user_id).with_for_update().one()
     ledger_id = f"payment_refund_{order.id}"
-    if db.query(AppWalletTransaction).filter(AppWalletTransaction.id == ledger_id).first():
+    if db.query(AppWalletTransaction).filter(
+        AppWalletTransaction.transaction_number == ledger_id
+    ).first():
         return
     user.balance = Decimal(str(user.balance or 0)) - amount
     tenant = db.query(Tenant).order_by(Tenant.created_at.asc()).first()
     if tenant:
         db.add(AppWalletTransaction(
-            id=ledger_id,
+            transaction_number=ledger_id,
             app_user_id=user.id,
             payment_order_id=order.id,
             operator_tenant_id=tenant.id,

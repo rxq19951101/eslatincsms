@@ -14,7 +14,7 @@ from decimal import Decimal
 from app.database.base import get_db
 from app.database.models import (
     ChargePoint, EVSEStatus, Order, Invoice, 
-    ChargingSession, Site, EndUser, Alert
+    ChargingSession, Site, AppUser, Alert
 )
 from app.core.permissions import get_current_admin_user
 from app.database.base import tenant_id_context
@@ -130,10 +130,6 @@ async def get_dashboard_summary(
     if tenant_id and not current_user.is_super_admin:
         invoice_query = invoice_query.filter(Invoice.tenant_id == tenant_id)
     
-    user_query = db.query(EndUser)
-    if tenant_id and not current_user.is_super_admin:
-        user_query = user_query.filter(EndUser.tenant_id == tenant_id)
-    
     alert_query = db.query(Alert)
     if tenant_id and not current_user.is_super_admin:
         alert_query = alert_query.filter(Alert.tenant_id == tenant_id)
@@ -178,18 +174,21 @@ async def get_dashboard_summary(
     today_energy_kwh = sum(float(inv.energy_kwh) for inv in today_invoices)
     today_revenue = sum(float(inv.total_amount) for inv in today_invoices)
     
-    # 用户统计
-    # 注意：某些部署的 end_users 表可能缺少模型中的部分字段（例如 password_hash）。
-    # 使用 count(EndUser.id) 避免 ORM 在子查询中选择所有列导致 UndefinedColumn。
-    total_users_q = db.query(func.count(EndUser.id))
+    # AppUser 是平台级用户；租户视图按该租户实际发生过充电会话的用户统计。
     if tenant_id and not current_user.is_super_admin:
-        total_users_q = total_users_q.filter(EndUser.tenant_id == tenant_id)
-    total_users = int(total_users_q.scalar() or 0)
-
-    active_users_today_q = db.query(func.count(EndUser.id)).filter(EndUser.last_login_at >= today_start)
-    if tenant_id and not current_user.is_super_admin:
-        active_users_today_q = active_users_today_q.filter(EndUser.tenant_id == tenant_id)
-    active_users_today = int(active_users_today_q.scalar() or 0)
+        user_scope = db.query(func.count(func.distinct(ChargingSession.user_id))).filter(
+            ChargingSession.tenant_id == tenant_id,
+            ChargingSession.user_id.isnot(None),
+        )
+        active_scope = user_scope.filter(ChargingSession.start_time >= today_start)
+        total_users = int(user_scope.scalar() or 0)
+        active_users_today = int(active_scope.scalar() or 0)
+    else:
+        total_users = int(db.query(AppUser).filter(AppUser.status == "active").count())
+        active_users_today = int(db.query(AppUser).filter(
+            AppUser.status == "active",
+            AppUser.last_login_at >= today_start,
+        ).count())
     
     # 告警统计
     critical_alerts = alert_query.filter(

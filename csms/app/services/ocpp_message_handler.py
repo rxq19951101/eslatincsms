@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from app.database.base import SessionLocal
 from app.database.base import tenant_id_context
 from app.database.models import DeviceEvent, Device, ChargePoint
+from app.core.asset_identifiers import get_charge_point_by_reference
 from app.services.charge_point_service import ChargePointService
 from app.services.session_service import SessionService
 
@@ -27,17 +28,19 @@ def now_iso() -> str:
 
 def sanitize_charge_point_id(charge_point_id: str) -> str:
     """
-    清理充电桩ID，只保留字母和数字
-    移除所有特殊字符（如斜杠、星号等）
+    清理充电桩ID，保留设备常用的安全标识字符。
+
+    OCPP 设备 ID 常包含下划线、短横线或点号。不能把这些字符删除，
+    否则 WebSocket 连接身份会与 BootNotification 创建的资产 ID 不一致，
+    后续 StartTransaction 会找不到充电桩。路径分隔符和控制字符仍会被移除。
     
     Args:
         charge_point_id: 原始充电桩ID
         
     Returns:
-        清理后的充电桩ID（只包含字母和数字）
+        清理后的充电桩ID
     """
-    # 只保留字母（包括中文）和数字，移除其他所有字符
-    sanitized = re.sub(r'[^a-zA-Z0-9\u4e00-\u9fa5]', '', charge_point_id)
+    sanitized = re.sub(r'[^a-zA-Z0-9_.\-\u4e00-\u9fa5]', '', charge_point_id)
     
     # 如果清理后为空，返回一个默认值
     if not sanitized:
@@ -109,9 +112,7 @@ class OCPPMessageHandler:
         try:
             # 检查是否为第一次BootNotification（充电桩是否已存在）
             original_id = charge_point_id
-            existing_charge_point = db.query(ChargePoint).filter(
-                ChargePoint.id == charge_point_id
-            ).first()
+            existing_charge_point = get_charge_point_by_reference(db, charge_point_id)
 
             # 严格模式：不允许 BootNotification 自动创建新桩（必须先在后台录入硬件码/charge_point_id）
             require_pre_registered = os.getenv("OCPP_WS_REQUIRE_PRE_REGISTERED", "true").lower() in ("true", "1", "yes")
@@ -134,7 +135,7 @@ class OCPPMessageHandler:
                 # 如果清理后的ID与原ID不同，检查清理后的ID是否已存在
                 if sanitized_id != charge_point_id:
                     existing_sanitized = db.query(ChargePoint).filter(
-                        ChargePoint.id == sanitized_id
+                        ChargePoint.ocpp_identity == sanitized_id
                     ).first()
                     
                     if existing_sanitized:
@@ -154,7 +155,11 @@ class OCPPMessageHandler:
             vendor = str(payload.get("vendor", "")).strip() or str(payload.get("chargePointVendor", "")).strip()
             model = str(payload.get("model", "")).strip() or str(payload.get("chargePointModel", "")).strip()
             firmware_version = str(payload.get("firmwareVersion", "")).strip()
-            serial_number = str(payload.get("serialNumber", "")).strip() or device_serial_number
+            serial_number = (
+                str(payload.get("serialNumber", "")).strip()
+                or str(payload.get("chargePointSerialNumber", "")).strip()
+                or device_serial_number
+            )
             
             # 如果提供了device_serial_number，验证设备是否存在
             # 对于MQTT传输，设备应该已经存在（因为已通过认证）
@@ -206,11 +211,12 @@ class OCPPMessageHandler:
             # 此时设备应该已经创建（通过get_or_create_charge_point），
             # 但为了安全起见，仍然检查设备是否存在
             event_device_serial = device_serial_number
+            event_device = None
             if event_device_serial:
-                device = db.query(Device).filter(
+                event_device = db.query(Device).filter(
                     Device.serial_number == event_device_serial
                 ).first()
-                if not device:
+                if not event_device:
                     logger.warning(
                         f"设备 {event_device_serial} 不存在于devices表中，"
                         f"boot事件将不关联设备（charge_point_id={charge_point_id}）"
@@ -222,7 +228,8 @@ class OCPPMessageHandler:
             resolved_tenant_id = tenant_id_context.get() or getattr(charge_point, "tenant_id", None)
             event = DeviceEvent(
                 tenant_id=resolved_tenant_id,
-                charge_point_id=charge_point_id,
+                charge_point_id=charge_point.id,
+                device_id=event_device.id if event_device else None,
                 device_serial_number=event_device_serial,
                 event_type="boot",
                 event_data={
@@ -309,9 +316,7 @@ class OCPPMessageHandler:
             from app.database.models import ChargingSession, ChargePoint
             
             # 首先检查ChargePoint是否存在
-            charge_point = db.query(ChargePoint).filter(
-                ChargePoint.id == charge_point_id
-            ).first()
+            charge_point = get_charge_point_by_reference(db, charge_point_id)
             
             if not charge_point:
                 logger.warning(
@@ -516,8 +521,11 @@ class OCPPMessageHandler:
             
             if transaction_id:
                 # 查找会话
+                cp = get_charge_point_by_reference(db, charge_point_id)
+                if not cp:
+                    raise ValueError(f"Charge point not found: {charge_point_id}")
                 session = db.query(ChargingSession).filter(
-                    ChargingSession.charge_point_id == charge_point_id,
+                    ChargingSession.charge_point_id == cp.id,
                     ChargingSession.transaction_id == transaction_id,
                     ChargingSession.status == "ongoing"
                 ).first()
@@ -585,13 +593,13 @@ class OCPPMessageHandler:
         """在当前领域事务中登记一条入站消息；返回 True 表示此前已处理。"""
         from app.database.models import ChargePoint, OCPPMessageEvent
 
-        cp = db.query(ChargePoint).filter(ChargePoint.id == charge_point_id).first()
+        cp = get_charge_point_by_reference(db, charge_point_id)
         if not cp or not cp.tenant_id:
             raise ValueError(f"Charge point tenant not found: {charge_point_id}")
         key = cls._message_key(action, payload)
         existing = db.query(OCPPMessageEvent).filter(
             OCPPMessageEvent.tenant_id == cp.tenant_id,
-            OCPPMessageEvent.charge_point_id == charge_point_id,
+            OCPPMessageEvent.charge_point_id == cp.id,
             OCPPMessageEvent.action == action,
             OCPPMessageEvent.message_key == key,
         ).first()
@@ -599,7 +607,7 @@ class OCPPMessageHandler:
             return True
         db.add(OCPPMessageEvent(
             tenant_id=cp.tenant_id,
-            charge_point_id=charge_point_id,
+            charge_point_id=cp.id,
             action=action,
             message_key=key,
             payload=payload,
@@ -627,25 +635,9 @@ class OCPPMessageHandler:
     ) -> Dict[str, Any]:
         """处理OCPP消息路由
         
-        Returns:
-            Dict[str, Any]: 消息处理结果，可能包含 '_new_charge_point_id' 键来指示需要更新连接ID
+        The charge_point_id argument is the authenticated transport identity. Boot
+        payload serial numbers are asset metadata and must never replace it.
         """
-        new_charge_point_id = None
-        
-        # 对于BootNotification，优先使用payload中的serialNumber作为charge_point_id
-        if action == "BootNotification":
-            serial_number = payload.get("serialNumber") or payload.get("chargePointSerialNumber")
-            if serial_number:
-                serial_number = str(serial_number).strip()
-                if serial_number:
-                    original_id = charge_point_id
-                    charge_point_id = serial_number
-                    new_charge_point_id = serial_number  # 标记需要更新连接ID
-                    logger.info(
-                        f"BootNotification使用payload中的serialNumber作为charge_point_id: "
-                        f"'{original_id}' -> '{charge_point_id}'"
-                    )
-        
         handler_map = {
             "BootNotification": self.handle_boot_notification,
             "Heartbeat": self.handle_heartbeat,
@@ -667,10 +659,6 @@ class OCPPMessageHandler:
                 result = await handler(charge_point_id, payload, evse_id)
             else:
                 result = await handler(charge_point_id, payload)
-            
-            # 如果charge_point_id改变了，在结果中标记需要更新连接
-            if new_charge_point_id:
-                result["_new_charge_point_id"] = new_charge_point_id
             
             return result
         else:

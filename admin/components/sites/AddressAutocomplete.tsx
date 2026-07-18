@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { apiGet } from '@/lib/api';
 import { Input } from '@/components/ui/input';
+import { useI18n } from '@/lib/i18n';
 
 export type GeocodingSuggestion = {
   display_name: string;
@@ -28,6 +29,7 @@ export default function AddressAutocomplete(props: {
   className?: string;
 }) {
   const { value, onChange, onSelect, placeholder, disabled, limit = 5, className } = props;
+  const { t } = useI18n();
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [errorText, setErrorText] = useState<string | null>(null);
@@ -73,7 +75,7 @@ export default function AddressAutocomplete(props: {
       } catch (e) {
         setItems([]);
         setOpen(false);
-        setErrorText(e instanceof Error ? e.message : '地址搜索失败');
+        setErrorText(e instanceof Error ? e.message : t('地址搜索失败'));
       } finally {
         setLoading(false);
       }
@@ -85,7 +87,7 @@ export default function AddressAutocomplete(props: {
         debounceRef.current = null;
       }
     };
-  }, [trimmed, limit]);
+  }, [trimmed, limit, t]);
 
   return (
     <div ref={rootRef} className="relative">
@@ -104,7 +106,7 @@ export default function AddressAutocomplete(props: {
 
       {loading && (
         <div className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-slate-400">
-          搜索中...
+          {t('搜索中...')}
         </div>
       )}
 
@@ -137,4 +139,3 @@ export default function AddressAutocomplete(props: {
     </div>
   );
 }
-

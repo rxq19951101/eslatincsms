@@ -93,6 +93,16 @@ async def lifespan(app: FastAPI):
             transport_manager.set_message_handler(handle_ocpp_message)
         except Exception as e:
             logger.error(f"WebSocket 传输初始化失败: {e}", exc_info=True)
+
+    distributed_subscriber = None
+    if get_settings().enable_distributed:
+        try:
+            from app.ocpp.redis_message_subscriber import redis_message_subscriber
+            redis_message_subscriber.start(loop=asyncio.get_running_loop())
+            distributed_subscriber = redis_message_subscriber
+            logger.info("Redis Streams OCPP 路由消费者已启动")
+        except Exception as e:
+            logger.error(f"Redis Streams OCPP 路由消费者启动失败: {e}", exc_info=True)
     
     # 初始化 Redis 离线检测（测试环境禁用）
     is_test_env = os.getenv("ENVIRONMENT") == "test" or os.getenv("TESTING") == "true"
@@ -145,6 +155,8 @@ async def lifespan(app: FastAPI):
                 logger.info("后台任务已取消")
     
     # 关闭传输管理器
+    if distributed_subscriber:
+        distributed_subscriber.stop()
     if TRANSPORT_AVAILABLE:
         try:
             await transport_manager.shutdown()
@@ -309,7 +321,7 @@ async def handle_ocpp_message(charge_point_id: str, action: str, payload: Dict[s
         try:
             from app.database.models import ChargePoint as DbChargePoint
 
-            cp = db.query(DbChargePoint).filter(DbChargePoint.id == charge_point_id).first()
+            cp = db.query(DbChargePoint).filter(DbChargePoint.ocpp_identity == charge_point_id).first()
             if cp and getattr(cp, "tenant_id", None):
                 tenant_id_context.set(cp.tenant_id)
                 did_set_tenant = True
@@ -517,7 +529,7 @@ def sync_charger_to_db(charger: Dict[str, Any]) -> None:
         try:
             charge_point_id = charger["id"]
             # 查找或创建充电桩记录
-            charge_point = db.query(ChargePoint).filter(ChargePoint.id == charge_point_id).first()
+            charge_point = db.query(ChargePoint).filter(ChargePoint.ocpp_identity == charge_point_id).first()
             
             if not charge_point:
                 # 使用ChargePointService创建
@@ -530,7 +542,7 @@ def sync_charger_to_db(charger: Dict[str, Any]) -> None:
                     firmware_version=charger.get("firmware_version")
                 )
                 db.flush()
-                charge_point = db.query(ChargePoint).filter(ChargePoint.id == charge_point_id).first()
+                charge_point = db.query(ChargePoint).filter(ChargePoint.ocpp_identity == charge_point_id).first()
             
             # 更新字段
             if "vendor" in charger:
@@ -550,11 +562,12 @@ def sync_charger_to_db(charger: Dict[str, Any]) -> None:
                     if not site:
                         # 创建新站点
                         site = Site(
-                            id=f"site-{charge_point_id}",
+                            site_code=f"site_{uuid.uuid4().hex[:16]}",
+                            tenant_id=charge_point.tenant_id,
                             name=f"站点-{charge_point_id}",
-                            address=loc.get("address", ""),
-                            latitude=loc.get("latitude", 0.0),
-                            longitude=loc.get("longitude", 0.0)
+                            address=loc.get("address") or "地址未配置",
+                            latitude=loc.get("latitude") or 0.000001,
+                            longitude=loc.get("longitude") or 0.000001
                         )
                         db.add(site)
                         db.flush()
@@ -568,7 +581,7 @@ def sync_charger_to_db(charger: Dict[str, Any]) -> None:
             # 更新EVSE状态
             if "physical_status" in charger:
                 evse_status = db.query(EVSEStatus).filter(
-                    EVSEStatus.charge_point_id == charge_point_id
+                    EVSEStatus.charge_point_id == charge_point.id
                 ).first()
                 if evse_status:
                     evse_status.status = charger.get("physical_status", "Unknown")
@@ -1268,57 +1281,17 @@ async def _handle_ocpp_websocket_messages(ws: WebSocket, charge_point_id_ref: di
         if evse_id == 0:
             evse_id = 1  # OCPP中0表示整个充电桩
         
-        # 尝试从payload中提取serial_number（用于BootNotification）
-        device_serial_number = None
-        if action == "BootNotification":
-            device_serial_number = payload.get("chargePointSerialNumber") or payload.get("serialNumber")
-        
         # 调用统一的消息处理函数
         try:
             response = await handle_ocpp_message(
                 charge_point_id=charge_point_id_ref['value'],
                 action=action,
                 payload=payload,
-                device_serial_number=device_serial_number,
+                # WebSocket identity comes only from the authenticated path. Boot
+                # serial numbers remain payload metadata, not device credentials.
+                device_serial_number=None,
                 evse_id=evse_id
             )
-            
-            # 检查是否需要更新charge_point_id（BootNotification时使用payload中的serialNumber）
-            if "_new_charge_point_id" in response:
-                new_charge_point_id = response.pop("_new_charge_point_id")
-                if new_charge_point_id != charge_point_id_ref['value']:
-                    logger.info(
-                        f"[{charge_point_id_ref['value']}] BootNotification检测到charge_point_id需要更新: "
-                        f"'{charge_point_id_ref['value']}' -> '{new_charge_point_id}'，重新注册WebSocket连接"
-                    )
-                    
-                    # 重新注册WebSocket连接
-                    old_id = charge_point_id_ref['value']
-                    charge_point_id_ref['value'] = new_charge_point_id
-                    
-                    # 更新charger_websockets字典
-                    if old_id in charger_websockets:
-                        charger_websockets[new_charge_point_id] = charger_websockets.pop(old_id)
-                    
-                    # 重新注册到WebSocket适配器
-                    if MQTT_AVAILABLE and hasattr(transport_manager, 'adapters'):
-                        ws_adapter = transport_manager.get_adapter(TransportType.WEBSOCKET)
-                        if ws_adapter:
-                            try:
-                                await ws_adapter.unregister_connection(old_id)
-                                await ws_adapter.register_connection(new_charge_point_id, ws)
-                                logger.info(f"[{new_charge_point_id}] WebSocket连接已重新注册到适配器（从{old_id}）")
-                            except Exception as e:
-                                logger.warning(f"[{new_charge_point_id}] 重新注册WebSocket适配器失败: {e}")
-                    
-                    # 重新注册到connection_manager
-                    try:
-                        from app.ocpp.connection_manager import connection_manager
-                        connection_manager.disconnect(old_id)
-                        connection_manager.connect(new_charge_point_id, ws)
-                        logger.info(f"[{new_charge_point_id}] WebSocket连接已重新注册到connection_manager（从{old_id}）")
-                    except Exception as e:
-                        logger.warning(f"[{new_charge_point_id}] 重新注册connection_manager失败: {e}")
             
             # 发送响应
             if is_ocpp_standard_format and unique_id:
@@ -1489,8 +1462,6 @@ try:
     # 注册新的多租户相关路由
     try:
         # 从子模块导入（admin目录下的auth.py，不是admin.py）
-        import importlib.util
-        
         # 导入auth路由（正常导入）
         from app.api.v1.admin.auth import router as admin_auth_router
         logger.info("✓ admin.auth路由导入成功")
@@ -1522,23 +1493,6 @@ try:
         from app.api.v1.admin.app_users import router as app_users_router
         logger.info("✓ app_users路由导入成功")
         
-        # 导入end-users.py（文件名有连字符，需要特殊处理）
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-        end_users_path = os.path.join(current_dir, "api", "v1", "admin", "end-users.py")
-        if not os.path.exists(end_users_path):
-            # 尝试相对路径
-            end_users_path = os.path.join("app", "api", "v1", "admin", "end-users.py")
-        
-        if os.path.exists(end_users_path):
-            spec = importlib.util.spec_from_file_location("app.api.v1.admin.end_users", end_users_path)
-            end_users_module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(end_users_module)
-            end_users_router = end_users_module.router
-            logger.info("✓ end-users路由导入成功")
-        else:
-            logger.warning(f"未找到end-users.py文件，跳过注册。尝试路径: {end_users_path}")
-            end_users_router = None
-        
         # 管理员认证路由
         app.include_router(
             admin_auth_router,
@@ -1567,14 +1521,6 @@ try:
             tags=["管理员用户管理"]
         )
         
-        # 终端用户管理路由
-        if end_users_router:
-            app.include_router(
-                end_users_router,
-                prefix="/api/v1/admin/end-users",
-                tags=["终端用户管理"]
-            )
-
         # App 平台用户（钱包调账）
         app.include_router(
             app_users_router,

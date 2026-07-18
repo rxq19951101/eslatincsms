@@ -14,6 +14,7 @@ from sqlalchemy import desc
 from app.core.logging_config import get_logger
 from app.core.api_logging import log_api_request, log_api_response, log_api_error, log_business_operation
 from app.core.auth import get_current_user
+from app.core.permissions import get_current_admin_user as get_verified_admin_user
 from app.database.base import get_db, SuperSessionLocal
 from app.database.models import PaymentOrder, PaymentWebhookEvent, AppUser
 from app.api.v1.app.payments import _apply_refund_ledger
@@ -34,6 +35,15 @@ async def get_current_admin_user(
     if user_type != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
     return current_user_payload
+
+
+async def require_platform_payment_admin(
+    admin=Depends(get_verified_admin_user),
+):
+    """支付订单当前是平台级模型，租户级支付视图尚未具备安全归属字段。"""
+    if not admin.is_super_admin:
+        raise HTTPException(status_code=403, detail="Platform payment admin access required")
+    return admin
 
 
 # ==================== 请求/响应模型 ====================
@@ -107,7 +117,7 @@ def list_payment_orders(
     type: Optional[str] = Query(None, description="订单类型筛选：top_up 或 charging"),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
-    current_user: Dict[str, Any] = Depends(get_current_admin_user),
+    current_user: Dict[str, Any] = Depends(require_platform_payment_admin),
     db: Session = Depends(get_db),
 ) -> List[PaymentOrderListItem]:
     """获取支付订单列表（管理员）"""
@@ -197,7 +207,7 @@ def list_payment_orders(
 @router.get("/{order_id}", summary="获取支付订单详情")
 def get_payment_order_detail(
     order_id: str,
-    current_user: Dict[str, Any] = Depends(get_current_admin_user),
+    current_user: Dict[str, Any] = Depends(require_platform_payment_admin),
     db: Session = Depends(get_db),
 ) -> PaymentOrderDetailWithEvents:
     """获取支付订单详情（包含 Webhook 事件记录）"""
@@ -263,7 +273,7 @@ def get_payment_order_detail(
 @router.post("/{order_id}/reconcile", response_model=ReconcileResponse, summary="对账接口")
 async def reconcile_payment_order(
     order_id: str,
-    current_user: Dict[str, Any] = Depends(get_current_admin_user),
+    current_user: Dict[str, Any] = Depends(require_platform_payment_admin),
     db: Session = Depends(get_db),
 ) -> ReconcileResponse:
     """
@@ -388,7 +398,7 @@ async def reconcile_payment_order(
 async def refund_payment_order(
     order_id: str,
     refund_req: RefundRequest = Body(...),
-    current_user: Dict[str, Any] = Depends(get_current_admin_user),
+    current_user: Dict[str, Any] = Depends(require_platform_payment_admin),
     db: Session = Depends(get_db),
 ) -> RefundResponse:
     """

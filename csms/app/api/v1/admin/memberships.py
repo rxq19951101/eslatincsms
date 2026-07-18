@@ -8,10 +8,10 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from typing import List
 from uuid import UUID
-from app.database.base import get_db
+from app.database.base import get_db, tenant_id_context
 from app.database.models import TenantMembership, Tenant, AdminUser
 from app.core.auth import get_current_user
-from app.core.permissions import get_current_admin_user
+from app.core.permissions import get_current_admin_user, require_permission
 from app.services.membership_service import MembershipService
 from app.core.logging_config import get_logger
 
@@ -47,7 +47,7 @@ class MembershipResponse(BaseModel):
 
 @router.get("", response_model=List[MembershipResponse], summary="获取租户成员列表")
 async def list_tenant_members(
-    current_user: dict = Depends(get_current_user),
+    current_user_obj=Depends(require_permission("memberships.read")),
     db: Session = Depends(get_db)
 ):
     """获取租户的所有成员"""
@@ -83,7 +83,7 @@ async def list_tenant_members(
 @router.post("", response_model=MembershipResponse, summary="添加用户到租户")
 async def add_user_to_tenant(
     request_data: AddUserToTenantRequest,
-    current_user: dict = Depends(get_current_user),
+    current_user_obj=Depends(require_permission("memberships.write")),
     db: Session = Depends(get_db)
 ):
     """将管理员用户添加到租户"""
@@ -123,12 +123,14 @@ async def add_user_to_tenant(
 @router.delete("/{membership_id}", summary="从租户中移除用户")
 async def remove_user_from_tenant(
     membership_id: UUID,
-    current_user: dict = Depends(get_current_user),
+    current_user_obj=Depends(require_permission("memberships.write")),
     db: Session = Depends(get_db)
 ):
     """从租户中移除管理员用户"""
     membership = db.query(TenantMembership).filter(TenantMembership.id == membership_id).first()
     if not membership:
+        raise HTTPException(status_code=404, detail="Membership not found")
+    if not current_user_obj.is_super_admin and membership.tenant_id != tenant_id_context.get():
         raise HTTPException(status_code=404, detail="Membership not found")
     
     success = MembershipService.remove_user_from_tenant(
@@ -146,12 +148,14 @@ async def remove_user_from_tenant(
 @router.put("/{membership_id}/primary", summary="设置默认租户")
 async def set_primary_tenant(
     membership_id: UUID,
-    current_user: dict = Depends(get_current_user),
+    current_user_obj=Depends(require_permission("memberships.write")),
     db: Session = Depends(get_db)
 ):
     """设置用户的默认租户"""
     membership = db.query(TenantMembership).filter(TenantMembership.id == membership_id).first()
     if not membership:
+        raise HTTPException(status_code=404, detail="Membership not found")
+    if not current_user_obj.is_super_admin and membership.tenant_id != tenant_id_context.get():
         raise HTTPException(status_code=404, detail="Membership not found")
     
     try:

@@ -3,30 +3,26 @@ import { AdminUser } from '@/types';
 
 /**
  * 获取当前租户 ID（按优先级）
- * 优先级：URL Query > localStorage > default_tenant > super_admin (null)
+ * 优先级：localStorage > default_tenant > super_admin (null)
+ * 租户切换必须通过受控选择器完成，不接受 URL 直接覆盖工作上下文。
  */
 export function getTenantId(userInfo: AdminUser | null | undefined): string | null {
   if (typeof window === 'undefined') return null;
 
-  // 优先级 1: URL Query 参数（最高优先级，方便分享链接）
-  const urlParams = new URLSearchParams(window.location.search);
-  const queryTenantId = urlParams.get('tenant');
-  if (queryTenantId) {
-    return queryTenantId;
-  }
-
-  // 优先级 2: localStorage（用户手动选择的租户）
+  // 优先级 1: localStorage（用户通过租户选择器选择）
   const localStorageTenantId = localStorage.getItem(STORAGE_KEYS.CURRENT_TENANT_ID);
-  if (localStorageTenantId) {
+  if (localStorageTenantId && (
+    userInfo?.is_super_admin || userInfo?.tenant_list?.some((t) => t.id === localStorageTenantId)
+  )) {
     return localStorageTenantId;
   }
 
-  // 优先级 3: 用户默认租户（从用户信息获取）
+  // 优先级 2: 用户默认租户（从用户信息获取）
   if (userInfo?.default_tenant_id) {
     return userInfo.default_tenant_id;
   }
 
-  // 优先级 4: 如果是 super_admin，可以不传 tenant_id（表示访问所有租户）
+  // 优先级 3: super_admin 不传 tenant_id 表示全局作用域
   if (userInfo?.is_super_admin) {
     return null; // super_admin 可以不传 tenant_id
   }

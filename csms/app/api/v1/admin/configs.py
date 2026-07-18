@@ -4,16 +4,17 @@
 #
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from typing import List, Optional, Any
 from uuid import UUID
 from app.database.base import get_db, tenant_id_context
 from app.core.auth import get_current_user
-from app.core.permissions import get_current_admin_user
+from app.core.permissions import require_permission
 from app.services.config_service import ConfigService
 from app.database.models import SystemConfig
 from app.core.logging_config import get_logger
+from app.api.validation import StrictRequestModel
 
 logger = get_logger("ocpp_csms")
 
@@ -22,11 +23,11 @@ router = APIRouter()
 
 # ==================== 请求/响应模型 ====================
 
-class SetConfigRequest(BaseModel):
-    config_key: str
+class SetConfigRequest(StrictRequestModel):
+    config_key: str = Field(..., min_length=1, max_length=200, pattern=r"^[a-z][a-z0-9_]*$")
     config_value: Any
-    value_type: str = "string"
-    description: Optional[str] = None
+    value_type: str = Field("string", pattern=r"^(string|int|integer|float|bool)$")
+    description: Optional[str] = Field(None, max_length=500)
 
 
 class ConfigResponse(BaseModel):
@@ -44,7 +45,7 @@ class ConfigResponse(BaseModel):
 
 @router.get("", response_model=List[ConfigResponse], summary="获取配置列表")
 async def list_configs(
-    current_user_obj = Depends(get_current_admin_user),
+    current_user_obj = Depends(require_permission("configs.read")),
     db: Session = Depends(get_db)
 ):
     """获取配置列表（租户配置 + 全局配置）"""
@@ -80,7 +81,7 @@ async def list_configs(
 async def get_config(
     config_key: str,
     default: Optional[str] = Query(None),
-    current_user_obj = Depends(get_current_admin_user),
+    current_user_obj = Depends(require_permission("configs.read")),
     db: Session = Depends(get_db)
 ):
     """获取配置值"""
@@ -103,20 +104,23 @@ async def get_config(
 @router.post("", response_model=ConfigResponse, summary="设置配置")
 async def set_config(
     request_data: SetConfigRequest,
-    current_user_obj = Depends(get_current_admin_user),
+    current_user_obj = Depends(require_permission("configs.write")),
     db: Session = Depends(get_db)
 ):
     """设置配置值"""
     tenant_id = tenant_id_context.get()
     
-    config = ConfigService.set_config(
-        db=db,
-        config_key=request_data.config_key,
-        config_value=request_data.config_value,
-        value_type=request_data.value_type,
-        tenant_id=tenant_id,
-        description=request_data.description
-    )
+    try:
+        config = ConfigService.set_config(
+            db=db,
+            config_key=request_data.config_key,
+            config_value=request_data.config_value,
+            value_type=request_data.value_type,
+            tenant_id=tenant_id,
+            description=request_data.description
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     
     return ConfigResponse(
         id=str(config.id),
@@ -133,7 +137,7 @@ async def set_config(
 @router.delete("/{config_key}", summary="删除配置")
 async def delete_config(
     config_key: str,
-    current_user_obj = Depends(get_current_admin_user),
+    current_user_obj = Depends(require_permission("configs.write")),
     db: Session = Depends(get_db)
 ):
     """删除配置"""

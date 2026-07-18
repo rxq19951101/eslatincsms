@@ -21,7 +21,7 @@ class TestChargersAPI:
         assert response.status_code == 200
         data = response.json()
         assert len(data) > 0
-        assert any(cp["id"] == sample_charge_point.id for cp in data)
+        assert any(cp["id"] == str(sample_charge_point.id) for cp in data)
     
     def test_list_chargers_filter_configured(self, admin_client: TestClient, sample_charge_point, sample_site, db_session):
         """测试筛选已配置的充电桩"""
@@ -54,7 +54,8 @@ class TestChargersAPI:
         response = admin_client.get(f"/api/v1/chargers/{sample_charge_point.id}")
         assert response.status_code == 200
         data = response.json()
-        assert data["id"] == sample_charge_point.id
+        assert data["id"] == str(sample_charge_point.id)
+        assert data["ocpp_identity"] == sample_charge_point.ocpp_identity
     
     def test_get_charger_by_id_not_found(self, admin_client: TestClient):
         """测试获取不存在的充电桩"""
@@ -67,12 +68,12 @@ class TestChargersAPI:
             "id": "CP-CREATE-001",
             "vendor": "新厂商",
             "model": "新型号",
-            "site_id": sample_site.id
+            "site_id": str(sample_site.id)
         }
         response = admin_client.post("/api/v1/chargers", json=payload)
         assert response.status_code in [200, 201]
         data = response.json()
-        assert data["id"] == "CP-CREATE-001"
+        assert data["ocpp_identity"] == "CP-CREATE-001"
     
     def test_update_charger(self, admin_client: TestClient, sample_charge_point):
         """测试更新充电桩"""

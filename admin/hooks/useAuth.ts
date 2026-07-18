@@ -77,9 +77,11 @@ export function useAuth() {
         const tid = getTenantId(user);
         try {
           const tenants = await apiGet<TenantRecord[]>(API_ENDPOINTS.TENANTS, { skipTenantId: true });
+          // 总管理员没有显式租户上下文时保持全局作用域，不能静默切到第一个租户。
           const selected =
-            (tid && tenants.find((t) => t.id === tid) && { id: tid, name: tenants.find((t) => t.id === tid)!.name, is_primary: false }) ||
-            (tenants[0] ? { id: tenants[0].id, name: tenants[0].name, is_primary: false } : null);
+            tid && tenants.find((t) => t.id === tid)
+              ? { id: tid, name: tenants.find((t) => t.id === tid)!.name, is_primary: false }
+              : null;
           if (selected) setCurrentTenant(selected);
         } catch {
           // ignore: super_admin 仍可不选租户，仅写操作会在后端提示 Tenant ID required

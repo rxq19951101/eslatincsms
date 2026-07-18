@@ -1,15 +1,14 @@
 import type { Metadata } from 'next';
-import { Inter } from 'next/font/google';
 import './globals.css';
-
-const inter = Inter({
-  subsets: ['latin'],
-  variable: '--font-inter',
-});
+import { I18nProvider } from '@/lib/i18n';
 
 export const metadata: Metadata = {
-  title: '充电桩运营平台 - 后台管理',
-  description: '充电桩运营平台后台管理系统',
+  title: 'EsLatin - Admin Portal',
+  description: 'EsLatin charging operations platform',
+  icons: {
+    icon: '/favicon.svg',
+    shortcut: '/favicon.svg',
+  },
 };
 
 export default function RootLayout({
@@ -19,11 +18,11 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="zh-CN" className="dark" suppressHydrationWarning>
-      <body 
-        className={`${inter.variable} font-sans antialiased bg-slate-950 text-slate-100`}
+      <body
+        className="font-sans antialiased bg-slate-950 text-slate-100"
         suppressHydrationWarning
       >
-        {children}
+        <I18nProvider>{children}</I18nProvider>
       </body>
     </html>
   );

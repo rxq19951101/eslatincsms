@@ -4,13 +4,14 @@ EsLatin 充电桩模拟器（OCPP 1.6J WebSocket）
 
 用法示例：
   - 单桩：
-    python cli.py run-one --ws ws://localhost:9000/ocpp --charge-point-id CP_SITE_001_01 --connector-id 1
+    python cli.py run-one --ws ws://localhost:9000/ocpp --ocpp-identity CP_SITE_001_01 --connector-id 1
 
   - 批量（yaml/json）：
     python cli.py run-many --config chargers.yml
 
   - 生成二维码：
-    python cli.py gen-qr --charge-point-id CP_SITE_001_01 --connector-id 1 --out-dir ./out/qr
+    python cli.py gen-qr --ocpp-identity CP_SITE_001_01 --connector-id 1 \
+      --qr-token SERVER_ASSIGNED_TOKEN --out-dir ./out/qr
 """
 
 from __future__ import annotations
@@ -20,13 +21,13 @@ import asyncio
 import json
 import logging
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 
 from simulator.charge_point import connect_and_run
 from simulator.profiles import ChargePointProfile, MeteringProfile
-from simulator.qr import QROptions, generate_connector_qr_png
+from simulator.qr import QR_PREREGISTRATION_HINT, QROptions, generate_connector_qr_png
 
 
 def setup_logging(verbose: bool) -> None:
@@ -45,11 +46,11 @@ def load_config(path: Path) -> Dict[str, Any]:
 
 async def run_one(args) -> None:
     profile = ChargePointProfile(
-        charge_point_id=args.charge_point_id,
+        charge_point_id=args.ocpp_identity,
         vendor=args.vendor,
         model=args.model,
         firmware_version=args.firmware_version,
-        serial_number=args.serial_number or args.charge_point_id,
+        serial_number=args.serial_number,
         heartbeat_interval_sec=args.heartbeat_interval,
         enable_payment_simulation=args.enable_payment,
         payment_delay_seconds=args.payment_delay,
@@ -73,11 +74,15 @@ async def run_one(args) -> None:
     ]
 
     if args.gen_qr:
-        for cid in connector_ids:
+        for cid, qr_token, scan_url in resolve_qr_sources(
+            connector_ids, args.qr_token, args.scan_url
+        ):
             out = generate_connector_qr_png(
-                args.charge_point_id,
+                args.ocpp_identity,
                 cid,
-                QROptions(out_dir=Path(args.qr_out_dir), payload_format=args.qr_format),
+                QROptions(out_dir=Path(args.qr_out_dir)),
+                qr_token=qr_token,
+                scan_url=scan_url,
             )
             print(f"QR saved: {out}")
 
@@ -95,7 +100,9 @@ async def run_many(args) -> None:
 
     tasks = []
     for c in chargers:
-        cp_id = c["charge_point_id"]
+        cp_id = c.get("ocpp_identity") or c.get("charge_point_id")
+        if not cp_id:
+            raise SystemExit("Each charger requires ocpp_identity (legacy charge_point_id is also accepted)")
         connector_ids = c.get("connector_ids") or [c.get("connector_id", 1)]
         connector_ids = [int(x) for x in connector_ids]
         profile = ChargePointProfile(
@@ -103,7 +110,7 @@ async def run_many(args) -> None:
             vendor=c.get("vendor", "EsLatin"),
             model=c.get("model", "EsLatin-Sim-1.0"),
             firmware_version=c.get("firmware_version", "1.0.0"),
-            serial_number=c.get("serial_number") or cp_id,
+            serial_number=c.get("serial_number"),
             heartbeat_interval_sec=int(c.get("heartbeat_interval", 30)),
             enable_payment_simulation=args.enable_payment if hasattr(args, "enable_payment") else c.get("enable_payment_simulation", True),
             payment_delay_seconds=args.payment_delay if hasattr(args, "payment_delay") else c.get("payment_delay_seconds", 5),
@@ -129,12 +136,39 @@ async def run_many(args) -> None:
     await asyncio.gather(*tasks)
 
 
+def resolve_qr_sources(
+    connector_ids: List[int],
+    qr_tokens: Optional[List[str]],
+    scan_urls: Optional[List[str]],
+) -> List[Tuple[int, Optional[str], Optional[str]]]:
+    """Pair one server-controlled QR source with each connector, preserving CLI order."""
+    if qr_tokens and scan_urls:
+        raise ValueError("Use either --qr-token or --scan-url, not both")
+    sources = qr_tokens or scan_urls
+    if not sources:
+        raise ValueError(QR_PREREGISTRATION_HINT)
+    if len(sources) != len(connector_ids):
+        option = "--qr-token" if qr_tokens else "--scan-url"
+        raise ValueError(
+            f"Provide exactly one {option} per --connector-id in the same order "
+            f"({len(connector_ids)} connectors, {len(sources)} sources)"
+        )
+    return [
+        (connector_id, source if qr_tokens else None, source if scan_urls else None)
+        for connector_id, source in zip(connector_ids, sources)
+    ]
+
+
 def gen_qr(args) -> None:
-    for cid in args.connector_id:
+    for cid, qr_token, scan_url in resolve_qr_sources(
+        args.connector_id, args.qr_token, args.scan_url
+    ):
         out = generate_connector_qr_png(
-            args.charge_point_id,
+            args.ocpp_identity,
             cid,
-            QROptions(out_dir=Path(args.out_dir), payload_format=args.format),
+            QROptions(out_dir=Path(args.out_dir)),
+            qr_token=qr_token,
+            scan_url=scan_url,
         )
         print(f"QR saved: {out}")
 
@@ -146,12 +180,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     p1 = sub.add_parser("run-one")
     p1.add_argument("--ws", required=True, help="例如 ws://localhost:9000/ocpp")
-    p1.add_argument("--charge-point-id", required=True)
+    p1.add_argument(
+        "--ocpp-identity",
+        "--charge-point-id",
+        dest="ocpp_identity",
+        required=True,
+        help="WebSocket/OCPP identity；--charge-point-id 为兼容别名",
+    )
     p1.add_argument("--connector-id", required=True, type=int, action="append", help="可重复传多次：--connector-id 1 --connector-id 2")
     p1.add_argument("--vendor", default="EsLatin")
     p1.add_argument("--model", default="EsLatin-Sim-1.0")
     p1.add_argument("--firmware-version", default="1.0.0")
-    p1.add_argument("--serial-number", default=None)
+    p1.add_argument(
+        "--serial-number",
+        default=None,
+        help="BootNotification chargePointSerialNumber；默认与 OCPP identity 相同",
+    )
     p1.add_argument("--heartbeat-interval", type=int, default=30)
     p1.add_argument("--meter-interval", type=int, default=5)
     p1.add_argument("--power-kw", type=float, default=7.0)
@@ -161,7 +205,16 @@ def build_parser() -> argparse.ArgumentParser:
     p1.add_argument("--soc-end", type=float, default=90.0)
     p1.add_argument("--gen-qr", action="store_true")
     p1.add_argument("--qr-out-dir", default="./out/qr")
-    p1.add_argument("--qr-format", default="hash", choices=["hash", "query", "json"])
+    p1.add_argument(
+        "--qr-token",
+        action="append",
+        help="Admin 预注册后返回的原始 qr_token；每个 connector 按顺序重复一次",
+    )
+    p1.add_argument(
+        "--scan-url",
+        action="append",
+        help="服务端分配的扫码 URL；每个 connector 按顺序重复一次",
+    )
     # 支付模拟参数
     p1.add_argument("--enable-payment", action="store_true", default=True, help="启用支付模拟（默认启用）")
     p1.add_argument("--disable-payment", action="store_false", dest="enable_payment", help="禁用支付模拟")
@@ -176,10 +229,25 @@ def build_parser() -> argparse.ArgumentParser:
     p2.add_argument("--ws", default=None, help="可覆盖 config.ws")
 
     p3 = sub.add_parser("gen-qr")
-    p3.add_argument("--charge-point-id", required=True)
+    p3.add_argument(
+        "--ocpp-identity",
+        "--charge-point-id",
+        dest="ocpp_identity",
+        required=True,
+        help="仅用于输出文件名，不用于合成二维码内容",
+    )
     p3.add_argument("--connector-id", required=True, type=int, action="append")
     p3.add_argument("--out-dir", required=True)
-    p3.add_argument("--format", default="hash", choices=["hash", "query", "json"])
+    p3.add_argument(
+        "--qr-token",
+        action="append",
+        help="Admin 预注册后返回的原始 qr_token；每个 connector 按顺序重复一次",
+    )
+    p3.add_argument(
+        "--scan-url",
+        action="append",
+        help="服务端分配的扫码 URL；每个 connector 按顺序重复一次",
+    )
 
     return p
 
@@ -189,11 +257,17 @@ async def main_async() -> None:
     args = parser.parse_args()
     setup_logging(args.verbose)
     if args.cmd == "run-one":
-        await run_one(args)
+        try:
+            await run_one(args)
+        except ValueError as exc:
+            parser.error(str(exc))
     elif args.cmd == "run-many":
         await run_many(args)
     elif args.cmd == "gen-qr":
-        gen_qr(args)
+        try:
+            gen_qr(args)
+        except ValueError as exc:
+            parser.error(str(exc))
 
 
 def main() -> None:
@@ -202,4 +276,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

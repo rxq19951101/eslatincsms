@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from sqlalchemy import text
 import uuid
+import json
 
 # 避免导入 app.database.base，防止事件监听器被注册
 # 直接创建引擎，不通过 ORM
@@ -66,13 +67,13 @@ def create_initial_data():
             tenant_id = str(uuid.uuid4())
             connection.execute(text("""
                 INSERT INTO tenants (id, name, domain, status, subscription_plan, max_charge_points, max_users, settings, created_at, updated_at)
-                VALUES (:id, :name, :domain, :status, :plan, :max_cp, :max_users, %(settings)s::jsonb, NOW(), NOW())
+                VALUES (:id, :name, :domain, :status, :plan, :max_cp, :max_users, CAST(:settings AS jsonb), NOW(), NOW())
             """), {
                 "id": tenant_id,
                 "name": "默认租户",
                 "domain": None,
                 "status": "active",
-                "plan": "premium",
+                "plan": "enterprise",
                 "max_cp": 100,
                 "max_users": 1000,
                 "settings": "{}"
@@ -83,7 +84,7 @@ def create_initial_data():
             # 创建超级管理员用户
             print("\n2. 创建超级管理员用户...")
             super_admin_id = str(uuid.uuid4())
-            super_admin_password_hash = get_password_hash("test123")
+            super_admin_password_hash = get_password_hash("admin123")
             connection.execute(text("""
                 INSERT INTO admin_users (id, username, email, password_hash, full_name, is_active, is_super_admin, created_at, updated_at)
                 VALUES (:id, :username, :email, :password_hash, :full_name, :is_active, :is_super_admin, NOW(), NOW())
@@ -149,6 +150,33 @@ def create_initial_data():
                 "status": "active"
             })
             connection.commit()
+            # 为初始租户管理员绑定与运行时一致的租户管理员角色。
+            role_id = str(uuid.uuid4())
+            default_permissions = [
+                "admin_users.read", "admin_users.write",
+                "memberships.read", "memberships.write",
+                "roles.read", "roles.write",
+                "alerts.read", "alerts.write",
+                "alert_rules.read", "alert_rules.write",
+                "configs.read", "configs.write",
+                "tenant_settings.read", "tenant_settings.write",
+                "reports.read", "chargers.read", "chargers.write", "chargers.control",
+                "sites.read", "sites.write", "tariffs.read", "tariffs.edit",
+                "transactions.read",
+            ]
+            connection.execute(text("""
+                INSERT INTO roles (id, tenant_id, name, permissions, description, scope, created_at, updated_at)
+                VALUES (:id, :tenant_id, 'tenant_admin', CAST(:permissions AS jsonb), '租户初始管理员角色', 'tenant', NOW(), NOW())
+            """), {
+                "id": role_id,
+                "tenant_id": tenant_id,
+                "permissions": json.dumps(default_permissions),
+            })
+            connection.execute(text("""
+                INSERT INTO tenant_membership_roles (membership_id, role_id, created_at)
+                VALUES (:membership_id, :role_id, NOW())
+            """), {"membership_id": membership_id, "role_id": role_id})
+            connection.commit()
             print(f"✓ 租户管理员创建成功: tenant_admin (ID: {tenant_admin_id})")
             print(f"  邮箱: tenant_admin@example.com")
             print(f"  默认密码: admin123")
@@ -161,7 +189,7 @@ def create_initial_data():
             print("-" * 50)
             print("超级管理员:")
             print(f"  用户名: admin")
-            print(f"  密码: test123")
+            print(f"  密码: admin123")
             print(f"  邮箱: admin@example.com")
             print(f"  权限: 超级管理员（可访问所有租户）")
             print(f"  主租户: 默认租户")

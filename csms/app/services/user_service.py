@@ -1,14 +1,12 @@
 #
 # 用户管理服务层
-# 提供管理员用户和终端用户的 CRUD 操作
+# 提供后台管理员用户的 CRUD 操作
 #
 
 from typing import List, Optional
-from decimal import Decimal
 from uuid import UUID
 from sqlalchemy.orm import Session
-from sqlalchemy import and_
-from app.database.models import AdminUser, EndUser, TenantMembership, Role, TenantMembershipRole
+from app.database.models import AdminUser, TenantMembership, Role, TenantMembershipRole
 from app.core.auth import get_password_hash, verify_password
 from app.core.logging_config import get_logger
 
@@ -145,141 +143,4 @@ class AdminUserService:
         db.commit()
         
         logger.info(f"Deleted admin user: {user_id}")
-        return True
-
-
-class EndUserService:
-    """终端用户服务"""
-    
-    @staticmethod
-    def create_end_user(
-        db: Session,
-        tenant_id: UUID,
-        phone: str,
-        id_tag: str,
-        email: Optional[str] = None,
-        full_name: Optional[str] = None,
-        balance: Decimal = Decimal("0")
-    ) -> EndUser:
-        """创建终端用户"""
-        # 检查手机号和ID标签是否已存在（按租户）
-        existing_user = db.query(EndUser).filter(
-            and_(
-                EndUser.tenant_id == tenant_id,
-                (EndUser.phone == phone) | (EndUser.id_tag == id_tag)
-            )
-        ).first()
-        
-        if existing_user:
-            raise ValueError("Phone or ID tag already exists in this tenant")
-        
-        end_user = EndUser(
-            tenant_id=tenant_id,
-            phone=phone,
-            id_tag=id_tag,
-            email=email,
-            full_name=full_name,
-            balance=balance
-        )
-        
-        db.add(end_user)
-        db.commit()
-        db.refresh(end_user)
-        
-        logger.info(f"Created end user: {phone} (tenant: {tenant_id})")
-        return end_user
-    
-    @staticmethod
-    def get_end_user_by_id(db: Session, user_id: UUID) -> Optional[EndUser]:
-        """根据ID获取终端用户"""
-        return db.query(EndUser).filter(EndUser.id == user_id).first()
-    
-    @staticmethod
-    def get_end_user_by_phone(
-        db: Session,
-        tenant_id: UUID,
-        phone: str
-    ) -> Optional[EndUser]:
-        """根据手机号获取终端用户（按租户）"""
-        return db.query(EndUser).filter(
-            and_(EndUser.tenant_id == tenant_id, EndUser.phone == phone)
-        ).first()
-    
-    @staticmethod
-    def get_end_user_by_id_tag(
-        db: Session,
-        tenant_id: UUID,
-        id_tag: str
-    ) -> Optional[EndUser]:
-        """根据ID标签获取终端用户（按租户）"""
-        return db.query(EndUser).filter(
-            and_(EndUser.tenant_id == tenant_id, EndUser.id_tag == id_tag)
-        ).first()
-    
-    @staticmethod
-    def list_end_users(
-        db: Session,
-        tenant_id: UUID,
-        skip: int = 0,
-        limit: int = 100,
-        status: Optional[str] = None
-    ) -> List[EndUser]:
-        """获取终端用户列表（按租户）"""
-        query = db.query(EndUser).filter(EndUser.tenant_id == tenant_id)
-        
-        if status:
-            query = query.filter(EndUser.status == status)
-        
-        return query.offset(skip).limit(limit).all()
-    
-    @staticmethod
-    def update_end_user(
-        db: Session,
-        user_id: UUID,
-        email: Optional[str] = None,
-        full_name: Optional[str] = None,
-        status: Optional[str] = None,
-        balance: Optional[float] = None
-    ) -> Optional[EndUser]:
-        """更新终端用户"""
-        end_user = db.query(EndUser).filter(EndUser.id == user_id).first()
-        if not end_user:
-            return None
-        
-        if email is not None:
-            # 检查邮箱是否已被其他用户使用（按租户）
-            existing = db.query(EndUser).filter(
-                and_(
-                    EndUser.email == email,
-                    EndUser.tenant_id == end_user.tenant_id,
-                    EndUser.id != user_id
-                )
-            ).first()
-            if existing:
-                raise ValueError("Email already exists in this tenant")
-            end_user.email = email
-        if full_name is not None:
-            end_user.full_name = full_name
-        if status is not None:
-            end_user.status = status
-        if balance is not None:
-            end_user.balance = balance
-        
-        db.commit()
-        db.refresh(end_user)
-        
-        logger.info(f"Updated end user: {user_id}")
-        return end_user
-    
-    @staticmethod
-    def delete_end_user(db: Session, user_id: UUID) -> bool:
-        """删除终端用户"""
-        end_user = db.query(EndUser).filter(EndUser.id == user_id).first()
-        if not end_user:
-            return False
-        
-        db.delete(end_user)
-        db.commit()
-        
-        logger.info(f"Deleted end user: {user_id}")
         return True

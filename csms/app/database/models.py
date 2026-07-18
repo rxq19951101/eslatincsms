@@ -10,12 +10,43 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import relationship
+from sqlalchemy.types import TypeDecorator
+from fastapi.encoders import jsonable_encoder
 import uuid
 from app.database.base import Base
 
-# PostgreSQL uses JSONB in production; SQLite can use JSON for the fast unit
-# suite. The variant preserves one model contract across both dialects.
-PortableJSON = JSON().with_variant(JSONB, "postgresql")
+
+class UUIDSafeJSON(TypeDecorator):
+    """Portable JSON storage that normalizes UUID/Decimal/datetime values."""
+
+    impl = JSON
+    cache_ok = True
+
+    def load_dialect_impl(self, dialect):
+        json_type = JSONB() if dialect.name == "postgresql" else JSON()
+        return dialect.type_descriptor(json_type)
+
+    def process_bind_param(self, value, dialect):
+        return None if value is None else jsonable_encoder(value)
+
+
+PortableJSON = UUIDSafeJSON()
+
+
+def _business_number(prefix: str) -> str:
+    return f"{prefix}_{uuid.uuid4().hex}"
+
+
+def _map_legacy_business_id(kwargs: dict, field: str) -> None:
+    """Keep constructor compatibility without using business values as PKs."""
+    legacy_id = kwargs.get("id")
+    if legacy_id is None:
+        return
+    try:
+        uuid.UUID(str(legacy_id))
+    except (TypeError, ValueError, AttributeError):
+        kwargs.pop("id")
+        kwargs.setdefault(field, str(legacy_id))
 
 
 # ==================== 站点和资产层 ====================
@@ -25,8 +56,22 @@ class Site(Base):
     存储站点级别的信息：地理位置、地址、运营信息
     """
     __tablename__ = "sites"
+
+    def __init__(self, **kwargs):
+        # Transitional constructor compatibility for scripts/tests that used the
+        # former public string key as ``id``. Relationships still receive UUIDs.
+        legacy_id = kwargs.get("id")
+        if legacy_id is not None:
+            try:
+                uuid.UUID(str(legacy_id))
+            except (TypeError, ValueError, AttributeError):
+                kwargs.pop("id")
+                kwargs.setdefault("site_code", str(legacy_id))
+        super().__init__(**kwargs)
     
-    id = Column(String(100), primary_key=True, index=True)
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    # Stable public reference kept separate from the internal relationship key.
+    site_code = Column(String(100), nullable=False, unique=True, default=lambda: f"site_{uuid.uuid4().hex[:16]}", index=True)
     tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
     name = Column(String(200), nullable=False)  # 站点名称
     address = Column(Text, nullable=False)  # 详细地址
@@ -48,6 +93,16 @@ class Site(Base):
     __table_args__ = (
         Index('idx_sites_location', 'latitude', 'longitude'),
         Index('idx_sites_tenant_id', 'tenant_id'),
+        CheckConstraint(
+            "site_code ~ '^site_[0-9a-f]{16}$'",
+            name="ck_sites_code_format",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint("length(name) BETWEEN 2 AND 120", name="ck_sites_name_length"),
+        CheckConstraint("length(address) BETWEEN 5 AND 300", name="ck_sites_address_length"),
+        CheckConstraint("latitude BETWEEN -90 AND 90", name="ck_sites_latitude_range"),
+        CheckConstraint("longitude BETWEEN -180 AND 180", name="ck_sites_longitude_range"),
+        CheckConstraint("NOT (latitude = 0 AND longitude = 0)", name="ck_sites_nonzero_coordinates"),
+        CheckConstraint("operating_hours IS NULL OR length(operating_hours) <= 500", name="ck_sites_operating_hours_length"),
     )
 
 
@@ -57,10 +112,22 @@ class ChargePoint(Base):
     不存储实时状态和定价信息
     """
     __tablename__ = "charge_points"
+
+    def __init__(self, **kwargs):
+        legacy_id = kwargs.get("id")
+        if legacy_id is not None:
+            try:
+                uuid.UUID(str(legacy_id))
+            except (TypeError, ValueError, AttributeError):
+                kwargs.pop("id")
+                kwargs.setdefault("ocpp_identity", str(legacy_id))
+        super().__init__(**kwargs)
     
-    id = Column(String(100), primary_key=True, index=True)
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    # OCPP identity is controlled by the charger and must never be a relation key.
+    ocpp_identity = Column(String(64), nullable=False, unique=True, index=True)
     tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
-    site_id = Column(String(100), ForeignKey("sites.id"), nullable=False, index=True)
+    site_id = Column(UUID(as_uuid=True), ForeignKey("sites.id"), nullable=False, index=True)
     
     # 资产信息
     vendor = Column(String(100), nullable=True)
@@ -72,7 +139,8 @@ class ChargePoint(Base):
     max_power_kw = Column(Float, nullable=True)  # 最大功率
     
     # 关联设备（MQTT设备）
-    device_serial_number = Column(String(100), ForeignKey("devices.serial_number"), nullable=True, index=True)
+    device_id = Column(UUID(as_uuid=True), ForeignKey("devices.id"), nullable=True, index=True)
+    device_serial_number = Column(String(100), nullable=True, index=True)
     
     # 运营状态
     is_active = Column(Boolean, default=True)
@@ -84,7 +152,7 @@ class ChargePoint(Base):
     # 关系
     tenant = relationship("Tenant")
     site = relationship("Site", back_populates="charge_points")
-    device = relationship("Device", foreign_keys=[device_serial_number], back_populates="charge_points")
+    device = relationship("Device", foreign_keys=[device_id], back_populates="charge_points")
     evses = relationship("EVSE", back_populates="charge_point", cascade="all, delete-orphan")
     evse_statuses = relationship("EVSEStatus", back_populates="charge_point", cascade="all, delete-orphan")
     
@@ -92,6 +160,11 @@ class ChargePoint(Base):
         Index('idx_charge_points_site', 'site_id'),
         Index('idx_charge_points_device', 'device_serial_number'),
         Index('idx_charge_points_tenant_id', 'tenant_id'),
+        CheckConstraint("length(ocpp_identity) BETWEEN 1 AND 64", name="ck_charge_points_ocpp_identity_length"),
+        CheckConstraint(
+            "ocpp_identity ~ '^[A-Za-z0-9._:-]{1,64}$'",
+            name="ck_charge_points_ocpp_identity_format",
+        ).ddl_if(dialect="postgresql"),
     )
 
 
@@ -101,9 +174,9 @@ class EVSE(Base):
     """
     __tablename__ = "evses"
     
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
     tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
-    charge_point_id = Column(String(100), ForeignKey("charge_points.id"), nullable=False, index=True)
+    charge_point_id = Column(UUID(as_uuid=True), ForeignKey("charge_points.id"), nullable=False, index=True)
     evse_id = Column(Integer, nullable=False)  # OCPP中的evse_id
     
     # EVSE信息
@@ -133,17 +206,17 @@ class EVSEStatus(Base):
     """
     __tablename__ = "evse_status"
     
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
     tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
-    evse_id = Column(Integer, ForeignKey("evses.id"), nullable=False, unique=True, index=True)
-    charge_point_id = Column(String(100), ForeignKey("charge_points.id"), nullable=False, index=True)
+    evse_id = Column(UUID(as_uuid=True), ForeignKey("evses.id"), nullable=False, unique=True, index=True)
+    charge_point_id = Column(UUID(as_uuid=True), ForeignKey("charge_points.id"), nullable=False, index=True)
     
     # 状态信息
     status = Column(String(50), default="Unknown", nullable=False)  # Available, Charging, Offline, Faulted, Unavailable
     last_seen = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     
     # 当前会话信息（如果有）
-    current_session_id = Column(Integer, ForeignKey("charging_sessions.id"), nullable=True, index=True)
+    current_session_id = Column(UUID(as_uuid=True), ForeignKey("charging_sessions.id"), nullable=True, index=True)
     
     # 元数据
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
@@ -171,8 +244,9 @@ class Device(Base):
     """
     __tablename__ = "devices"
     
-    # 设备SN号（主键）
-    serial_number = Column(String(100), primary_key=True, index=True)
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    # 设备序列号是外部业务标识，不参与内部关系主键。
+    serial_number = Column(String(100), nullable=False, unique=True, index=True)
     tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
     
     # 设备类型代码（用于MQTT topic和client_id，如 "zcf", "tesla", "abb"）
@@ -196,7 +270,7 @@ class Device(Base):
     
     # 关系
     tenant = relationship("Tenant")
-    charge_points = relationship("ChargePoint", foreign_keys="ChargePoint.device_serial_number", back_populates="device")
+    charge_points = relationship("ChargePoint", foreign_keys="ChargePoint.device_id", back_populates="device")
     
     __table_args__ = (
         UniqueConstraint('tenant_id', 'serial_number', name='unique_tenant_serial_number'),
@@ -216,15 +290,16 @@ class ChargingSession(Base):
     """
     __tablename__ = "charging_sessions"
     
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
     tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
-    evse_id = Column(Integer, ForeignKey("evses.id"), nullable=False, index=True)
-    charge_point_id = Column(String(100), ForeignKey("charge_points.id"), nullable=False, index=True)
+    evse_id = Column(UUID(as_uuid=True), ForeignKey("evses.id"), nullable=False, index=True)
+    charge_point_id = Column(UUID(as_uuid=True), ForeignKey("charge_points.id"), nullable=False, index=True)
     
     # OCPP协议信息
     transaction_id = Column(Integer, nullable=False, index=True)  # OCPP transaction_id
     id_tag = Column(String(100), nullable=False, index=True)  # RFID标签
-    user_id = Column(String(100), nullable=True, index=True)  # 用户ID（可选）
+    user_id = Column(String(100), nullable=True, index=True)
+    app_user_id = Column(UUID(as_uuid=True), ForeignKey("app_users.id", ondelete="SET NULL"), nullable=True, index=True)
     
     # 时间信息
     start_time = Column(DateTime(timezone=True), nullable=False, index=True)
@@ -273,9 +348,9 @@ class MeterValue(Base):
     """
     __tablename__ = "meter_values"
     
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
     tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
-    session_id = Column(Integer, ForeignKey("charging_sessions.id"), nullable=False, index=True)
+    session_id = Column(UUID(as_uuid=True), ForeignKey("charging_sessions.id"), nullable=False, index=True)
     
     connector_id = Column(Integer, nullable=True)
     # 入站 OCPP 消息的稳定幂等键；允许为空以兼容没有消息 UUID 的旧设备。
@@ -284,7 +359,7 @@ class MeterValue(Base):
     
     # 计量数据
     value = Column(Integer, nullable=False)  # 主要值（Wh）
-    sampled_value = Column(JSON, nullable=True)  # 完整采样值数据（JSON格式）
+    sampled_value = Column(PortableJSON, nullable=True)  # 完整采样值数据（JSON格式）
     
     # 关系
     tenant = relationship("Tenant")
@@ -306,9 +381,9 @@ class OCPPMessageEvent(Base):
     """
     __tablename__ = "ocpp_message_events"
 
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
     tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
-    charge_point_id = Column(String(100), ForeignKey("charge_points.id"), nullable=False, index=True)
+    charge_point_id = Column(UUID(as_uuid=True), ForeignKey("charge_points.id"), nullable=False, index=True)
     action = Column(String(100), nullable=False)
     message_key = Column(String(255), nullable=False)
     payload = Column(PortableJSON, nullable=False)
@@ -327,7 +402,7 @@ class OutboxEvent(Base):
     """事务 Outbox：领域状态变更和待发送设备命令的可靠事件记录。"""
     __tablename__ = "outbox_events"
 
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
     tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
     aggregate_type = Column(String(100), nullable=False)
     aggregate_id = Column(String(100), nullable=False)
@@ -358,14 +433,20 @@ class Order(Base):
     不存储计费信息（计费在invoice层）
     """
     __tablename__ = "orders"
+
+    def __init__(self, **kwargs):
+        _map_legacy_business_id(kwargs, "order_number")
+        super().__init__(**kwargs)
     
-    id = Column(String(100), primary_key=True, index=True)
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    order_number = Column(String(100), nullable=False, unique=True, index=True, default=lambda: _business_number("order"))
     tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
-    session_id = Column(Integer, ForeignKey("charging_sessions.id"), nullable=True, index=True)
-    charge_point_id = Column(String(100), ForeignKey("charge_points.id"), nullable=False, index=True)
+    session_id = Column(UUID(as_uuid=True), ForeignKey("charging_sessions.id"), nullable=True, index=True)
+    charge_point_id = Column(UUID(as_uuid=True), ForeignKey("charge_points.id"), nullable=False, index=True)
     
     # 用户信息
-    user_id = Column(String(100), nullable=False, index=True)
+    user_id = Column(String(100), nullable=True, index=True)
+    app_user_id = Column(UUID(as_uuid=True), ForeignKey("app_users.id", ondelete="SET NULL"), nullable=True, index=True)
     id_tag = Column(String(100), nullable=False)
     
     # 时间信息
@@ -377,8 +458,8 @@ class Order(Base):
     status = Column(String(50), default="pending")  # pending, authorized, ongoing, completed, cancelled, failed
     
     # 预授权/优惠信息（JSON格式）
-    pre_authorization = Column(JSON, nullable=True)  # 预授权金额等
-    discounts = Column(JSON, nullable=True)  # 优惠信息
+    pre_authorization = Column(PortableJSON, nullable=True)  # 预授权金额等
+    discounts = Column(PortableJSON, nullable=True)  # 优惠信息
     
     # 元数据
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
@@ -405,10 +486,10 @@ class Tariff(Base):
     """
     __tablename__ = "tariffs"
     
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
     tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
-    site_id = Column(String(100), ForeignKey("sites.id"), nullable=True, index=True)  # 站点级别定价
-    charge_point_id = Column(String(100), ForeignKey("charge_points.id"), nullable=True, index=True)  # 桩级别定价
+    site_id = Column(UUID(as_uuid=True), ForeignKey("sites.id"), nullable=True, index=True)  # 站点级别定价
+    charge_point_id = Column(UUID(as_uuid=True), ForeignKey("charge_points.id"), nullable=True, index=True)  # 桩级别定价
     
     # 定价规则
     name = Column(String(200), nullable=False)  # 定价规则名称
@@ -416,7 +497,7 @@ class Tariff(Base):
     service_fee = Column(Numeric(10, 2), default=0)  # 服务费
     
     # 时段定价（JSON格式存储复杂规则）
-    time_based_rules = Column(JSON, nullable=True)  # 时段定价规则
+    time_based_rules = Column(PortableJSON, nullable=True)  # 时段定价规则
     
     # 有效期
     valid_from = Column(DateTime(timezone=True), nullable=False)
@@ -452,16 +533,16 @@ class PricingSnapshot(Base):
     """
     __tablename__ = "pricing_snapshots"
     
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
     tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
-    tariff_id = Column(Integer, ForeignKey("tariffs.id"), nullable=False, index=True)
-    session_id = Column(Integer, ForeignKey("charging_sessions.id"), nullable=True, index=True)
-    order_id = Column(String(100), ForeignKey("orders.id"), nullable=True, index=True)
+    tariff_id = Column(UUID(as_uuid=True), ForeignKey("tariffs.id"), nullable=False, index=True)
+    session_id = Column(UUID(as_uuid=True), ForeignKey("charging_sessions.id"), nullable=True, index=True)
+    order_id = Column(UUID(as_uuid=True), ForeignKey("orders.id"), nullable=True, index=True)
     
     # 快照的定价信息
     price_per_kwh = Column(Numeric(10, 2), nullable=False)
     service_fee = Column(Numeric(10, 2), default=0)
-    snapshot_data = Column(JSON, nullable=True)  # 完整的定价规则快照
+    snapshot_data = Column(PortableJSON, nullable=True)  # 完整的定价规则快照
     
     # 快照时间
     snapshot_time = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
@@ -486,12 +567,17 @@ class Invoice(Base):
     存储最终结算信息，所有计费字段的权威来源
     """
     __tablename__ = "invoices"
+
+    def __init__(self, **kwargs):
+        _map_legacy_business_id(kwargs, "invoice_number")
+        super().__init__(**kwargs)
     
-    id = Column(String(100), primary_key=True, index=True)
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    invoice_number = Column(String(100), nullable=False, unique=True, index=True, default=lambda: _business_number("invoice"))
     tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
-    session_id = Column(Integer, ForeignKey("charging_sessions.id"), nullable=False, index=True)
-    order_id = Column(String(100), ForeignKey("orders.id"), nullable=True, index=True)
-    pricing_snapshot_id = Column(Integer, ForeignKey("pricing_snapshots.id"), nullable=False, index=True)
+    session_id = Column(UUID(as_uuid=True), ForeignKey("charging_sessions.id"), nullable=False, index=True)
+    order_id = Column(UUID(as_uuid=True), ForeignKey("orders.id"), nullable=True, index=True)
+    pricing_snapshot_id = Column(UUID(as_uuid=True), ForeignKey("pricing_snapshots.id"), nullable=False, index=True)
     
     # 计费信息（权威数据）
     energy_kwh = Column(Numeric(10, 3), nullable=False)  # 电量（kWh）
@@ -536,10 +622,15 @@ class Payment(Base):
     存储所有支付记录
     """
     __tablename__ = "payments"
+
+    def __init__(self, **kwargs):
+        _map_legacy_business_id(kwargs, "payment_number")
+        super().__init__(**kwargs)
     
-    id = Column(String(100), primary_key=True, index=True)
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    payment_number = Column(String(100), nullable=False, unique=True, index=True, default=lambda: _business_number("payment"))
     tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
-    invoice_id = Column(String(100), ForeignKey("invoices.id"), nullable=False, index=True)
+    invoice_id = Column(UUID(as_uuid=True), ForeignKey("invoices.id"), nullable=False, index=True)
     
     # 支付信息
     amount = Column(Numeric(10, 2), nullable=False)  # 支付金额
@@ -570,41 +661,6 @@ class Payment(Base):
     )
 
 
-# ==================== 钱包层（APP简化版） ====================
-
-class WalletTransaction(Base):
-    """钱包交易流水（简化版）
-    - 余额权威字段在 EndUser.balance
-    - 这里记录每次余额变化/消费的流水，便于APP展示
-    """
-    __tablename__ = "wallet_transactions"
-
-    id = Column(String(100), primary_key=True, index=True)
-    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
-    end_user_id = Column(UUID(as_uuid=True), ForeignKey("end_users.id", ondelete="CASCADE"), nullable=False, index=True)
-
-    # 关联信息（可选）
-    charge_point_id = Column(String(100), ForeignKey("charge_points.id"), nullable=True, index=True)
-
-    # 交易信息
-    # amount > 0 表示入账（top_up），amount < 0 表示扣费（charge）
-    type = Column(String(50), nullable=False)  # top_up / charge
-    amount = Column(Numeric(10, 2), nullable=False)
-    description = Column(Text, nullable=True)
-
-    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False, index=True)
-
-    tenant = relationship("Tenant")
-    end_user = relationship("EndUser")
-    charge_point = relationship("ChargePoint")
-
-    __table_args__ = (
-        Index('idx_wallet_tx_tenant_id', 'tenant_id'),
-        Index('idx_wallet_tx_end_user', 'end_user_id', 'created_at'),
-        Index('idx_wallet_tx_charge_point', 'charge_point_id'),
-    )
-
-
 class AppWalletTransaction(Base):
     """平台钱包流水（爆改测试版）
 
@@ -613,17 +669,24 @@ class AppWalletTransaction(Base):
     """
     __tablename__ = "app_wallet_transactions"
 
-    id = Column(String(100), primary_key=True, index=True)
+    def __init__(self, **kwargs):
+        _map_legacy_business_id(kwargs, "transaction_number")
+        super().__init__(**kwargs)
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    transaction_number = Column(String(100), nullable=False, unique=True, index=True, default=lambda: _business_number("wallet"))
     app_user_id = Column(UUID(as_uuid=True), ForeignKey("app_users.id", ondelete="CASCADE"), nullable=False, index=True)
     payment_order_id = Column(UUID(as_uuid=True), ForeignKey("payment_orders.id", ondelete="SET NULL"), nullable=True, index=True)
 
     operator_tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
-    charge_point_id = Column(String(100), ForeignKey("charge_points.id"), nullable=True, index=True)
+    charge_point_id = Column(UUID(as_uuid=True), ForeignKey("charge_points.id"), nullable=True, index=True)
 
     # amount > 0 入账（top_up），amount < 0 扣费（charge）
     type = Column(String(50), nullable=False)  # top_up / charge
     amount = Column(Numeric(10, 2), nullable=False)
     description = Column(Text, nullable=True)
+    idempotency_key = Column(String(255), nullable=True, index=True)
+    adjusted_by_admin_id = Column(UUID(as_uuid=True), ForeignKey("admin_users.id", ondelete="SET NULL"), nullable=True, index=True)
 
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False, index=True)
 
@@ -636,6 +699,8 @@ class AppWalletTransaction(Base):
         Index("idx_app_wallet_tx_operator_tenant", "operator_tenant_id"),
         Index("idx_app_wallet_tx_charge_point", "charge_point_id"),
         UniqueConstraint("payment_order_id", "type", name="uq_app_wallet_tx_payment_type"),
+        UniqueConstraint("app_user_id", "idempotency_key", name="uq_app_wallet_tx_user_idempotency"),
+        CheckConstraint("amount <> 0", name="ck_app_wallet_tx_amount_nonzero"),
     )
 
 
@@ -649,9 +714,10 @@ class QrToken(Base):
     """
     __tablename__ = "qr_tokens"
 
-    token = Column(String(128), primary_key=True, index=True)
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    token = Column(String(128), nullable=False, unique=True, index=True)
     operator_tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
-    charge_point_id = Column(String(100), ForeignKey("charge_points.id", ondelete="CASCADE"), nullable=False, index=True)
+    charge_point_id = Column(UUID(as_uuid=True), ForeignKey("charge_points.id", ondelete="CASCADE"), nullable=False, index=True)
     connector_id = Column(Integer, nullable=False)
 
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False, index=True)
@@ -691,11 +757,11 @@ class PaymentOrder(Base):
     # Wompi 相关（保留用于兼容）
     reference = Column(String(128), nullable=True, unique=True, index=True)  # 唯一参考号，格式：ESL-YYYYMMDD-{6位随机字符}
     integrity_signature = Column(String(512), nullable=True)  # 完整性签名
-    wompi_transaction_id = Column(String(255), nullable=True, index=True)  # Wompi 交易ID
+    wompi_transaction_id = Column(String(255), nullable=True)  # Wompi 交易ID
     
     # Mercado Pago 相关
     external_reference = Column(String(128), nullable=True, unique=True, index=True)  # Mercado Pago 外部参考号
-    mercadopago_payment_id = Column(String(255), nullable=True, index=True)  # Mercado Pago payment.id
+    mercadopago_payment_id = Column(String(255), nullable=True)  # Mercado Pago payment.id
     
     # 状态（只能向终态推进，不允许回退）
     status = Column(String(50), nullable=False, default="created")  # created, processing, approved, declined, voided, error, expired, refunded
@@ -721,6 +787,8 @@ class PaymentOrder(Base):
         Index("idx_payment_orders_type", "type"),
         Index("idx_payment_orders_provider", "payment_provider"),
         UniqueConstraint("app_user_id", "idempotency_key", name="uq_payment_orders_user_idempotency"),
+        UniqueConstraint("wompi_transaction_id", name="uq_payment_orders_wompi_transaction_id"),
+        UniqueConstraint("mercadopago_payment_id", name="uq_payment_orders_mercadopago_payment_id"),
         CheckConstraint('amount > 0', name='ck_payment_orders_amount_positive'),
         CheckConstraint(
             "status IN ('created', 'processing', 'approved', 'declined', 'voided', 'error', 'expired', 'refunded')",
@@ -779,15 +847,16 @@ class DeviceEvent(Base):
     """
     __tablename__ = "device_events"
     
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
     tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
-    device_serial_number = Column(String(100), ForeignKey("devices.serial_number"), nullable=True, index=True)
-    charge_point_id = Column(String(100), ForeignKey("charge_points.id"), nullable=True, index=True)
-    evse_id = Column(Integer, ForeignKey("evses.id"), nullable=True, index=True)
+    device_id = Column(UUID(as_uuid=True), ForeignKey("devices.id"), nullable=True, index=True)
+    device_serial_number = Column(String(100), nullable=True, index=True)
+    charge_point_id = Column(UUID(as_uuid=True), ForeignKey("charge_points.id"), nullable=True, index=True)
+    evse_id = Column(UUID(as_uuid=True), ForeignKey("evses.id"), nullable=True, index=True)
     
     # 事件信息
     event_type = Column(String(50), nullable=False, index=True)  # heartbeat, status_change, error, boot, disconnect, etc.
-    event_data = Column(JSON, nullable=True)  # 事件数据（JSON格式）
+    event_data = Column(PortableJSON, nullable=True)  # 事件数据（JSON格式）
     
     # 状态相关（如果是status_change事件）
     status = Column(String(50), nullable=True)  # 新状态
@@ -800,8 +869,8 @@ class DeviceEvent(Base):
     # 协议消息相关（如果是protocol事件）
     protocol_action = Column(String(100), nullable=True)  # OCPP action
     message_direction = Column(String(20), nullable=True)  # incoming, outgoing
-    request_payload = Column(JSON, nullable=True)
-    response_payload = Column(JSON, nullable=True)
+    request_payload = Column(PortableJSON, nullable=True)
+    response_payload = Column(PortableJSON, nullable=True)
     
     # 时间戳
     timestamp = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False, index=True)
@@ -829,9 +898,10 @@ class DeviceConfig(Base):
     """
     __tablename__ = "device_configs"
     
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
     tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
-    device_serial_number = Column(String(100), ForeignKey("devices.serial_number"), nullable=False, index=True)
+    device_id = Column(UUID(as_uuid=True), ForeignKey("devices.id"), nullable=False, index=True)
+    device_serial_number = Column(String(100), nullable=False, index=True)
     
     config_key = Column(String(100), nullable=False)  # 配置键
     config_value = Column(Text, nullable=True)  # 配置值
@@ -849,7 +919,7 @@ class DeviceConfig(Base):
     device = relationship("Device")
     
     __table_args__ = (
-        Index('idx_device_configs_device_key', 'device_serial_number', 'config_key', unique=True),
+        Index('idx_device_configs_device_key', 'device_id', 'config_key', unique=True),
         Index('idx_device_configs_tenant_id', 'tenant_id'),
     )
 
@@ -860,9 +930,9 @@ class ChargePointConfig(Base):
     """
     __tablename__ = "charge_point_configs"
     
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
     tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
-    charge_point_id = Column(String(100), ForeignKey("charge_points.id"), nullable=False, index=True)
+    charge_point_id = Column(UUID(as_uuid=True), ForeignKey("charge_points.id"), nullable=False, index=True)
     
     config_key = Column(String(100), nullable=False)  # 配置键
     config_value = Column(Text, nullable=True)  # 配置值
@@ -892,10 +962,16 @@ class SupportMessage(Base):
     保持不变
     """
     __tablename__ = "support_messages"
+
+    def __init__(self, **kwargs):
+        _map_legacy_business_id(kwargs, "message_number")
+        super().__init__(**kwargs)
     
-    id = Column(String(100), primary_key=True, index=True)
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    message_number = Column(String(100), nullable=False, unique=True, index=True, default=lambda: _business_number("message"))
     tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
-    user_id = Column(String(100), nullable=False, index=True)
+    user_id = Column(String(100), nullable=True, index=True)
+    app_user_id = Column(UUID(as_uuid=True), ForeignKey("app_users.id", ondelete="SET NULL"), nullable=True, index=True)
     username = Column(String(100), nullable=False)
     
     message = Column(Text, nullable=False)
@@ -929,7 +1005,7 @@ class Tenant(Base):
     subscription_plan = Column(String(50), nullable=False, default="free")  # free, basic, premium, enterprise
     max_charge_points = Column(Integer, default=10)
     max_users = Column(Integer, default=100)
-    settings = Column(JSON, default={})
+    settings = Column(PortableJSON, default=dict)
     
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
@@ -937,6 +1013,10 @@ class Tenant(Base):
     __table_args__ = (
         Index('idx_tenants_domain', 'domain'),
         Index('idx_tenants_status', 'status'),
+        CheckConstraint(
+            "subscription_plan IN ('free', 'pro', 'enterprise')",
+            name="ck_tenants_subscription_plan",
+        ),
     )
 
 
@@ -964,38 +1044,6 @@ class AdminUser(Base):
     )
 
 
-class EndUser(Base):
-    """终端用户表"""
-    __tablename__ = "end_users"
-
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
-    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
-    phone = Column(String(50), nullable=True)  # 改为可选
-    email = Column(String(200), nullable=True)
-    full_name = Column(String(200), nullable=True)
-    id_tag = Column(String(100), nullable=True)  # RFID标签，改为可选
-    password_hash = Column(String(200), nullable=True)  # 新增：密码哈希
-    email_verified = Column(Boolean, default=False)  # 新增：邮箱验证状态
-    balance = Column(Numeric(10, 2), nullable=False, default=0)
-    status = Column(String(50), nullable=False, default="active")  # active, suspended, deleted
-    last_login_at = Column(DateTime(timezone=True), nullable=True)
-
-    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
-    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
-
-    tenant = relationship("Tenant")
-
-    __table_args__ = (
-        UniqueConstraint('tenant_id', 'phone', name='unique_tenant_phone'),
-        UniqueConstraint('tenant_id', 'email', name='unique_tenant_email'),  # 新增：邮箱唯一约束
-        UniqueConstraint('tenant_id', 'id_tag', name='unique_tenant_id_tag'),
-        Index('idx_end_users_tenant_id', 'tenant_id'),
-        Index('idx_end_users_phone', 'phone'),
-        Index('idx_end_users_email', 'email'),  # 新增：邮箱索引
-        Index('idx_end_users_id_tag', 'id_tag'),
-    )
-
-
 class AppUser(Base):
     """平台级终端用户（爆改测试版）
 
@@ -1004,7 +1052,7 @@ class AppUser(Base):
     - 钱包余额为平台统一钱包（见 AppWalletTransaction）。
 
     说明：
-    - 现有 EndUser 作为旧实现保留，但在爆改流程中不再使用。
+    - AppUser 是唯一的 App 用户模型，不绑定单一运营商租户。
     """
     __tablename__ = "app_users"
 
@@ -1020,6 +1068,9 @@ class AppUser(Base):
     email_verification_token_hash = Column(String(64), nullable=True)
     email_verification_expires_at = Column(DateTime(timezone=True), nullable=True)
     email_verification_sent_at = Column(DateTime(timezone=True), nullable=True)
+    password_reset_token_hash = Column(String(64), nullable=True, index=True)
+    password_reset_expires_at = Column(DateTime(timezone=True), nullable=True)
+    password_reset_requested_at = Column(DateTime(timezone=True), nullable=True)
 
     balance = Column(Numeric(10, 2), nullable=False, default=0)
     has_unpaid_charges = Column(Boolean, default=False, nullable=False)
@@ -1090,7 +1141,7 @@ class Role(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
     tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=True, index=True)  # NULL表示系统角色
     name = Column(String(100), nullable=False)
-    permissions = Column(JSON, nullable=False, default=[])  # 权限列表
+    permissions = Column(PortableJSON, nullable=False, default=list)  # 权限列表
     description = Column(Text, nullable=True)
     scope = Column(String(50), nullable=False, default="tenant")  # system / tenant
     
@@ -1111,14 +1162,16 @@ class TenantMembershipRole(Base):
     """成员角色关系表"""
     __tablename__ = "tenant_membership_roles"
     
-    membership_id = Column(UUID(as_uuid=True), ForeignKey("tenant_memberships.id", ondelete="CASCADE"), nullable=False, primary_key=True)
-    role_id = Column(UUID(as_uuid=True), ForeignKey("roles.id", ondelete="CASCADE"), nullable=False, primary_key=True)
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    membership_id = Column(UUID(as_uuid=True), ForeignKey("tenant_memberships.id", ondelete="CASCADE"), nullable=False)
+    role_id = Column(UUID(as_uuid=True), ForeignKey("roles.id", ondelete="CASCADE"), nullable=False)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     
     membership = relationship("TenantMembership", back_populates="roles")
     role = relationship("Role", back_populates="membership_roles")
     
     __table_args__ = (
+        UniqueConstraint('membership_id', 'role_id', name='uq_tenant_membership_role'),
         Index('idx_tenant_membership_roles_membership_id', 'membership_id'),
         Index('idx_tenant_membership_roles_role_id', 'role_id'),
     )
@@ -1132,14 +1185,14 @@ class Alert(Base):
     
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
     tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
-    charge_point_id = Column(String(100), ForeignKey("charge_points.id", ondelete="SET NULL"), nullable=True, index=True)
-    evse_id = Column(Integer, ForeignKey("evses.id", ondelete="SET NULL"), nullable=True, index=True)
+    charge_point_id = Column(UUID(as_uuid=True), ForeignKey("charge_points.id", ondelete="SET NULL"), nullable=True, index=True)
+    evse_id = Column(UUID(as_uuid=True), ForeignKey("evses.id", ondelete="SET NULL"), nullable=True, index=True)
     alert_type = Column(String(50), nullable=False)  # offline, faulted, overcurrent, overvoltage, temperature, etc.
     severity = Column(String(50), nullable=False)  # critical, warning, info
     status = Column(String(50), nullable=False, default="pending")  # pending, acknowledged, resolved
     title = Column(String(200), nullable=False)
     description = Column(Text, nullable=True)
-    alert_metadata = Column(JSON, default={})  # 使用 alert_metadata 避免与 SQLAlchemy 保留字冲突
+    alert_metadata = Column(PortableJSON, default=dict)  # 使用 alert_metadata 避免与 SQLAlchemy 保留字冲突
     acknowledged_by = Column(UUID(as_uuid=True), ForeignKey("admin_users.id"), nullable=True)
     acknowledged_at = Column(DateTime(timezone=True), nullable=True)
     resolved_at = Column(DateTime(timezone=True), nullable=True)
@@ -1169,7 +1222,7 @@ class AlertRule(Base):
     tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
     name = Column(String(200), nullable=False)
     alert_type = Column(String(50), nullable=False)
-    conditions = Column(JSON, nullable=False)  # 条件配置
+    conditions = Column(PortableJSON, nullable=False)  # 条件配置
     severity = Column(String(50), nullable=False)
     is_enabled = Column(Boolean, nullable=False, default=True)
     
@@ -1217,12 +1270,12 @@ class RefreshToken(Base):
     
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
     jti = Column(String(100), nullable=False, unique=True, index=True)  # JWT ID
-    user_id = Column(UUID(as_uuid=True), nullable=False, index=True)  # admin_user_id 或 end_user_id
-    user_type = Column(String(20), nullable=False)  # admin / end_user
+    user_id = Column(UUID(as_uuid=True), nullable=False, index=True)  # admin_user_id 或 app_user_id
+    user_type = Column(String(20), nullable=False)  # admin / app_user
     token_hash = Column(String(255), nullable=False)  # refresh token的哈希值
     expires_at = Column(DateTime(timezone=True), nullable=False, index=True)
     revoked_at = Column(DateTime(timezone=True), nullable=True)
-    device_info = Column(JSON, nullable=True)  # 设备信息
+    device_info = Column(PortableJSON, nullable=True)  # 设备信息
     ip_address = Column(String(50), nullable=True)
     
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
@@ -1242,16 +1295,16 @@ class AuditLog(Base):
     
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
     tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="SET NULL"), nullable=True, index=True)
-    actor_id = Column(UUID(as_uuid=True), nullable=False, index=True)  # admin_user_id 或 end_user_id
-    actor_type = Column(String(20), nullable=False)  # admin / end_user / system
+    actor_id = Column(UUID(as_uuid=True), nullable=False, index=True)  # admin_user_id 或 app_user_id
+    actor_type = Column(String(20), nullable=False)  # admin / app_user / system
     action = Column(String(100), nullable=False, index=True)  # create, update, delete, login, etc.
     resource_type = Column(String(100), nullable=True, index=True)  # charge_point, order, user, etc.
     resource_id = Column(String(100), nullable=True, index=True)  # 资源ID
-    before_data = Column(JSON, nullable=True)  # 变更前数据
-    after_data = Column(JSON, nullable=True)  # 变更后数据
+    before_data = Column(PortableJSON, nullable=True)  # 变更前数据
+    after_data = Column(PortableJSON, nullable=True)  # 变更后数据
     ip_address = Column(String(50), nullable=True)
     user_agent = Column(Text, nullable=True)
-    audit_metadata = Column("metadata", JSON, default={})  # 映射到数据库的metadata字段
+    audit_metadata = Column("metadata", PortableJSON, default=dict)  # 映射到数据库的metadata字段
 
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
     

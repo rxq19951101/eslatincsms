@@ -5,6 +5,7 @@ import { useRouter, usePathname } from 'next/navigation';
 import { useRequireAuth } from '@/hooks/useAuth';
 import { Sidebar } from '@/components/layout/Sidebar';
 import { Header } from '@/components/layout/Header';
+import { useI18n } from '@/lib/i18n';
 
 export default function DashboardLayout({
   children,
@@ -15,6 +16,7 @@ export default function DashboardLayout({
   const router = useRouter();
   const pathname = usePathname();
   const [isLoading, setIsLoading] = useState(true);
+  const { t } = useI18n();
 
   useEffect(() => {
     // 等待认证验证完成
@@ -29,7 +31,7 @@ export default function DashboardLayout({
   if (isLoading || !isReady || !isAuthenticated) {
     return (
       <div className="flex items-center justify-center h-screen bg-slate-950">
-        <div className="text-slate-400">加载中...</div>
+        <div className="text-slate-400">{t('加载中...')}</div>
       </div>
     );
   }

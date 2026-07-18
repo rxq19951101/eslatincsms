@@ -4,7 +4,7 @@
     "slug": "eslatincsms",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/icon.png",
+    "icon": "./assets/eslatin-logo-dark.png",
     "userInterfaceStyle": "light",
     "newArchEnabled": true,
     "scheme": "eslatin",
@@ -38,7 +38,7 @@
       ]
     },
     "web": {
-      "favicon": "./assets/favicon.png"
+      "favicon": "./assets/eslatin-logo-dark.png"
     },
     "plugins": [
       "expo-localization",

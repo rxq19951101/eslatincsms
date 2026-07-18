@@ -10,6 +10,9 @@ export const API_ENDPOINTS = {
   AUTH_LOGOUT: '/api/v1/admin/auth/logout',
   AUTH_ME: '/api/v1/admin/auth/me',
   AUTH_ME_PERMISSIONS: '/api/v1/admin/auth/me/permissions',
+  AUTH_CHANGE_PASSWORD: '/api/v1/admin/users/me/password',
+  AUTH_UPDATE_PROFILE: '/api/v1/admin/users/me/profile',
+  CONFIGS: '/api/v1/admin/configs',
   AUTH_SET_DEFAULT_TENANT: '/api/v1/admin/auth/me/default-tenant',
   
   // Dashboard
@@ -48,11 +51,12 @@ export const API_ENDPOINTS = {
 
   // 租户（仅超级管理员）
   TENANTS: '/api/v1/admin/tenants',
+  TENANTS_PROVISION: '/api/v1/admin/tenants/provision',
   TENANT_DETAIL: (id: string) => `/api/v1/admin/tenants/${id}`,
+  TENANT_CURRENT: '/api/v1/admin/tenants/current',
 
   // 管理员用户
   ADMIN_USERS: '/api/v1/admin/users',
-  END_USERS: '/api/v1/admin/end-users',
   APP_USERS: '/api/v1/admin/app-users',
   APP_USER_ADJUST_BALANCE: (id: string) => `/api/v1/admin/app-users/${id}/adjust-balance`,
   ALERT_RULES: '/api/v1/admin/alerts/rules',
@@ -61,12 +65,12 @@ export const API_ENDPOINTS = {
   MEMBERSHIPS: '/api/v1/admin/memberships',
   
   // OCPP 控制
-  OCPP_REMOTE_START: '/api/v1/ocpp_control/remote-start-transaction',
-  OCPP_REMOTE_STOP: '/api/v1/ocpp_control/remote-stop-transaction',
-  OCPP_RESET: '/api/v1/ocpp_control/reset',
-  OCPP_CHANGE_CONFIG: '/api/v1/ocpp_control/change-configuration',
-  OCPP_GET_CONFIG: '/api/v1/ocpp_control/get-configuration',
-  OCPP_UNLOCK: '/api/v1/ocpp_control/unlock-connector',
+  OCPP_REMOTE_START: '/api/v1/ocpp/remote-start-transaction',
+  OCPP_REMOTE_STOP: '/api/v1/ocpp/remote-stop-transaction',
+  OCPP_RESET: '/api/v1/ocpp/reset',
+  OCPP_CHANGE_CONFIG: '/api/v1/ocpp/change-configuration',
+  OCPP_GET_CONFIG: '/api/v1/ocpp/get-configuration',
+  OCPP_UNLOCK: '/api/v1/ocpp/unlock-connector',
   
   // 支付管理（Wompi）
   PAYMENTS: '/api/v1/admin/payments',

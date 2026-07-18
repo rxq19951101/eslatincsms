@@ -18,13 +18,12 @@ from app.database.models import (
     DeviceConfig, ChargePointConfig,
     SupportMessage,
     # 多租户相关表
-    Tenant, AdminUser, EndUser, TenantMembership, Role, TenantMembershipRole,
-    WalletTransaction,
+    Tenant, AdminUser, TenantMembership, Role, TenantMembershipRole,
     Alert, AlertRule, SystemConfig, RefreshToken, AuditLog,
 )
 
 # 然后导入base（需要Base已定义）
-from app.database.base import engine, SessionLocal, get_db, init_db, check_db_health
+from app.database.base import engine, SessionLocal, get_db, check_db_health
 from sqlalchemy.orm import Session
 
 __all__ = [
@@ -33,7 +32,6 @@ __all__ = [
     "SessionLocal",
     "Session",  # SQLAlchemy Session 类型
     "get_db",
-    "init_db",
     "check_db_health",
     # 新表结构
     "Site",
@@ -60,8 +58,6 @@ __all__ = [
     # 多租户相关表
     "Tenant",
     "AdminUser",
-    "EndUser",
-    "WalletTransaction",
     "TenantMembership",
     "Role",
     "TenantMembershipRole",

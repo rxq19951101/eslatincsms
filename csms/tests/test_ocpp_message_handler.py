@@ -32,16 +32,12 @@ class TestOCPPMessageHandler:
             db=db_session
         )
         
-        assert response["status"] == "Accepted"
+        assert response["status"] == "Rejected"
         assert "currentTime" in response
         assert "interval" in response
-        
-        # 检查是否创建了ChargePoint
-        charge_point = db_session.query(ChargePoint).filter(
-            ChargePoint.id == "CP-BOOT-001"
-        ).first()
-        assert charge_point is not None
-        assert charge_point.vendor == "测试厂商"
+        assert db_session.query(ChargePoint).filter(
+            ChargePoint.ocpp_identity == "CP-BOOT-001"
+        ).first() is None
     
     @pytest.mark.asyncio
     async def test_handle_boot_notification_existing(self, handler: OCPPMessageHandler, db_session, sample_charge_point):
@@ -53,7 +49,7 @@ class TestOCPPMessageHandler:
         }
         
         response = await handler.handle_boot_notification(
-            charge_point_id=sample_charge_point.id,
+            charge_point_id=sample_charge_point.ocpp_identity,
             payload=payload,
             db=db_session
         )
@@ -64,12 +60,38 @@ class TestOCPPMessageHandler:
         db_session.refresh(sample_charge_point)
         assert sample_charge_point.vendor == "更新厂商"
         assert sample_charge_point.model == "更新型号"
+
+    @pytest.mark.asyncio
+    async def test_boot_keeps_transport_identity_and_event_uses_internal_uuid(
+        self, handler: OCPPMessageHandler, db_session, sample_charge_point
+    ):
+        payload = {
+            "chargePointVendor": "Identity vendor",
+            "chargePointModel": "Identity model",
+            "serialNumber": "ASSET-SERIAL-ONLY",
+        }
+
+        response = await handler.handle_message(
+            charge_point_id=sample_charge_point.ocpp_identity,
+            action="BootNotification",
+            payload=payload,
+        )
+
+        assert response["status"] == "Accepted"
+        assert "_new_charge_point_id" not in response
+        db_session.refresh(sample_charge_point)
+        assert sample_charge_point.ocpp_identity == "CP-TEST-001"
+        assert sample_charge_point.serial_number == "ASSET-SERIAL-ONLY"
+        event = db_session.query(DeviceEvent).filter(
+            DeviceEvent.event_type == "boot"
+        ).order_by(DeviceEvent.id.desc()).first()
+        assert event.charge_point_id == sample_charge_point.id
     
     @pytest.mark.asyncio
     async def test_handle_heartbeat(self, handler: OCPPMessageHandler, db_session, sample_charge_point, sample_device):
         """测试处理Heartbeat"""
         response = await handler.handle_heartbeat(
-            charge_point_id=sample_charge_point.id,
+            charge_point_id=sample_charge_point.ocpp_identity,
             payload={},
             device_serial_number=sample_device.serial_number,
             db=db_session
@@ -85,7 +107,9 @@ class TestOCPPMessageHandler:
         assert event is not None
     
     @pytest.mark.asyncio
-    async def test_handle_status_notification_new(self, handler: OCPPMessageHandler, db_session, sample_charge_point):
+    async def test_handle_status_notification_new(
+        self, handler: OCPPMessageHandler, db_session, sample_charge_point, sample_evse
+    ):
         """测试处理StatusNotification（新建EVSE状态）"""
         payload = {
             "connectorId": 1,
@@ -94,7 +118,7 @@ class TestOCPPMessageHandler:
         }
         
         response = await handler.handle_status_notification(
-            charge_point_id=sample_charge_point.id,
+            charge_point_id=sample_charge_point.ocpp_identity,
             payload=payload,
             evse_id=1,
             db=db_session
@@ -107,7 +131,7 @@ class TestOCPPMessageHandler:
         from app.database.models import EVSEStatus
         evse_status = db_session.query(EVSEStatus).filter(
             EVSEStatus.charge_point_id == sample_charge_point.id,
-            EVSEStatus.evse_id == 1
+            EVSEStatus.evse_id == sample_evse.id,
         ).first()
         assert evse_status is not None
         assert evse_status.status == "Available"
@@ -142,7 +166,7 @@ class TestOCPPMessageHandler:
         }
         
         response = await handler.handle_start_transaction(
-            charge_point_id=sample_charge_point.id,
+            charge_point_id=sample_charge_point.ocpp_identity,
             payload=payload,
             evse_id=1,
             db=db_session
@@ -170,6 +194,7 @@ class TestOCPPMessageHandler:
         
         if not evse:
             evse = EVSE(
+                tenant_id=sample_charge_point.tenant_id,
                 charge_point_id=sample_charge_point.id,
                 evse_id=1
             )
@@ -177,6 +202,7 @@ class TestOCPPMessageHandler:
             db_session.commit()
         
         session = ChargingSession(
+            tenant_id=sample_charge_point.tenant_id,
             charge_point_id=sample_charge_point.id,
             evse_id=evse.id,
             transaction_id=12345,
@@ -195,7 +221,7 @@ class TestOCPPMessageHandler:
         }
         
         response = await handler.handle_stop_transaction(
-            charge_point_id=sample_charge_point.id,
+            charge_point_id=sample_charge_point.ocpp_identity,
             payload=payload,
             db=db_session
         )
@@ -206,4 +232,3 @@ class TestOCPPMessageHandler:
         db_session.refresh(session)
         assert session.status == "completed"
         assert session.end_time is not None
-

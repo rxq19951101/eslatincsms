@@ -2,7 +2,6 @@ import { API_BASE_URL } from './constants';
 import { getAccessToken, getRefreshToken, setTokens, clearTokens, redirectToLogin } from './auth';
 import { getTenantId } from './tenant';
 import { useAuthStore } from '@/store/authStore';
-import { ApiError } from '@/types';
 import { RefreshTokenRequest, RefreshTokenResponse } from '@/types';
 
 /**
@@ -12,6 +11,60 @@ interface RequestConfig extends RequestInit {
   skipAuth?: boolean; // 跳过认证（用于登录等接口）
   skipTenantId?: boolean; // 跳过租户 ID（用于认证接口）
   retryCount?: number; // 重试次数（内部使用）
+}
+
+export class ApiRequestError extends Error {
+  constructor(
+    message: string,
+    public readonly status: number,
+    public readonly fieldErrors: Record<string, string> = {}
+  ) {
+    super(message);
+    this.name = 'ApiRequestError';
+  }
+}
+
+function parseFieldErrors(details: unknown): Record<string, string> {
+  if (!Array.isArray(details)) return {};
+
+  const normalizePath = (value: unknown): string | undefined => {
+    const parts = Array.isArray(value)
+      ? value
+      : typeof value === 'string'
+        ? value.split('.').filter(Boolean)
+        : [];
+    const normalized = parts
+      .filter((part): part is string | number => typeof part === 'string' || typeof part === 'number')
+      .filter((part, index) => index > 0 || !['body', 'query', 'path', 'header'].includes(String(part)))
+      .map(String)
+      .join('.');
+    return normalized || undefined;
+  };
+
+  return details.reduce<Record<string, string>>((result, issue) => {
+    if (!issue || typeof issue !== 'object') return result;
+    const entry = issue as {
+      field?: unknown;
+      path?: unknown;
+      message?: unknown;
+      type?: unknown;
+      loc?: unknown;
+      msg?: unknown;
+    };
+    const field = normalizePath(entry.field)
+      ?? normalizePath(entry.path)
+      ?? normalizePath(entry.loc)
+      ?? 'form';
+    const message = typeof entry.message === 'string'
+      ? entry.message
+      : typeof entry.msg === 'string'
+        ? entry.msg
+        : undefined;
+    if (message && !result[field]) {
+      result[field] = message;
+    }
+    return result;
+  }, {});
 }
 
 /**
@@ -134,7 +187,13 @@ export async function apiRequest<T = any>(
 
     // 处理其他错误
     if (!response.ok) {
-      let errorData: ApiError;
+      let errorData: {
+        success?: boolean;
+        detail?: unknown;
+        status_code?: number;
+        message?: unknown;
+        error?: { message?: unknown; details?: unknown; detail?: unknown };
+      };
       try {
         errorData = await response.json();
       } catch {
@@ -144,16 +203,27 @@ export async function apiRequest<T = any>(
         };
       }
 
-      // 处理特定错误状态码
-      if (response.status === 403) {
-        throw new Error(errorData.detail || 'Permission denied');
-      } else if (response.status === 404) {
-        throw new Error(errorData.detail || 'Resource not found');
-      } else if (response.status >= 500) {
-        throw new Error(errorData.detail || 'Server error');
-      } else {
-        throw new Error(errorData.detail || 'Request failed');
-      }
+      const envelopeMessage = typeof errorData.error?.message === 'string'
+        ? errorData.error.message
+        : undefined;
+      const topLevelMessage = typeof errorData.message === 'string' ? errorData.message : undefined;
+      const legacyDetail = typeof errorData.detail === 'string' ? errorData.detail : undefined;
+      const nestedDetail = typeof errorData.error?.detail === 'string' ? errorData.error.detail : undefined;
+      const validationDetails = errorData.error?.details
+        ?? (Array.isArray(errorData.detail) ? errorData.detail : undefined)
+        ?? (Array.isArray(errorData.error?.message) ? errorData.error.message : undefined);
+      const fallback = response.status === 403
+        ? 'Permission denied'
+        : response.status === 404
+          ? 'Resource not found'
+          : response.status >= 500
+            ? 'Server error'
+            : 'Request failed';
+      throw new ApiRequestError(
+        envelopeMessage || topLevelMessage || legacyDetail || nestedDetail || fallback,
+        response.status,
+        parseFieldErrors(validationDetails)
+      );
     }
 
     // 解析响应
@@ -183,7 +253,7 @@ export function apiGet<T = any>(endpoint: string, config?: RequestConfig): Promi
  */
 export function apiPost<T = any>(
   endpoint: string,
-  data?: any,
+  data?: unknown,
   config?: RequestConfig
 ): Promise<T> {
   return apiRequest<T>(endpoint, {
@@ -198,7 +268,7 @@ export function apiPost<T = any>(
  */
 export function apiPut<T = any>(
   endpoint: string,
-  data?: any,
+  data?: unknown,
   config?: RequestConfig
 ): Promise<T> {
   return apiRequest<T>(endpoint, {
@@ -220,7 +290,7 @@ export function apiDelete<T = any>(endpoint: string, config?: RequestConfig): Pr
  */
 export function apiPatch<T = any>(
   endpoint: string,
-  data?: any,
+  data?: unknown,
   config?: RequestConfig
 ): Promise<T> {
   return apiRequest<T>(endpoint, {

@@ -115,7 +115,7 @@ def list_app_transactions(
 
 @router.get("/{session_id}", summary="获取充电记录详情（终端用户）")
 def get_app_transaction_detail(
-    session_id: int = Path(..., description="charging_sessions.id"),
+    session_id: UUID = Path(..., description="charging_sessions.id UUID"),
     current_user_obj: AppUser = Depends(get_current_app_user),
     db: Session = Depends(get_db),
 ) -> dict:
@@ -165,4 +165,3 @@ def get_app_transaction_detail(
         "site_name": site_name,
         "site_address": site_address,
     }
-

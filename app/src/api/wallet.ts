@@ -17,7 +17,14 @@ export async function getWalletTransactions(params?: { limit?: number; offset?: 
 }
 
 export async function topUpWallet(amount: number): Promise<WalletBalance> {
-  const res = await apiClient.post<WalletBalance>(API_ENDPOINTS.WALLET.TOP_UP, { amount });
+  const idempotency_key =
+    typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+      ? crypto.randomUUID()
+      : `topup-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const res = await apiClient.post<WalletBalance>(API_ENDPOINTS.WALLET.TOP_UP, {
+    amount,
+    idempotency_key,
+  });
   return res.data;
 }
 
@@ -28,4 +35,3 @@ export async function getSavedPaymentMethods(): Promise<SavedPaymentMethodsRespo
   );
   return res.data;
 }
-

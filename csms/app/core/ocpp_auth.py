@@ -4,6 +4,7 @@
 
 import os
 import logging
+from app.core.asset_identifiers import OCPP_IDENTITY_PATTERN
 from typing import Optional
 
 logger = logging.getLogger("ocpp_csms")
@@ -15,7 +16,7 @@ def is_pre_registration_required() -> bool:
 
 def verify_charge_point_pre_registered(charge_point_id: str) -> bool:
     """校验充电桩是否已在系统中预注册。"""
-    if not charge_point_id or not charge_point_id.isalnum():
+    if not charge_point_id or not OCPP_IDENTITY_PATTERN.fullmatch(charge_point_id):
         return False
     try:
         from app.database.base import SessionLocal
@@ -24,7 +25,7 @@ def verify_charge_point_pre_registered(charge_point_id: str) -> bool:
         db = SessionLocal()
         try:
             return (
-                db.query(ChargePoint.id).filter(ChargePoint.id == charge_point_id).first()
+                db.query(ChargePoint.id).filter(ChargePoint.ocpp_identity == charge_point_id).first()
                 is not None
             )
         finally:

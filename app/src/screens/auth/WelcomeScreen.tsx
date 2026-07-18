@@ -8,6 +8,7 @@ import {
   Text,
   StyleSheet,
   StatusBar,
+  Image,
 } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import type { StackNavigationProp } from '@react-navigation/stack';
@@ -16,7 +17,7 @@ import { COLORS } from '../../constants/config';
 import { useI18n } from '../../i18n';
 import Screen from '../../components/ui/Screen';
 import Button from '../../components/ui/Button';
-import { palette, spacing, typography } from '../../theme';
+import { spacing, typography } from '../../theme';
 
 type WelcomeScreenNavigationProp = StackNavigationProp<RootStackParamList, 'Welcome'>;
 
@@ -31,7 +32,12 @@ const WelcomeScreen = () => {
 
       <View style={styles.content}>
         <View style={styles.logoContainer}>
-          <Text style={styles.wordmark}>ESLATIN</Text>
+          <Image
+            source={require('../../../assets/eslatin-logo.png')}
+            style={styles.logo}
+            resizeMode="contain"
+            accessibilityLabel="EsLatin"
+          />
           <Text style={styles.appName}>{t.appName}</Text>
           <Text style={styles.tagline}>{t.tagline}</Text>
         </View>
@@ -66,12 +72,10 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginTop: 60,
   },
-  wordmark: {
-    fontSize: 13,
-    fontWeight: typography.bold,
-    letterSpacing: 2.4,
-    color: palette.brand,
-    marginBottom: spacing.lg,
+  logo: {
+    width: 220,
+    height: 220,
+    marginBottom: spacing.sm,
   },
   appName: {
     fontSize: 32,

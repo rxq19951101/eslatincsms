@@ -11,9 +11,48 @@ from app.core.logging_config import get_logger
 
 logger = get_logger("ocpp_csms")
 
+# 租户初始管理员的最小完整运营权限。这里刻意不使用 tenant.*，
+# 避免未来新增平台级权限时被自动放大授权。
+DEFAULT_TENANT_ADMIN_PERMISSIONS = [
+    "admin_users.read", "admin_users.write",
+    "memberships.read", "memberships.write",
+    "roles.read", "roles.write",
+    "alerts.read", "alerts.write",
+    "alert_rules.read", "alert_rules.write",
+    "configs.read", "configs.write",
+    "tenant_settings.read", "tenant_settings.write",
+    "reports.read",
+    "chargers.read", "chargers.write",
+    "chargers.control",
+    "sites.read", "sites.write",
+    "tariffs.read", "tariffs.edit",
+    "transactions.read",
+]
+
 
 class RoleService:
     """角色服务"""
+
+    @staticmethod
+    def ensure_default_tenant_admin_role(db: Session, tenant_id: UUID) -> Role:
+        """确保租户有默认管理员角色；调用方负责最终提交事务。"""
+        role = db.query(Role).filter(
+            Role.tenant_id == tenant_id,
+            Role.name == "tenant_admin",
+        ).first()
+        if role:
+            return role
+
+        role = Role(
+            tenant_id=tenant_id,
+            name="tenant_admin",
+            permissions=list(DEFAULT_TENANT_ADMIN_PERMISSIONS),
+            description="租户初始管理员角色",
+            scope="tenant",
+        )
+        db.add(role)
+        db.flush()
+        return role
     
     @staticmethod
     def create_role(

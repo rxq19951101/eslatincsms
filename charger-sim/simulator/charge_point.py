@@ -4,7 +4,8 @@ import asyncio
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import websockets
 from ocpp.routing import on
@@ -17,6 +18,14 @@ from .profiles import ChargePointProfile, MeteringProfile
 from .payment_simulator import simulate_charging_payment
 
 logger = logging.getLogger("eslatin_charger_sim")
+
+
+def build_websocket_url(ws_base: str, ocpp_identity: str) -> str:
+    """Attach the independently configured OCPP identity to the WebSocket URL."""
+    parts = urlsplit(ws_base)
+    query = [(key, value) for key, value in parse_qsl(parts.query, keep_blank_values=True) if key != "id"]
+    query.append(("id", ocpp_identity))
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
 
 
 @dataclass
@@ -43,7 +52,7 @@ class SimChargePoint(OcppChargePoint):
     """
 
     def __init__(self, profile: ChargePointProfile, meterings: List[MeteringProfile], ws):
-        super().__init__(profile.charge_point_id, ws)
+        super().__init__(profile.ocpp_identity, ws)
         self.profile = profile
         self.state = RuntimeState()
         self.meterings: Dict[int, MeteringProfile] = {m.connector_id: m for m in meterings}
@@ -82,7 +91,7 @@ class SimChargePoint(OcppChargePoint):
         payload = call.BootNotificationPayload(
             charge_point_vendor=self.profile.vendor,
             charge_point_model=self.profile.model,
-            charge_point_serial_number=self.profile.serial_number or self.profile.charge_point_id,
+            charge_point_serial_number=self.profile.boot_serial_number,
             firmware_version=self.profile.firmware_version,
         )
         res = await self.call(payload)
@@ -236,7 +245,7 @@ class SimChargePoint(OcppChargePoint):
                 from .payment_simulator import get_session_id_by_transaction
                 session_id = await get_session_id_by_transaction(
                     transaction_id=transaction_id,
-                    charge_point_id=self.profile.charge_point_id,
+                    charge_point_id=self.profile.ocpp_identity,
                     backend_api_url=self.profile.backend_api_url,
                     backend_token=self.profile.backend_api_token,
                 )
@@ -260,7 +269,7 @@ class SimChargePoint(OcppChargePoint):
                 success = await simulate_charging_payment(
                     session_id=session_id,
                     amount=payment_amount,
-                    charge_point_id=self.profile.charge_point_id,
+                    charge_point_id=self.profile.ocpp_identity,
                     backend_api_url=self.profile.backend_api_url,
                     test_card_name=self.profile.payment_test_card,
                     payment_delay_seconds=self.profile.payment_delay_seconds,
@@ -354,9 +363,20 @@ class SimChargePoint(OcppChargePoint):
         return call_result.RemoteStopTransactionPayload(status="Accepted")
 
 
-async def connect_and_run(profile: ChargePointProfile, meterings: List[MeteringProfile], ws_base: str) -> None:
-    url = f"{ws_base}?id={profile.charge_point_id}"
-    logger.info("[%s] connecting %s", profile.charge_point_id, url)
+async def connect_and_run(
+    profile: ChargePointProfile,
+    meterings: List[MeteringProfile],
+    ws_base: str,
+    runtime_holder: Optional[Dict[str, Any]] = None,
+    ready_event: Optional[asyncio.Event] = None,
+) -> None:
+    url = build_websocket_url(ws_base, profile.ocpp_identity)
+    logger.info(
+        "[%s] connecting %s (BootNotification serial=%s)",
+        profile.ocpp_identity,
+        url,
+        profile.boot_serial_number,
+    )
     async with websockets.connect(url, subprotocols=["ocpp1.6"]) as ws:
         # CSMS 侧会在连接建立后发送一条非 OCPP 标准的 “Connected” JSON（用于调试）。
         # ocpp 库的 listener 只能处理 OCPP 1.6 的数组消息格式，若直接进入 cp.start() 会因解析失败而断开。
@@ -364,19 +384,23 @@ async def connect_and_run(profile: ChargePointProfile, meterings: List[MeteringP
         try:
             hello = await asyncio.wait_for(ws.recv(), timeout=2)
             if isinstance(hello, str) and hello.lstrip().startswith("{"):
-                logger.debug("[%s] ignored non-ocpp greeting: %s", profile.charge_point_id, hello[:200])
+                logger.debug("[%s] ignored non-ocpp greeting: %s", profile.ocpp_identity, hello[:200])
             else:
                 # 如果不是该欢迎消息，则不再额外处理（避免误吞合法 OCPP 数据）
-                logger.debug("[%s] first message not greeting, ignoring peek", profile.charge_point_id)
+                logger.debug("[%s] first message not greeting, ignoring peek", profile.ocpp_identity)
         except asyncio.TimeoutError:
             # 某些环境不会发欢迎消息，超时即可
             pass
 
         cp = SimChargePoint(profile=profile, meterings=meterings, ws=ws)
+        if runtime_holder is not None:
+            runtime_holder["charge_point"] = cp
         # 必须先启动 listener，才能让 cp.call() 收到 CALLRESULT/CALLERROR
         listener_task = asyncio.create_task(cp.start())
         try:
             await cp.start_background()
+            if ready_event is not None:
+                ready_event.set()
             await listener_task  # listen forever
         finally:
             if not listener_task.done():
@@ -386,4 +410,3 @@ async def connect_and_run(profile: ChargePointProfile, meterings: List[MeteringP
                 except asyncio.CancelledError:
                     pass
             await cp.shutdown()
-

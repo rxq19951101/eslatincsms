@@ -17,7 +17,7 @@ from app.database.base import (
     use_super_connection_context
 )
 from app.database.models import (
-    Tenant, AdminUser, EndUser, TenantMembership, 
+    Tenant, AdminUser, TenantMembership,
     ChargePoint, Site
 )
 from app.core.auth import get_password_hash, verify_password
@@ -64,7 +64,7 @@ def create_tenant_for_test(db_session: Session, name: str = "测试租户", **kw
             id=uuid.uuid4(),
             name=name,
             status="active",
-            subscription_plan="basic",
+            subscription_plan="pro",
             max_charge_points=10,
             max_users=50,
             **kwargs
@@ -223,7 +223,7 @@ class TestSimpleAPIIntegration:
             logger.info("步骤2: 准备创建租户请求")
             tenant_data = {
                 "name": "新租户",
-                "subscription_plan": "premium",
+                "subscription_plan": "enterprise",
                 "max_charge_points": 100,
                 "max_users": 500
             }
@@ -253,7 +253,7 @@ class TestSimpleAPIIntegration:
             
             assert tenant["name"] == "新租户", f"租户名称不匹配: {tenant.get('name')}"
             logger.info(f"  - 租户名称正确: {tenant['name']}")
-            assert tenant["subscription_plan"] == "premium", f"订阅计划不匹配: {tenant.get('subscription_plan')}"
+            assert tenant["subscription_plan"] == "enterprise", f"订阅计划不匹配: {tenant.get('subscription_plan')}"
             logger.info(f"  - 订阅计划正确: {tenant['subscription_plan']}")
             logger.info(f"  - 租户ID: {tenant.get('id')}")
             

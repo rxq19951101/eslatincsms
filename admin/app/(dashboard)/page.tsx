@@ -16,10 +16,17 @@ import {
   Battery,
 } from 'lucide-react';
 import { TrendChart } from '@/features/dashboard/TrendChart';
+import { useI18n } from '@/lib/i18n';
 
 const fetcher = (url: string) => apiGet(url);
 
+const asNumber = (value: number | string | null | undefined, fallback = 0): number => {
+  const parsed = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+};
+
 export default function DashboardPage() {
+  const { t } = useI18n();
   const days = 7;
   const [selectedSiteId, setSelectedSiteId] = useState<string>('all');
 
@@ -83,21 +90,32 @@ export default function DashboardPage() {
     });
   }, [siteStats]);
 
+  const normalizedTrends = useMemo<DashboardTrends | undefined>(() => {
+    if (!trends) return undefined;
+    const normalize = (items: DashboardTrends['energy_trend']) =>
+      items.map((item) => ({ ...item, value: asNumber(item.value) }));
+    return {
+      energy_trend: normalize(trends.energy_trend || []),
+      revenue_trend: normalize(trends.revenue_trend || []),
+      orders_trend: normalize(trends.orders_trend || []),
+    };
+  }, [trends]);
+
   // KPI 卡片数据
   const kpiCards = useMemo(() => {
     const common = [
       {
-        title: '用户统计',
+        title: t('用户统计'),
         value: summary?.total_users || 0,
-        subtitle: `总用户 ${summary?.total_users || 0} | 今日活跃 ${summary?.active_users_today || 0}`,
+        subtitle: t(`总用户 ${summary?.total_users || 0} | 今日活跃 ${summary?.active_users_today || 0}`),
         icon: Users,
         color: 'from-pink-600 to-pink-800',
         iconBg: 'bg-pink-600/20',
       },
       {
-        title: '告警统计',
+        title: t('告警统计'),
         value: summary?.critical_alerts || 0,
-        subtitle: `严重 ${summary?.critical_alerts || 0} | 警告 ${summary?.warning_alerts || 0} | 信息 ${summary?.info_alerts || 0}`,
+        subtitle: t(`严重 ${summary?.critical_alerts || 0} | 警告 ${summary?.warning_alerts || 0} | 信息 ${summary?.info_alerts || 0}`),
         icon: AlertTriangle,
         color: 'from-red-600 to-red-800',
         iconBg: 'bg-red-600/20',
@@ -107,33 +125,33 @@ export default function DashboardPage() {
     if (selectedSiteId === 'all') {
       return [
         {
-          title: '充电桩总数',
+          title: t('充电桩总数'),
           value: summary?.total_charge_points || 0,
-          subtitle: `在线 ${summary?.online_charge_points || 0} | 离线 ${summary?.offline_charge_points || 0}`,
+          subtitle: t(`在线 ${summary?.online_charge_points || 0} | 离线 ${summary?.offline_charge_points || 0}`),
           icon: Zap,
           color: 'from-purple-600 to-purple-800',
           iconBg: 'bg-purple-600/20',
         },
         {
-          title: '充电桩状态',
+          title: t('充电桩状态'),
           value: summary?.charging_charge_points || 0,
-          subtitle: `充电中 ${summary?.charging_charge_points || 0} | 可用 ${summary?.available_charge_points || 0} | 故障 ${summary?.faulted_charge_points || 0}`,
+          subtitle: t(`充电中 ${summary?.charging_charge_points || 0} | 可用 ${summary?.available_charge_points || 0} | 故障 ${summary?.faulted_charge_points || 0}`),
           icon: Activity,
           color: 'from-blue-600 to-blue-800',
           iconBg: 'bg-blue-600/20',
         },
         {
-          title: '今日数据',
+          title: t('今日数据'),
           value: summary?.today_orders || 0,
-          subtitle: `订单 ${summary?.today_orders || 0} | 充电量 ${summary?.today_energy_kwh?.toFixed(2) || 0} kWh`,
+          subtitle: `${t('订单')} ${summary?.today_orders || 0} | ${t('充电量')} ${asNumber(summary?.today_energy_kwh).toFixed(2)} kWh`,
           icon: Battery,
           color: 'from-green-600 to-green-800',
           iconBg: 'bg-green-600/20',
         },
         {
-          title: '今日收入',
-          value: `¥${summary?.today_revenue?.toFixed(2) || 0}`,
-          subtitle: `订单 ${summary?.today_orders || 0} 笔`,
+          title: t('今日收入'),
+          value: `¥${asNumber(summary?.today_revenue).toFixed(2)}`,
+          subtitle: `${t('订单')} ${summary?.today_orders || 0}`,
           icon: DollarSign,
           color: 'from-yellow-600 to-yellow-800',
           iconBg: 'bg-yellow-600/20',
@@ -149,50 +167,50 @@ export default function DashboardPage() {
     const cpCharging = ss?.charging_charge_points || 0;
     const cpAvailable = ss?.available_charge_points || 0;
     const orders = ss?.orders_count || 0;
-    const energy = ss?.energy_kwh || 0;
-    const revenue = ss?.revenue || 0;
+    const energy = asNumber(ss?.energy_kwh);
+    const revenue = asNumber(ss?.revenue);
 
     return [
       {
-        title: '站点充电桩总数',
+        title: `${t('站点')} ${t('充电桩总数')}`,
         value: cpTotal,
-        subtitle: `在线 ${cpOnline} | 总数 ${cpTotal}`,
+        subtitle: `${t('在线')} ${cpOnline} | ${t('总数')} ${cpTotal}`,
         icon: Zap,
         color: 'from-purple-600 to-purple-800',
         iconBg: 'bg-purple-600/20',
       },
       {
-        title: '站点健康',
+        title: `${t('站点')} ${t('健康')}`,
         value: cpFaulted,
-        subtitle: `故障 ${cpFaulted} | 充电中 ${cpCharging} | 可用 ${cpAvailable}`,
+        subtitle: `${t('故障')} ${cpFaulted} | ${t('充电中')} ${cpCharging} | ${t('可用')} ${cpAvailable}`,
         icon: Activity,
         color: 'from-blue-600 to-blue-800',
         iconBg: 'bg-blue-600/20',
       },
       {
-        title: `近${days}天订单`,
+        title: t(`近${days}天订单`),
         value: orders,
-        subtitle: `充电量 ${energy.toFixed(2)} kWh`,
+        subtitle: `${t('充电量')} ${energy.toFixed(2)} kWh`,
         icon: Battery,
         color: 'from-green-600 to-green-800',
         iconBg: 'bg-green-600/20',
       },
       {
-        title: `近${days}天收入`,
+        title: t(`近${days}天收入`),
         value: `¥${revenue.toFixed(2)}`,
-        subtitle: `订单 ${orders} 笔`,
+        subtitle: `${t('订单')} ${orders}`,
         icon: DollarSign,
         color: 'from-yellow-600 to-yellow-800',
         iconBg: 'bg-yellow-600/20',
       },
       ...common,
     ];
-  }, [days, selectedSiteId, selectedSiteStat, summary]);
+  }, [days, selectedSiteId, selectedSiteStat, summary, t]);
 
   if (summaryLoading) {
     return (
       <div className="flex items-center justify-center h-full">
-        <div className="text-slate-400">加载中...</div>
+        <div className="text-slate-400">{t('加载中...')}</div>
       </div>
     );
   }
@@ -200,7 +218,7 @@ export default function DashboardPage() {
   if (summaryError) {
     return (
       <div className="flex items-center justify-center h-full">
-        <div className="text-red-400">加载失败，请刷新页面重试</div>
+        <div className="text-red-400">{t('加载失败，请刷新页面重试')}</div>
       </div>
     );
   }
@@ -210,21 +228,21 @@ export default function DashboardPage() {
       {/* Page Header */}
       <div className="flex items-start justify-between gap-4">
         <div>
-          <h1 className="text-3xl font-bold text-white">仪表板</h1>
+          <h1 className="text-3xl font-bold text-white">{t('dashboard')}</h1>
           <p className="text-slate-400 mt-1">
             {selectedSiteId === 'all'
-              ? '租户汇总 + 站点维度运营分析'
-              : `站点视角：${selectedSite?.name || selectedSiteId}`}
+              ? t('租户汇总 + 站点维度运营分析')
+              : t(`站点视角：${selectedSite?.name || selectedSiteId}`)}
           </p>
         </div>
 
         <div className="w-[280px]">
           <Select value={selectedSiteId} onValueChange={setSelectedSiteId}>
             <SelectTrigger className="bg-slate-800/50 border-slate-700">
-              <SelectValue placeholder="选择站点" />
+              <SelectValue placeholder={t('选择站点')} />
             </SelectTrigger>
             <SelectContent className="bg-slate-800 border-slate-700">
-              <SelectItem value="all">全部站点（租户汇总）</SelectItem>
+              <SelectItem value="all">{t('全部站点（租户汇总）')}</SelectItem>
               {(sites || []).map((s) => (
                 <SelectItem key={s.id} value={s.id}>
                   {s.name}
@@ -262,25 +280,25 @@ export default function DashboardPage() {
       {/* Site Analytics Table */}
       <Card className="bg-slate-800/80 backdrop-blur-sm border-slate-700 shadow-lg">
         <CardHeader>
-          <CardTitle className="text-white">站点运营概览（近 {days} 天）</CardTitle>
-          <p className="text-sm text-slate-400">按站点拆分：在线/故障、订单、充电量、收入（点击行可切换站点视角）</p>
+          <CardTitle className="text-white">{t(`站点运营概览（近 ${days} 天）`)}</CardTitle>
+          <p className="text-sm text-slate-400">{t('按站点拆分：在线/故障、订单、充电量、收入（点击行可切换站点视角）')}</p>
         </CardHeader>
         <CardContent>
           {siteStatsLoading ? (
-            <div className="text-slate-400">加载中...</div>
+            <div className="text-slate-400">{t('加载中...')}</div>
           ) : siteStatsError ? (
-            <div className="text-red-400">加载失败</div>
+            <div className="text-red-400">{t('加载失败')}</div>
           ) : sortedSiteStats.length > 0 ? (
             <div className="overflow-x-auto">
               <table className="w-full">
                 <thead>
                   <tr className="border-b border-slate-700">
-                    <th className="text-left py-3 px-4 text-slate-400 font-medium">站点</th>
-                    <th className="text-left py-3 px-4 text-slate-400 font-medium">在线/总桩</th>
-                    <th className="text-left py-3 px-4 text-slate-400 font-medium">故障</th>
-                    <th className="text-left py-3 px-4 text-slate-400 font-medium">订单</th>
-                    <th className="text-left py-3 px-4 text-slate-400 font-medium">充电量</th>
-                    <th className="text-left py-3 px-4 text-slate-400 font-medium">收入</th>
+                    <th className="text-left py-3 px-4 text-slate-400 font-medium">{t('站点')}</th>
+                    <th className="text-left py-3 px-4 text-slate-400 font-medium">{t('在线/总桩')}</th>
+                    <th className="text-left py-3 px-4 text-slate-400 font-medium">{t('故障')}</th>
+                    <th className="text-left py-3 px-4 text-slate-400 font-medium">{t('订单')}</th>
+                    <th className="text-left py-3 px-4 text-slate-400 font-medium">{t('充电量')}</th>
+                    <th className="text-left py-3 px-4 text-slate-400 font-medium">{t('收入')}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -297,15 +315,14 @@ export default function DashboardPage() {
                       >
                         <td className="py-3 px-4">
                           <div className="text-white font-medium">{s.site_name}</div>
-                          <div className="text-xs text-slate-500 font-mono">{s.site_id}</div>
                         </td>
                         <td className="py-3 px-4 text-slate-300">
                           {s.online_charge_points_count}/{s.charge_points_count}
                         </td>
                         <td className="py-3 px-4 text-slate-300">{s.faulted_charge_points}</td>
                         <td className="py-3 px-4 text-slate-300">{s.orders_count}</td>
-                        <td className="py-3 px-4 text-slate-300">{s.energy_kwh.toFixed(2)} kWh</td>
-                        <td className="py-3 px-4 text-slate-300">¥{s.revenue.toFixed(2)}</td>
+                        <td className="py-3 px-4 text-slate-300">{asNumber(s.energy_kwh).toFixed(2)} kWh</td>
+                        <td className="py-3 px-4 text-slate-300">¥{asNumber(s.revenue).toFixed(2)}</td>
                       </tr>
                     );
                   })}
@@ -313,7 +330,7 @@ export default function DashboardPage() {
               </table>
             </div>
           ) : (
-            <div className="text-slate-400">暂无数据</div>
+            <div className="text-slate-400">{t('暂无数据')}</div>
           )}
         </CardContent>
       </Card>
@@ -323,32 +340,32 @@ export default function DashboardPage() {
         {/* Energy Trend Chart */}
         <Card className="bg-slate-800/80 backdrop-blur-sm border-slate-700 shadow-lg">
           <CardHeader>
-            <CardTitle className="text-white">充电量趋势</CardTitle>
+            <CardTitle className="text-white">{t('充电量趋势')}</CardTitle>
             <p className="text-sm text-slate-400">
-              过去 {days} 天充电量（kWh）{selectedSiteId === 'all' ? '（租户汇总）' : `（${selectedSite?.name || selectedSiteId}）`}
+              {t(`过去 ${days} 天充电量（kWh）${selectedSiteId === 'all' ? '（租户汇总）' : `（${selectedSite?.name || selectedSiteId}）`}`)}
             </p>
           </CardHeader>
           <CardContent>
             {trendsLoading ? (
               <div className="flex items-center justify-center h-64">
-                <div className="text-slate-400">加载中...</div>
+                <div className="text-slate-400">{t('加载中...')}</div>
               </div>
             ) : trendsError ? (
               <div className="flex items-center justify-center h-64">
-                <div className="text-red-400">加载失败</div>
+                <div className="text-red-400">{t('加载失败')}</div>
               </div>
-            ) : trends?.energy_trend ? (
+            ) : normalizedTrends?.energy_trend ? (
               <div className="h-64">
                 <TrendChart
-                  data={trends.energy_trend}
-                  title="充电量"
+                  data={normalizedTrends.energy_trend}
+                  title={t('充电量')}
                   color="hsl(var(--chart-primary))"
                   unit="kWh"
                 />
               </div>
             ) : (
               <div className="h-64 flex items-center justify-center text-slate-400">
-                <p>暂无数据</p>
+                <p>{t('暂无数据')}</p>
               </div>
             )}
           </CardContent>
@@ -357,32 +374,32 @@ export default function DashboardPage() {
         {/* Revenue Trend Chart */}
         <Card className="bg-slate-800/80 backdrop-blur-sm border-slate-700 shadow-lg">
           <CardHeader>
-            <CardTitle className="text-white">收入趋势</CardTitle>
+            <CardTitle className="text-white">{t('收入趋势')}</CardTitle>
             <p className="text-sm text-slate-400">
-              过去 {days} 天收入（¥）{selectedSiteId === 'all' ? '（租户汇总）' : `（${selectedSite?.name || selectedSiteId}）`}
+              {t(`过去 ${days} 天收入（¥）${selectedSiteId === 'all' ? '（租户汇总）' : `（${selectedSite?.name || selectedSiteId}）`}`)}
             </p>
           </CardHeader>
           <CardContent>
             {trendsLoading ? (
               <div className="flex items-center justify-center h-64">
-                <div className="text-slate-400">加载中...</div>
+                <div className="text-slate-400">{t('加载中...')}</div>
               </div>
             ) : trendsError ? (
               <div className="flex items-center justify-center h-64">
-                <div className="text-red-400">加载失败</div>
+                <div className="text-red-400">{t('加载失败')}</div>
               </div>
-            ) : trends?.revenue_trend ? (
+          ) : normalizedTrends?.revenue_trend ? (
               <div className="h-64">
                 <TrendChart
-                  data={trends.revenue_trend}
-                  title="收入"
+                  data={normalizedTrends.revenue_trend}
+                  title={t('收入')}
                   color="hsl(var(--chart-secondary))"
                   unit="¥"
                 />
               </div>
             ) : (
               <div className="h-64 flex items-center justify-center text-slate-400">
-                <p>暂无数据</p>
+                <p>{t('暂无数据')}</p>
               </div>
             )}
           </CardContent>
@@ -392,32 +409,32 @@ export default function DashboardPage() {
       {/* Orders Trend Chart */}
       <Card className="bg-slate-800/80 backdrop-blur-sm border-slate-700 shadow-lg">
         <CardHeader>
-          <CardTitle className="text-white">订单趋势</CardTitle>
+          <CardTitle className="text-white">{t('订单趋势')}</CardTitle>
           <p className="text-sm text-slate-400">
-            过去 {days} 天订单数量{selectedSiteId === 'all' ? '（租户汇总）' : `（${selectedSite?.name || selectedSiteId}）`}
+              {t(`过去 ${days} 天订单数量${selectedSiteId === 'all' ? '（租户汇总）' : `（${selectedSite?.name || selectedSiteId}）`}`)}
           </p>
         </CardHeader>
         <CardContent>
           {trendsLoading ? (
             <div className="flex items-center justify-center h-64">
-              <div className="text-slate-400">加载中...</div>
+              <div className="text-slate-400">{t('加载中...')}</div>
             </div>
           ) : trendsError ? (
             <div className="flex items-center justify-center h-64">
-              <div className="text-red-400">加载失败</div>
+                <div className="text-red-400">{t('加载失败')}</div>
             </div>
-          ) : trends?.orders_trend ? (
+          ) : normalizedTrends?.orders_trend ? (
             <div className="h-64">
               <TrendChart
-                data={trends.orders_trend}
-                title="订单数"
+                  data={normalizedTrends.orders_trend}
+                title={t('订单数')}
                 color="hsl(var(--chart-accent))"
                 unit=""
               />
             </div>
           ) : (
             <div className="h-64 flex items-center justify-center text-slate-400">
-              <p>暂无数据</p>
+              <p>{t('暂无数据')}</p>
             </div>
           )}
         </CardContent>

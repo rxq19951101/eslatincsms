@@ -275,20 +275,30 @@ async def export_report(
 ):
     """导出报表"""
     tenant_id = tenant_id_context.get()
-    if not tenant_id:
+    is_super_admin = is_super_admin_context.get()
+    if not tenant_id and not is_super_admin:
         raise HTTPException(status_code=403, detail="Tenant ID required")
     
     end_date = datetime.now(timezone.utc)
     start_date = end_date - timedelta(days=days)
     
-    file_content = ReportService.export_report(
-        db=db,
-        tenant_id=tenant_id,
-        report_type=report_type,
-        start_date=start_date,
-        end_date=end_date,
-        format=format
-    )
+    if tenant_id:
+        file_content = ReportService.export_report(
+            db=db,
+            tenant_id=tenant_id,
+            report_type=report_type,
+            start_date=start_date,
+            end_date=end_date,
+            format=format,
+        )
+    else:
+        file_content = ReportService.export_all_tenants_report(
+            db=db,
+            report_type=report_type,
+            start_date=start_date,
+            end_date=end_date,
+            format=format,
+        )
     
     from fastapi.responses import Response
     

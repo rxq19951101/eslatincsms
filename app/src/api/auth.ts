@@ -4,7 +4,7 @@
 
 import apiClient, { handleApiError } from './client';
 import { API_ENDPOINTS } from '../constants/config';
-import { saveTokens, saveUserInfo } from '../utils/tokenManager';
+import { getRefreshToken, saveTokens, saveUserInfo, clearTokens } from '../utils/tokenManager';
 import type { LoginResponse, User } from '../types';
 
 /**
@@ -180,9 +180,14 @@ export const deleteAccount = async (): Promise<{ success: boolean; message: stri
  */
 export const logout = async (): Promise<void> => {
   try {
-    await apiClient.post(API_ENDPOINTS.AUTH.LOGOUT);
+    const refresh_token = await getRefreshToken();
+    if (refresh_token) {
+      await apiClient.post(API_ENDPOINTS.AUTH.LOGOUT, { refresh_token });
+    }
   } catch (error) {
     console.error('Logout error:', error);
     // 即使API调用失败，也要清除本地Token
+  } finally {
+    await clearTokens();
   }
 };

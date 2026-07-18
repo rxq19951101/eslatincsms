@@ -10,17 +10,26 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 
 from app.core.api_logging import log_business_operation
 from app.core.id_generator import generate_order_id
 from app.core.logging_config import get_logger
 from app.core.permissions import get_current_admin_user
-from app.database.base import SuperSessionLocal, get_db
-from app.database.models import AppUser, AppWalletTransaction, Tenant
+from app.database.base import SuperSessionLocal, get_db, tenant_id_context
+from app.database.models import AppUser, AppWalletTransaction, AuditLog, Tenant
+from app.api.validation import StrictRequestModel
 
 logger = get_logger("ocpp_csms")
 
 router = APIRouter()
+
+
+def require_platform_wallet_admin(admin=Depends(get_current_admin_user)):
+    """App 用户钱包是平台级账务，暂只允许平台总管理员操作。"""
+    if not admin.is_super_admin:
+        raise HTTPException(status_code=403, detail="Platform wallet admin access required")
+    return admin
 
 
 class AppUserResponse(BaseModel):
@@ -35,10 +44,11 @@ class AppUserResponse(BaseModel):
     created_at: Optional[str] = None
 
 
-class AdjustBalanceRequest(BaseModel):
+class AdjustBalanceRequest(StrictRequestModel):
     """amount > 0 入账，amount < 0 扣减；调整后余额不得为负。"""
-    amount: Decimal = Field(..., description="调整金额（可为负）")
-    description: Optional[str] = Field(None, description="流水备注")
+    amount: Decimal = Field(..., ne=0, max_digits=10, decimal_places=2, description="调整金额（可为负）")
+    description: str = Field(..., min_length=1, max_length=500, description="调账原因")
+    idempotency_key: str = Field(..., min_length=8, max_length=255, pattern=r"^[A-Za-z0-9._:-]+$")
 
 
 class AdjustBalanceResponse(BaseModel):
@@ -53,7 +63,7 @@ def list_app_users(
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
     q: Optional[str] = Query(None, description="按邮箱/姓名模糊搜索"),
-    _admin=Depends(get_current_admin_user),
+    _admin=Depends(require_platform_wallet_admin),
     db: Session = Depends(get_db),
 ) -> List[AppUserResponse]:
     sdb = SuperSessionLocal()
@@ -93,49 +103,67 @@ def list_app_users(
 def adjust_app_user_balance(
     user_id: UUID,
     req: AdjustBalanceRequest,
-    admin=Depends(get_current_admin_user),
+    admin=Depends(require_platform_wallet_admin),
+    db: Session = Depends(get_db),
 ) -> AdjustBalanceResponse:
-    if req.amount == 0:
-        raise HTTPException(status_code=400, detail="amount must not be zero")
-
-    sdb = SuperSessionLocal()
+    sdb = db
     try:
-        user = sdb.query(AppUser).filter(AppUser.id == user_id).first()
+        user = sdb.query(AppUser).filter(AppUser.id == user_id).with_for_update().first()
         if not user:
             raise HTTPException(status_code=404, detail="App user not found")
 
-        delta = Decimal(str(req.amount))
+        existing = sdb.query(AppWalletTransaction).filter(
+            AppWalletTransaction.app_user_id == user.id,
+            AppWalletTransaction.idempotency_key == req.idempotency_key,
+        ).first()
+        if existing:
+            return AdjustBalanceResponse(
+                id=str(user.id),
+                balance=Decimal(str(user.balance or 0)),
+                transaction_id=existing.transaction_number,
+            )
+
+        delta = req.amount
         current = Decimal(str(user.balance or 0))
         new_balance = current + delta
         if new_balance < 0:
             raise HTTPException(
-                status_code=400,
+                status_code=422,
                 detail=f"Insufficient balance: current={current}, delta={delta}",
             )
 
-        operator_tenant = sdb.query(Tenant).order_by(Tenant.created_at.asc()).first()
+        operator_tenant_id = tenant_id_context.get()
+        operator_tenant = sdb.query(Tenant).filter(Tenant.id == operator_tenant_id).first() if operator_tenant_id else None
         if not operator_tenant:
-            raise HTTPException(status_code=500, detail="No tenant found")
+            raise HTTPException(status_code=403, detail="Tenant context required for wallet adjustment")
 
         user.balance = new_balance
         tx_type = "top_up" if delta > 0 else "charge"
-        desc = req.description or (
-            f"Admin credit ({admin.username})"
-            if delta > 0
-            else f"Admin debit ({admin.username})"
-        )
         tx_id = generate_order_id()
         tx = AppWalletTransaction(
-            id=tx_id,
+            transaction_number=tx_id,
             app_user_id=user.id,
             operator_tenant_id=operator_tenant.id,
             charge_point_id=None,
             type=tx_type,
             amount=delta,
-            description=desc,
+            description=req.description,
+            idempotency_key=req.idempotency_key,
+            adjusted_by_admin_id=admin.id,
         )
         sdb.add(tx)
         sdb.add(user)
+        sdb.add(AuditLog(
+            tenant_id=operator_tenant.id,
+            actor_id=admin.id,
+            actor_type="admin",
+            action="wallet.adjust_balance",
+            resource_type="app_user",
+            resource_id=str(user.id),
+            before_data={"balance": str(current)},
+            after_data={"balance": str(new_balance), "amount": str(delta), "description": req.description},
+            audit_metadata={"transaction_id": tx_id, "idempotency_key": req.idempotency_key},
+        ))
         sdb.commit()
         sdb.refresh(user)
 
@@ -154,15 +182,24 @@ def adjust_app_user_balance(
 
         return AdjustBalanceResponse(
             id=str(user.id),
-            balance=float(user.balance or 0),
+            balance=Decimal(str(user.balance or 0)),
             transaction_id=tx_id,
         )
     except HTTPException:
         sdb.rollback()
         raise
+    except IntegrityError as e:
+        sdb.rollback()
+        existing = sdb.query(AppWalletTransaction).filter(
+            AppWalletTransaction.app_user_id == user_id,
+            AppWalletTransaction.idempotency_key == req.idempotency_key,
+        ).first()
+        if existing:
+            user = sdb.query(AppUser).filter(AppUser.id == user_id).first()
+            return AdjustBalanceResponse(id=str(user_id), balance=Decimal(str(user.balance or 0)), transaction_id=existing.transaction_number)
+        logger.error(f"adjust_app_user_balance integrity error: {e}", exc_info=True)
+        raise HTTPException(status_code=409, detail="Wallet adjustment conflict")
     except Exception as e:
         sdb.rollback()
         logger.error(f"adjust_app_user_balance failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
-    finally:
-        sdb.close()

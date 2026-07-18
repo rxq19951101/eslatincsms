@@ -13,8 +13,60 @@ import json
 logger = get_logger("ocpp_csms")
 
 
+# Central allow-list for mutable runtime configuration. New keys must be
+# deliberately registered here with their storage type and value bounds.
+CONFIG_REGISTRY = {
+    "max_charging_power": ("float", lambda value: 0 < value <= 1000),
+    "default_price_per_kwh": ("float", lambda value: value >= 0),
+    "session_timeout_minutes": ("int", lambda value: 1 <= value <= 1440),
+    "heartbeat_interval": ("int", lambda value: 5 <= value <= 3600),
+    "connection_timeout": ("int", lambda value: 5 <= value <= 3600),
+    "maintenance_mode": ("bool", lambda value: True),
+    "allow_guest_charging": ("bool", lambda value: True),
+    "support_email": ("string", lambda value: 3 <= len(value) <= 200 and "@" in value),
+    "timezone": ("string", lambda value: 1 <= len(value) <= 100),
+    "currency": ("string", lambda value: len(value) == 3 and value.isalpha()),
+    "default_language": ("string", lambda value: value in {"zh", "en", "es"}),
+    "payment_provider": ("string", lambda value: value in {"wompi", "mercadopago"}),
+    "ocpp_version": ("string", lambda value: value in {"1.6J"}),
+}
+
+
 class ConfigService:
     """系统配置服务"""
+
+    @staticmethod
+    def validate_registered_config(config_key: str, config_value: Any, value_type: str) -> tuple[Any, str]:
+        definition = CONFIG_REGISTRY.get(config_key)
+        if not definition:
+            raise ValueError(f"Unregistered config key: {config_key}")
+        expected_type, predicate = definition
+        normalized_type = "int" if value_type == "integer" else value_type
+        if normalized_type != expected_type:
+            raise ValueError(f"Config {config_key} requires value_type={expected_type}")
+        try:
+            if expected_type == "int":
+                if isinstance(config_value, bool):
+                    raise ValueError
+                parsed = int(config_value)
+            elif expected_type == "float":
+                if isinstance(config_value, bool):
+                    raise ValueError
+                parsed = float(config_value)
+            elif expected_type == "bool":
+                if isinstance(config_value, bool):
+                    parsed = config_value
+                elif isinstance(config_value, str) and config_value.lower() in {"true", "false"}:
+                    parsed = config_value.lower() == "true"
+                else:
+                    raise ValueError
+            else:
+                parsed = str(config_value).strip()
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Invalid {expected_type} value for {config_key}") from exc
+        if not predicate(parsed):
+            raise ValueError(f"Config value out of range for {config_key}")
+        return parsed, normalized_type
     
     @staticmethod
     def get_config(
@@ -61,6 +113,10 @@ class ConfigService:
         description: Optional[str] = None
     ) -> SystemConfig:
         """设置配置值"""
+        config_key = config_key.strip()
+        config_value, value_type = ConfigService.validate_registered_config(
+            config_key, config_value, value_type
+        )
         # 查找现有配置
         config = db.query(SystemConfig).filter(
             SystemConfig.tenant_id == (tenant_id if tenant_id else None),

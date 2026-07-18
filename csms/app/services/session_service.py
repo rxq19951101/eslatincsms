@@ -7,11 +7,13 @@ FOR UPDATE，但生产 PostgreSQL 会使用该锁，唯一约束仍负责兜底�
 import logging
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any
+from uuid import UUID
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.id_generator import generate_order_id
+from app.core.asset_identifiers import get_charge_point_by_reference, parse_uuid
 from app.database.base import tenant_id_context
 from app.database.models import ChargingSession, EVSE, EVSEStatus, Order, MeterValue
 from app.domain.charging_session import validate_transition
@@ -31,8 +33,11 @@ class SessionService:
         user_id: Optional[str] = None,
         meter_start: int = 0,
     ) -> ChargingSession:
+        charge_point = get_charge_point_by_reference(db, charge_point_id)
+        if not charge_point:
+            raise ValueError(f"Charge point not found: {charge_point_id}")
         evse = db.query(EVSE).filter(
-            EVSE.charge_point_id == charge_point_id,
+            EVSE.charge_point_id == charge_point.id,
             EVSE.evse_id == evse_id,
         ).with_for_update().first()
         if not evse:
@@ -43,7 +48,7 @@ class SessionService:
             raise ValueError(f"Missing tenant_id for charge_point_id={charge_point_id}, evse_id={evse_id}")
 
         existing = db.query(ChargingSession).filter(
-            ChargingSession.charge_point_id == charge_point_id,
+            ChargingSession.charge_point_id == charge_point.id,
             ChargingSession.evse_id == evse.id,
             ChargingSession.transaction_id == transaction_id,
         ).with_for_update().first()
@@ -65,10 +70,11 @@ class SessionService:
         session = ChargingSession(
             tenant_id=tenant_id,
             evse_id=evse.id,
-            charge_point_id=charge_point_id,
+            charge_point_id=charge_point.id,
             transaction_id=transaction_id,
             id_tag=id_tag,
             user_id=user_id,
+            app_user_id=parse_uuid(user_id),
             start_time=now,
             meter_start=meter_start,
             status="ongoing",
@@ -76,13 +82,14 @@ class SessionService:
         db.add(session)
         db.flush()
 
-        order_id = generate_order_id(charge_point_id=charge_point_id, transaction_id=transaction_id)
+        order_id = generate_order_id(charge_point_id=charge_point.ocpp_identity, transaction_id=transaction_id)
         db.add(Order(
             id=order_id,
             tenant_id=tenant_id,
             session_id=session.id,
-            charge_point_id=charge_point_id,
+            charge_point_id=charge_point.id,
             user_id=user_id or id_tag,
+            app_user_id=parse_uuid(user_id),
             id_tag=id_tag,
             start_time=now,
             status="ongoing",
@@ -100,7 +107,7 @@ class SessionService:
             aggregate_id=str(session.id),
             event_type="ChargingSessionStarted",
             idempotency_key=f"charging-session-started:{session.id}",
-            payload={"session_id": session.id, "transaction_id": transaction_id, "charge_point_id": charge_point_id},
+            payload={"session_id": str(session.id), "transaction_id": transaction_id, "charge_point_id": str(charge_point.id), "ocpp_identity": charge_point.ocpp_identity},
         )
         db.commit()
         db.refresh(session)
@@ -114,8 +121,12 @@ class SessionService:
         transaction_id: int,
         meter_stop: Optional[int] = None,
     ) -> Optional[ChargingSession]:
+        charge_point = get_charge_point_by_reference(db, charge_point_id)
+        if not charge_point:
+            logger.warning("未找到充电桩: charge_point_id=%s", charge_point_id)
+            return None
         session = db.query(ChargingSession).filter(
-            ChargingSession.charge_point_id == charge_point_id,
+            ChargingSession.charge_point_id == charge_point.id,
             ChargingSession.transaction_id == transaction_id,
         ).with_for_update().first()
         if not session:
@@ -155,7 +166,7 @@ class SessionService:
             aggregate_id=str(session.id),
             event_type="ChargingSessionCompleted",
             idempotency_key=f"charging-session-completed:{session.id}",
-            payload={"session_id": session.id, "transaction_id": transaction_id, "meter_stop": meter_stop},
+            payload={"session_id": str(session.id), "transaction_id": transaction_id, "meter_stop": meter_stop},
         )
         db.commit()
         db.refresh(session)
@@ -164,18 +175,27 @@ class SessionService:
 
     @staticmethod
     def get_active_session(db: Session, charge_point_id: str, evse_id: Optional[int] = None) -> Optional[ChargingSession]:
+        charge_point = get_charge_point_by_reference(db, charge_point_id)
+        if not charge_point:
+            return None
         query = db.query(ChargingSession).filter(
-            ChargingSession.charge_point_id == charge_point_id,
+            ChargingSession.charge_point_id == charge_point.id,
             ChargingSession.status == "ongoing",
         )
         if evse_id:
-            query = query.filter(ChargingSession.evse_id == evse_id)
+            evse = db.query(EVSE).filter(
+                EVSE.charge_point_id == charge_point.id,
+                EVSE.evse_id == evse_id,
+            ).first()
+            if not evse:
+                return None
+            query = query.filter(ChargingSession.evse_id == evse.id)
         return query.with_for_update().first()
 
     @staticmethod
     def add_meter_value(
         db: Session,
-        session_id: int,
+        session_id: UUID,
         value: int,
         connector_id: Optional[int] = None,
         sampled_value: Optional[Dict[str, Any]] = None,

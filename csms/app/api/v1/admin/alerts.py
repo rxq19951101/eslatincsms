@@ -9,11 +9,12 @@ from sqlalchemy.orm import Session
 from typing import List, Optional
 from uuid import UUID
 from app.database.base import get_db, tenant_id_context
-from app.database.models import Alert
+from app.database.models import Alert, EVSE
 from app.core.auth import get_current_user
-from app.core.permissions import get_current_admin_user
+from app.core.permissions import require_permission
 from app.services.alert_service import AlertService, AlertRuleService
 from app.core.logging_config import get_logger
+from app.core.asset_identifiers import get_tenant_charge_point_by_reference
 
 logger = get_logger("ocpp_csms")
 
@@ -28,7 +29,7 @@ class CreateAlertRequest(BaseModel):
     title: str
     description: Optional[str] = None
     charge_point_id: Optional[str] = None
-    evse_id: Optional[int] = None
+    evse_id: Optional[UUID] = None
     metadata: Optional[dict] = None
 
 
@@ -36,7 +37,7 @@ class AlertResponse(BaseModel):
     id: str
     tenant_id: str
     charge_point_id: Optional[str]
-    evse_id: Optional[int]
+    evse_id: Optional[str]
     alert_type: str
     severity: str
     status: str
@@ -87,13 +88,19 @@ async def list_alerts(
     severity: Optional[str] = Query(None),
     alert_type: Optional[str] = Query(None),
     charge_point_id: Optional[str] = Query(None),
-    current_user_obj = Depends(get_current_admin_user),
+    current_user_obj = Depends(require_permission("alerts.read")),
     db: Session = Depends(get_db)
 ):
     """获取告警列表"""
     tenant_id = tenant_id_context.get()
     if not tenant_id:
         raise HTTPException(status_code=403, detail="Tenant ID required")
+    resolved_charge_point_id = None
+    if charge_point_id:
+        charge_point = get_tenant_charge_point_by_reference(db, charge_point_id, tenant_id)
+        if not charge_point:
+            raise HTTPException(status_code=404, detail="Charge point not found")
+        resolved_charge_point_id = charge_point.id
     
     alerts = AlertService.list_alerts(
         db=db,
@@ -103,15 +110,15 @@ async def list_alerts(
         status=status,
         severity=severity,
         alert_type=alert_type,
-        charge_point_id=charge_point_id
+        charge_point_id=resolved_charge_point_id
     )
     
     return [
         AlertResponse(
             id=str(a.id),
             tenant_id=str(a.tenant_id),
-            charge_point_id=a.charge_point_id,
-            evse_id=a.evse_id,
+            charge_point_id=str(a.charge_point_id) if a.charge_point_id else None,
+            evse_id=str(a.evse_id) if a.evse_id else None,
             alert_type=a.alert_type,
             severity=a.severity,
             status=a.status,
@@ -132,13 +139,33 @@ async def list_alerts(
 @router.post("", response_model=AlertResponse, summary="创建告警（手动）")
 async def create_alert(
     request_data: CreateAlertRequest,
-    current_user_obj = Depends(get_current_admin_user),
+    current_user_obj = Depends(require_permission("alerts.write")),
     db: Session = Depends(get_db)
 ):
     """创建告警（手动）"""
     tenant_id = tenant_id_context.get()
     if not tenant_id:
         raise HTTPException(status_code=403, detail="Tenant ID required")
+    resolved_charge_point_id = None
+    if request_data.charge_point_id:
+        charge_point = get_tenant_charge_point_by_reference(
+            db, request_data.charge_point_id, tenant_id
+        )
+        if not charge_point:
+            raise HTTPException(status_code=404, detail="Charge point not found")
+        resolved_charge_point_id = charge_point.id
+    resolved_evse_id = None
+    if request_data.evse_id:
+        evse_query = db.query(EVSE).filter(
+            EVSE.id == request_data.evse_id,
+            EVSE.tenant_id == tenant_id,
+        )
+        if resolved_charge_point_id:
+            evse_query = evse_query.filter(EVSE.charge_point_id == resolved_charge_point_id)
+        evse = evse_query.first()
+        if not evse:
+            raise HTTPException(status_code=404, detail="EVSE not found")
+        resolved_evse_id = evse.id
     
     try:
         alert = AlertService.create_alert(
@@ -148,8 +175,8 @@ async def create_alert(
             severity=request_data.severity,
             title=request_data.title,
             description=request_data.description,
-            charge_point_id=request_data.charge_point_id,
-            evse_id=request_data.evse_id,
+            charge_point_id=resolved_charge_point_id,
+            evse_id=resolved_evse_id,
             metadata=request_data.metadata
         )
     except Exception as e:
@@ -158,8 +185,8 @@ async def create_alert(
     return AlertResponse(
         id=str(alert.id),
         tenant_id=str(alert.tenant_id),
-        charge_point_id=alert.charge_point_id,
-        evse_id=alert.evse_id,
+        charge_point_id=str(alert.charge_point_id) if alert.charge_point_id else None,
+        evse_id=str(alert.evse_id) if alert.evse_id else None,
         alert_type=alert.alert_type,
         severity=alert.severity,
         status=alert.status,
@@ -174,22 +201,25 @@ async def create_alert(
     )
 
 
-@router.get("/{alert_id}", response_model=AlertResponse, summary="获取告警详情")
+@router.get("/{alert_id:uuid}", response_model=AlertResponse, summary="获取告警详情")
 async def get_alert(
     alert_id: UUID,
-    current_user_obj = Depends(get_current_admin_user),
+    current_user_obj = Depends(require_permission("alerts.read")),
     db: Session = Depends(get_db)
 ):
     """获取告警详情"""
-    alert = AlertService.get_alert_by_id(db, alert_id)
+    tenant_id = tenant_id_context.get()
+    if not tenant_id:
+        raise HTTPException(status_code=403, detail="Tenant ID required")
+    alert = AlertService.get_alert_by_id(db, alert_id, tenant_id=tenant_id)
     if not alert:
         raise HTTPException(status_code=404, detail="Alert not found")
     
     return AlertResponse(
         id=str(alert.id),
         tenant_id=str(alert.tenant_id),
-        charge_point_id=alert.charge_point_id,
-        evse_id=alert.evse_id,
+        charge_point_id=str(alert.charge_point_id) if alert.charge_point_id else None,
+        evse_id=str(alert.evse_id) if alert.evse_id else None,
         alert_type=alert.alert_type,
         severity=alert.severity,
         status=alert.status,
@@ -207,14 +237,18 @@ async def get_alert(
 @router.put("/{alert_id}/acknowledge", response_model=AlertResponse, summary="确认告警")
 async def acknowledge_alert(
     alert_id: UUID,
-    current_user_obj = Depends(get_current_admin_user),
+    current_user_obj = Depends(require_permission("alerts.write")),
     db: Session = Depends(get_db)
 ):
     """确认告警"""
+    tenant_id = tenant_id_context.get()
+    if not tenant_id:
+        raise HTTPException(status_code=403, detail="Tenant ID required")
     alert = AlertService.acknowledge_alert(
         db=db,
         alert_id=alert_id,
-        acknowledged_by=current_user_obj.id
+        acknowledged_by=current_user_obj.id,
+        tenant_id=tenant_id
     )
     
     if not alert:
@@ -223,8 +257,8 @@ async def acknowledge_alert(
     return AlertResponse(
         id=str(alert.id),
         tenant_id=str(alert.tenant_id),
-        charge_point_id=alert.charge_point_id,
-        evse_id=alert.evse_id,
+        charge_point_id=str(alert.charge_point_id) if alert.charge_point_id else None,
+        evse_id=str(alert.evse_id) if alert.evse_id else None,
         alert_type=alert.alert_type,
         severity=alert.severity,
         status=alert.status,
@@ -242,11 +276,14 @@ async def acknowledge_alert(
 @router.put("/{alert_id}/resolve", response_model=AlertResponse, summary="解决告警")
 async def resolve_alert(
     alert_id: UUID,
-    current_user_obj = Depends(get_current_admin_user),
+    current_user_obj = Depends(require_permission("alerts.write")),
     db: Session = Depends(get_db)
 ):
     """解决告警"""
-    alert = AlertService.resolve_alert(db=db, alert_id=alert_id)
+    tenant_id = tenant_id_context.get()
+    if not tenant_id:
+        raise HTTPException(status_code=403, detail="Tenant ID required")
+    alert = AlertService.resolve_alert(db=db, alert_id=alert_id, tenant_id=tenant_id)
     
     if not alert:
         raise HTTPException(status_code=404, detail="Alert not found")
@@ -254,8 +291,8 @@ async def resolve_alert(
     return AlertResponse(
         id=str(alert.id),
         tenant_id=str(alert.tenant_id),
-        charge_point_id=alert.charge_point_id,
-        evse_id=alert.evse_id,
+        charge_point_id=str(alert.charge_point_id) if alert.charge_point_id else None,
+        evse_id=str(alert.evse_id) if alert.evse_id else None,
         alert_type=alert.alert_type,
         severity=alert.severity,
         status=alert.status,
@@ -272,7 +309,7 @@ async def resolve_alert(
 
 @router.get("/statistics", summary="获取告警统计")
 async def get_alert_statistics(
-    current_user_obj = Depends(get_current_admin_user),
+    current_user_obj = Depends(require_permission("alerts.read")),
     db: Session = Depends(get_db)
 ):
     """获取告警统计信息"""
@@ -289,7 +326,7 @@ async def get_alert_statistics(
 @router.get("/rules", response_model=List[AlertRuleResponse], summary="获取告警规则列表")
 async def list_alert_rules(
     is_enabled: Optional[bool] = Query(None),
-    current_user_obj = Depends(get_current_admin_user),
+    current_user_obj = Depends(require_permission("alert_rules.read")),
     db: Session = Depends(get_db)
 ):
     """获取告警规则列表"""
@@ -322,14 +359,13 @@ async def list_alert_rules(
 @router.post("/rules", response_model=AlertRuleResponse, summary="创建告警规则")
 async def create_alert_rule(
     request_data: CreateAlertRuleRequest,
-    current_user_obj = Depends(get_current_admin_user),
+    current_user_obj = Depends(require_permission("alert_rules.write")),
     db: Session = Depends(get_db)
 ):
     """创建告警规则"""
     tenant_id = tenant_id_context.get()
     if not tenant_id:
         raise HTTPException(status_code=403, detail="Tenant ID required")
-    
     try:
         rule = AlertRuleService.create_alert_rule(
             db=db,
@@ -360,10 +396,13 @@ async def create_alert_rule(
 async def update_alert_rule(
     rule_id: UUID,
     request_data: UpdateAlertRuleRequest,
-    current_user_obj = Depends(get_current_admin_user),
+    current_user_obj = Depends(require_permission("alert_rules.write")),
     db: Session = Depends(get_db)
 ):
     """更新告警规则"""
+    tenant_id = tenant_id_context.get()
+    if not tenant_id:
+        raise HTTPException(status_code=403, detail="Tenant ID required")
     try:
         rule = AlertRuleService.update_alert_rule(
             db=db,
@@ -371,7 +410,8 @@ async def update_alert_rule(
             name=request_data.name,
             conditions=request_data.conditions,
             severity=request_data.severity,
-            is_enabled=request_data.is_enabled
+            is_enabled=request_data.is_enabled,
+            tenant_id=tenant_id
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -395,11 +435,14 @@ async def update_alert_rule(
 @router.delete("/rules/{rule_id}", summary="删除告警规则")
 async def delete_alert_rule(
     rule_id: UUID,
-    current_user_obj = Depends(get_current_admin_user),
+    current_user_obj = Depends(require_permission("alert_rules.write")),
     db: Session = Depends(get_db)
 ):
     """删除告警规则"""
-    success = AlertRuleService.delete_alert_rule(db, rule_id)
+    tenant_id = tenant_id_context.get()
+    if not tenant_id:
+        raise HTTPException(status_code=403, detail="Tenant ID required")
+    success = AlertRuleService.delete_alert_rule(db, rule_id, tenant_id=tenant_id)
     if not success:
         raise HTTPException(status_code=404, detail="Alert rule not found")
     

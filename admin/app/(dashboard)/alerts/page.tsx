@@ -2,7 +2,7 @@
 
 import { useState } from 'react';
 import useSWR from 'swr';
-import { apiGet, apiPost } from '@/lib/api';
+import { apiGet, apiPut } from '@/lib/api';
 import { API_ENDPOINTS } from '@/lib/constants';
 import { Alert } from '@/types';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -11,6 +11,7 @@ import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Search, AlertTriangle, CheckCircle, XCircle } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
+import { useI18n } from '@/lib/i18n';
 
 const fetcher = (url: string) => apiGet<Alert[]>(url);
 
@@ -18,6 +19,7 @@ export default function AlertsPage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [severityFilter, setSeverityFilter] = useState<string>('all');
   const [statusFilter, setStatusFilter] = useState<string>('all');
+  const { t, locale } = useI18n();
 
   const { data: alerts, error, isLoading, mutate } = useSWR<Alert[]>(
     API_ENDPOINTS.ALERTS,
@@ -29,8 +31,7 @@ export default function AlertsPage() {
 
   const filteredAlerts = alerts?.filter((alert) => {
     const matchesSearch =
-      alert.id.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      alert.charge_point_id?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      alert.ocpp_identity?.toLowerCase().includes(searchQuery.toLowerCase()) ||
       alert.description.toLowerCase().includes(searchQuery.toLowerCase());
     const matchesSeverity = severityFilter === 'all' || alert.severity === severityFilter;
     const matchesStatus = statusFilter === 'all' || alert.status === statusFilter;
@@ -39,23 +40,23 @@ export default function AlertsPage() {
 
   const handleAcknowledge = async (alertId: string) => {
     try {
-      await apiPost(API_ENDPOINTS.ALERT_ACKNOWLEDGE(alertId), {});
+      await apiPut(API_ENDPOINTS.ALERT_ACKNOWLEDGE(alertId));
       mutate();
-      alert('告警已确认');
+      alert(t('告警已确认'));
     } catch (error) {
       console.error('Acknowledge failed:', error);
-      alert('确认失败');
+      alert(t('确认失败'));
     }
   };
 
   const handleResolve = async (alertId: string) => {
     try {
-      await apiPost(API_ENDPOINTS.ALERT_RESOLVE(alertId), {});
+      await apiPut(API_ENDPOINTS.ALERT_RESOLVE(alertId));
       mutate();
-      alert('告警已解决');
+      alert(t('告警已解决'));
     } catch (error) {
       console.error('Resolve failed:', error);
-      alert('解决失败');
+      alert(t('解决失败'));
     }
   };
 
@@ -75,7 +76,7 @@ export default function AlertsPage() {
   if (isLoading) {
     return (
       <div className="flex items-center justify-center h-full">
-        <div className="text-slate-400">加载中...</div>
+        <div className="text-slate-400">{t('加载中...')}</div>
       </div>
     );
   }
@@ -83,7 +84,7 @@ export default function AlertsPage() {
   if (error) {
     return (
       <div className="flex items-center justify-center h-full">
-        <div className="text-red-400">加载失败，请刷新页面重试</div>
+        <div className="text-red-400">{t('加载失败，请刷新页面重试')}</div>
       </div>
     );
   }
@@ -91,8 +92,8 @@ export default function AlertsPage() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-3xl font-bold text-white">告警管理</h1>
-        <p className="text-slate-400 mt-1">查看和处理系统告警</p>
+        <h1 className="text-3xl font-bold text-white">{t('告警管理')}</h1>
+        <p className="text-slate-400 mt-1">{t('查看和处理系统告警')}</p>
       </div>
 
       <Card className="bg-slate-800/80 backdrop-blur-sm border-slate-700">
@@ -102,7 +103,7 @@ export default function AlertsPage() {
               <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 h-4 w-4 text-slate-400" />
               <Input
                 type="text"
-                placeholder="搜索告警 ID、充电桩 ID、描述..."
+                placeholder={t('搜索 OCPP 身份、描述...')}
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 className="pl-10 bg-slate-700/50 border-slate-600"
@@ -110,24 +111,24 @@ export default function AlertsPage() {
             </div>
             <Select value={severityFilter} onValueChange={setSeverityFilter}>
               <SelectTrigger className="w-full md:w-[180px] bg-slate-700/50 border-slate-600">
-                <SelectValue placeholder="严重程度" />
+                <SelectValue placeholder={t('严重程度')} />
               </SelectTrigger>
               <SelectContent className="bg-slate-800 border-slate-700">
-                <SelectItem value="all">全部</SelectItem>
-                <SelectItem value="critical">严重</SelectItem>
-                <SelectItem value="warning">警告</SelectItem>
-                <SelectItem value="info">信息</SelectItem>
+                <SelectItem value="all">{t('全部')}</SelectItem>
+                <SelectItem value="critical">{t('严重')}</SelectItem>
+                <SelectItem value="warning">{t('警告')}</SelectItem>
+                <SelectItem value="info">{t('信息')}</SelectItem>
               </SelectContent>
             </Select>
             <Select value={statusFilter} onValueChange={setStatusFilter}>
               <SelectTrigger className="w-full md:w-[180px] bg-slate-700/50 border-slate-600">
-                <SelectValue placeholder="状态" />
+                <SelectValue placeholder={t('状态')} />
               </SelectTrigger>
               <SelectContent className="bg-slate-800 border-slate-700">
-                <SelectItem value="all">全部</SelectItem>
-                <SelectItem value="pending">待处理</SelectItem>
-                <SelectItem value="acknowledged">已确认</SelectItem>
-                <SelectItem value="resolved">已解决</SelectItem>
+                <SelectItem value="all">{t('全部')}</SelectItem>
+                <SelectItem value="pending">{t('待处理')}</SelectItem>
+                <SelectItem value="acknowledged">{t('已确认')}</SelectItem>
+                <SelectItem value="resolved">{t('已解决')}</SelectItem>
               </SelectContent>
             </Select>
           </div>
@@ -149,9 +150,9 @@ export default function AlertsPage() {
                       alert.severity === 'warning' ? 'text-yellow-400' : 'text-blue-400'
                     }`} />
                     <div>
-                      <CardTitle className="text-white text-lg">{alert.type}</CardTitle>
+                      <CardTitle className="text-white text-lg">{t(alert.title)}</CardTitle>
                       <Badge className={`mt-2 ${getSeverityColor(alert.severity)}`}>
-                        {alert.severity}
+                        {t(alert.severity)}
                       </Badge>
                     </div>
                   </div>
@@ -159,19 +160,21 @@ export default function AlertsPage() {
               </CardHeader>
               <CardContent className="space-y-4">
                 <div>
-                  <p className="text-sm text-slate-400">描述</p>
-                  <p className="text-white mt-1">{alert.description}</p>
+                  <p className="text-sm text-slate-400">{t('描述')}</p>
+                  <p className="text-white mt-1">{t(alert.description)}</p>
                 </div>
-                {alert.charge_point_id && (
+                {alert.ocpp_identity && (
                   <div>
-                    <p className="text-sm text-slate-400">充电桩 ID</p>
-                    <p className="text-white mt-1">{alert.charge_point_id}</p>
+                    <p className="text-sm text-slate-400">{t('OCPP 身份')}</p>
+                    <p className="text-white mt-1">{alert.ocpp_identity}</p>
                   </div>
                 )}
                 <div>
-                  <p className="text-sm text-slate-400">发生时间</p>
+                  <p className="text-sm text-slate-400">{t('发生时间')}</p>
                   <p className="text-white mt-1">
-                    {new Date(alert.created_at).toLocaleString('zh-CN')}
+                    {new Date(alert.created_at).toLocaleString(
+                      locale === 'en' ? 'en-US' : locale === 'es' ? 'es-ES' : 'zh-CN'
+                    )}
                   </p>
                 </div>
                 <div className="flex gap-2 pt-2">
@@ -183,7 +186,7 @@ export default function AlertsPage() {
                         className="flex-1 bg-yellow-600 hover:bg-yellow-700"
                       >
                         <CheckCircle className="h-4 w-4 mr-2" />
-                        确认
+                        {t('确认')}
                       </Button>
                       <Button
                         size="sm"
@@ -191,7 +194,7 @@ export default function AlertsPage() {
                         className="flex-1 bg-green-600 hover:bg-green-700"
                       >
                         <XCircle className="h-4 w-4 mr-2" />
-                        解决
+                        {t('解决')}
                       </Button>
                     </>
                   )}
@@ -202,12 +205,12 @@ export default function AlertsPage() {
                       className="flex-1 bg-green-600 hover:bg-green-700"
                     >
                       <XCircle className="h-4 w-4 mr-2" />
-                      解决
+                      {t('解决')}
                     </Button>
                   )}
                   {alert.status === 'resolved' && (
-                    <div className="flex-1 text-center text-sm text-slate-400">
-                      已解决
+                      <div className="flex-1 text-center text-sm text-slate-400">
+                      {t('已解决')}
                     </div>
                   )}
                 </div>
@@ -217,7 +220,7 @@ export default function AlertsPage() {
         ) : (
           <div className="col-span-full text-center py-12">
             <AlertTriangle className="h-12 w-12 text-slate-500 mx-auto mb-4" />
-            <p className="text-slate-400">没有找到告警</p>
+            <p className="text-slate-400">{t('没有找到告警')}</p>
           </div>
         )}
       </div>
@@ -236,31 +239,32 @@ interface AlertRule {
 }
 
 function AlertRulesSection() {
+  const { t } = useI18n();
   const { data: rules, isLoading } = useSWR<AlertRule[]>(
     API_ENDPOINTS.ALERT_RULES,
-    (url) => apiGet<AlertRule[]>(url)
+    (url: string) => apiGet<AlertRule[]>(url)
   );
 
   return (
     <Card className="bg-slate-800/80 backdrop-blur-sm border-slate-700">
       <CardHeader>
-        <CardTitle className="text-white">告警规则</CardTitle>
+        <CardTitle className="text-white">{t('告警规则')}</CardTitle>
       </CardHeader>
       <CardContent>
         {isLoading ? (
-          <p className="text-slate-400">加载规则...</p>
+          <p className="text-slate-400">{t('加载规则...')}</p>
         ) : !rules?.length ? (
-          <p className="text-slate-400">暂无告警规则，可通过 API 创建</p>
+          <p className="text-slate-400">{t('暂无告警规则，可通过 API 创建')}</p>
         ) : (
           <div className="space-y-2">
             {rules.map((rule) => (
               <div key={rule.id} className="flex items-center justify-between p-3 bg-slate-700/30 rounded-lg">
                 <div>
-                  <p className="text-white font-medium">{rule.name}</p>
-                  <p className="text-slate-400 text-sm">{rule.alert_type} · {rule.severity}</p>
+                  <p className="text-white font-medium">{t(rule.name)}</p>
+                  <p className="text-slate-400 text-sm">{t(rule.alert_type)} · {t(rule.severity)}</p>
                 </div>
                 <Badge variant={rule.is_enabled ? 'default' : 'secondary'}>
-                  {rule.is_enabled ? '启用' : '禁用'}
+                  {rule.is_enabled ? t('启用') : t('禁用')}
                 </Badge>
               </div>
             ))}

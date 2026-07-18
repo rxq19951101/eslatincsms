@@ -30,7 +30,7 @@ except (AttributeError, ValueError, TypeError) as e:
     pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 
 # HTTP Bearer认证
-security = HTTPBearer()
+security = HTTPBearer(auto_error=False)
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
@@ -52,7 +52,7 @@ def create_access_token(
     
     JWT Payload 包含：
     - user_id: 用户ID
-    - user_type: 用户类型（admin / end_user）
+    - user_type: 用户类型（admin / app_user）
     - global_role: 全局角色（是否为 platform super admin）
     - aud: Token audience（admin / app）
     - iss: Issuer
@@ -155,18 +155,24 @@ def verify_token(token: str, audience: Optional[str] = None) -> Optional[Dict[st
 
 async def get_current_user(
     request: Request,
-    credentials: HTTPAuthorizationCredentials = Security(security)
+    credentials: Optional[HTTPAuthorizationCredentials] = Security(security)
 ) -> Dict[str, Any]:
     """
     获取当前用户（从JWT令牌）
     
     返回的 payload 包含：
     - user_id: 用户ID
-    - user_type: 用户类型（admin / end_user）
+    - user_type: 用户类型（admin / app_user）
     - global_role: 全局角色（是否为 platform super admin）
     - aud: Token audience
     - jti: JWT ID
     """
+    if credentials is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     token = credentials.credentials
     payload = verify_token(token)
     

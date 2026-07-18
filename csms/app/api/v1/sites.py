@@ -8,17 +8,20 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, or_
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.id_generator import generate_site_id
+from app.core.asset_identifiers import OCPP_IDENTITY_PATTERN, get_charge_point_by_reference, get_site_by_reference
 from app.core.logging_config import get_logger
 from app.core.permissions import get_current_admin_user
 from app.database.base import get_db, tenant_id_context
 from app.database.models import ChargePoint, EVSE, EVSEStatus, Site, Tariff
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from app.api.validation import OperatingHours, SiteCoordinatesMixin, StrictRequestModel, TrimmedAddress, TrimmedSiteName
 
 # 与站点详情、充电桩列表一致：5 分钟内有 EVSE 心跳视为在线
 ONLINE_THRESHOLD_SECONDS = 300
@@ -30,28 +33,27 @@ logger = get_logger("ocpp_csms")
 router = APIRouter()
 
 
-class SiteCreateRequest(BaseModel):
-    name: str = Field(..., min_length=1)
-    address: str = Field(..., min_length=1)
-    latitude: float
-    longitude: float
+class SiteCreateRequest(SiteCoordinatesMixin):
+    name: TrimmedSiteName
+    address: TrimmedAddress
+    latitude: float = Field(..., ge=-90, le=90, allow_inf_nan=False)
+    longitude: float = Field(..., ge=-180, le=180, allow_inf_nan=False)
     is_active: bool = True
-    operating_hours: Optional[str] = None
-    domain: Optional[str] = None  # 预留字段（与 tenants.domain 区分，仅做展示/过滤用途）
+    operating_hours: Optional[OperatingHours] = None
+    domain: Optional[str] = Field(None, max_length=200)  # 预留展示字段
 
 
-class SiteUpdateRequest(BaseModel):
-    name: Optional[str] = Field(None, min_length=1)
-    address: Optional[str] = Field(None, min_length=1)
-    latitude: Optional[float] = None
-    longitude: Optional[float] = None
+class SiteUpdateRequest(SiteCoordinatesMixin):
+    name: Optional[TrimmedSiteName] = None
+    address: Optional[TrimmedAddress] = None
     is_active: Optional[bool] = None
-    operating_hours: Optional[str] = None
-    domain: Optional[str] = None
+    operating_hours: Optional[OperatingHours] = None
+    domain: Optional[str] = Field(None, max_length=200)
 
 
 class SiteListItem(BaseModel):
     id: str
+    site_code: str
     name: str
     address: str
     latitude: float
@@ -67,6 +69,7 @@ class SiteListItem(BaseModel):
 
 class SiteDetailChargePoint(BaseModel):
     id: str
+    ocpp_identity: str
     vendor: Optional[str]
     model: Optional[str]
     status: str
@@ -77,6 +80,7 @@ class SiteDetailChargePoint(BaseModel):
 
 class SiteDetailResponse(BaseModel):
     id: str
+    site_code: str
     name: str
     address: str
     latitude: float
@@ -99,7 +103,7 @@ class SitePricingUpdateRequest(BaseModel):
 
 class SitePricingResponse(BaseModel):
     site_id: str
-    tariff_id: int
+    tariff_id: str
     base_price_per_kwh: Decimal
     service_fee: Decimal
     valid_from: str
@@ -114,6 +118,18 @@ def _require_tenant_id_for_create(current_user_obj) -> Optional[str]:
     if not tenant_id:
         raise HTTPException(status_code=403, detail="Tenant ID required")
     return str(tenant_id)
+
+
+def _get_scoped_site(db: Session, reference: str, current_user_obj) -> Site:
+    site = get_site_by_reference(db, reference)
+    if not site:
+        raise HTTPException(status_code=404, detail="Site not found")
+    tenant_id = tenant_id_context.get()
+    if tenant_id and site.tenant_id != tenant_id:
+        raise HTTPException(status_code=403, detail="Site belongs to another tenant")
+    if not tenant_id and not current_user_obj.is_super_admin:
+        raise HTTPException(status_code=403, detail="Tenant ID required")
+    return site
 
 
 @router.get("", response_model=List[SiteListItem], summary="获取站点列表")
@@ -136,7 +152,7 @@ def list_sites(
 
     if q:
         like = f"%{q.strip()}%"
-        base = base.filter(or_(Site.id.ilike(like), Site.name.ilike(like), Site.address.ilike(like)))
+        base = base.filter(or_(Site.site_code.ilike(like), Site.name.ilike(like), Site.address.ilike(like)))
 
     # 统计：每站点的充电桩数量
     cp_count_sq = (
@@ -172,7 +188,8 @@ def list_sites(
         # domain 目前不在 Site 表中；为了不影响 DB schema，这里仅从 settings/operating_hours 等扩展字段不读取。
         result.append(
             SiteListItem(
-                id=site.id,
+                id=str(site.id),
+                site_code=site.site_code,
                 name=site.name,
                 address=site.address,
                 latitude=site.latitude,
@@ -199,9 +216,8 @@ def create_site(
     tenant_id = tenant_id_context.get()
     assert tenant_id is not None
 
-    site_id = generate_site_id(req.name)
     site = Site(
-        id=site_id,
+        site_code=generate_site_id(req.name),
         tenant_id=tenant_id,
         name=req.name,
         address=req.address,
@@ -211,11 +227,16 @@ def create_site(
         operating_hours=req.operating_hours,
     )
     db.add(site)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Site identifier already exists") from exc
     db.refresh(site)
 
     return SiteDetailResponse(
-        id=site.id,
+        id=str(site.id),
+        site_code=site.site_code,
         name=site.name,
         address=site.address,
         latitude=site.latitude,
@@ -236,13 +257,7 @@ def get_site_detail(
     current_user_obj=Depends(get_current_admin_user),
     db: Session = Depends(get_db),
 ) -> SiteDetailResponse:
-    tenant_id = tenant_id_context.get()
-    q = db.query(Site).filter(Site.id == site_id)
-    if tenant_id and not current_user_obj.is_super_admin:
-        q = q.filter(Site.tenant_id == tenant_id)
-    site = q.first()
-    if not site:
-        raise HTTPException(status_code=404, detail="Site not found")
+    site = _get_scoped_site(db, site_id, current_user_obj)
 
     # 站点价格（站点级 tariff：取 active 的第一条）
     now = datetime.now(timezone.utc)
@@ -302,18 +317,20 @@ def get_site_detail(
         
         charge_points.append(
             SiteDetailChargePoint(
-                id=cp.id,
+                id=str(cp.id),
+                ocpp_identity=cp.ocpp_identity,
                 vendor=cp.vendor,
                 model=cp.model,
                 status=status_to_use,
                 last_seen=last_seen_dt.isoformat() if last_seen_dt else None,
-                site_id=site.id,
+                site_id=str(site.id),
                 site_name=site.name,
             )
         )
 
     return SiteDetailResponse(
-        id=site.id,
+        id=str(site.id),
+        site_code=site.site_code,
         name=site.name,
         address=site.address,
         latitude=site.latitude,
@@ -335,13 +352,15 @@ def update_site(
     current_user_obj=Depends(get_current_admin_user),
     db: Session = Depends(get_db),
 ) -> SiteDetailResponse:
-    tenant_id = tenant_id_context.get()
-    q = db.query(Site).filter(Site.id == site_id)
-    if tenant_id and not current_user_obj.is_super_admin:
-        q = q.filter(Site.tenant_id == tenant_id)
-    site = q.first()
-    if not site:
-        raise HTTPException(status_code=404, detail="Site not found")
+    site = _get_scoped_site(db, site_id, current_user_obj)
+
+    final_latitude = req.latitude if req.latitude is not None else site.latitude
+    final_longitude = req.longitude if req.longitude is not None else site.longitude
+    if final_latitude == 0 and final_longitude == 0:
+        raise HTTPException(
+            status_code=422,
+            detail=[{"type": "value_error", "loc": ["body", "latitude"], "msg": "latitude and longitude must not both be zero", "input": [final_latitude, final_longitude]}],
+        )
 
     if req.name is not None:
         site.name = req.name
@@ -384,12 +403,7 @@ def update_site_pricing(
     if not current_user_obj.is_super_admin and not has_permission(perms, "tariffs.edit"):
         raise HTTPException(status_code=403, detail="Permission denied")
 
-    q = db.query(Site).filter(Site.id == site_id)
-    if tenant_id and not current_user_obj.is_super_admin:
-        q = q.filter(Site.tenant_id == tenant_id)
-    site = q.first()
-    if not site:
-        raise HTTPException(status_code=404, detail="Site not found")
+    site = _get_scoped_site(db, site_id, current_user_obj)
 
     now = datetime.now(timezone.utc)
 
@@ -413,7 +427,7 @@ def update_site_pricing(
     service_fee = float(req.service_fee) if req.service_fee is not None else 0.0
     new_tariff = Tariff(
         tenant_id=site.tenant_id,
-        site_id=site.id,
+        site_id=str(site.id),
         charge_point_id=None,
         name="站点默认定价",
         base_price_per_kwh=req.base_price_per_kwh,
@@ -427,8 +441,8 @@ def update_site_pricing(
     db.refresh(new_tariff)
 
     return SitePricingResponse(
-        site_id=site.id,
-        tariff_id=new_tariff.id,
+        site_id=str(site.id),
+        tariff_id=str(new_tariff.id),
         base_price_per_kwh=float(new_tariff.base_price_per_kwh),
         service_fee=float(new_tariff.service_fee or 0),
         valid_from=new_tariff.valid_from.isoformat() if new_tariff.valid_from else "",
@@ -441,13 +455,7 @@ def delete_site(
     current_user_obj=Depends(get_current_admin_user),
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
-    tenant_id = tenant_id_context.get()
-    q = db.query(Site).filter(Site.id == site_id)
-    if tenant_id and not current_user_obj.is_super_admin:
-        q = q.filter(Site.tenant_id == tenant_id)
-    site = q.first()
-    if not site:
-        raise HTTPException(status_code=404, detail="Site not found")
+    site = _get_scoped_site(db, site_id, current_user_obj)
 
     cp_count = db.query(func.count(ChargePoint.id)).filter(ChargePoint.site_id == site.id).scalar() or 0
     if cp_count > 0:
@@ -473,23 +481,18 @@ def list_bindable_charge_points(
     - auto site: site.name == '站点-{charge_point_id}' 或 site.id == 'site-{charge_point_id}'
     """
     tenant_id = tenant_id_context.get()
-    site_q = db.query(Site).filter(Site.id == site_id)
-    if tenant_id and not current_user_obj.is_super_admin:
-        site_q = site_q.filter(Site.tenant_id == tenant_id)
-    target_site = site_q.first()
-    if not target_site:
-        raise HTTPException(status_code=404, detail="Site not found")
+    target_site = _get_scoped_site(db, site_id, current_user_obj)
 
     cp_q = db.query(ChargePoint).join(Site, Site.id == ChargePoint.site_id)
     if tenant_id and not current_user_obj.is_super_admin:
         cp_q = cp_q.filter(ChargePoint.tenant_id == tenant_id)
 
     # 排除已经属于目标站点的
-    cp_q = cp_q.filter(ChargePoint.site_id != site_id)
+    cp_q = cp_q.filter(ChargePoint.site_id != target_site.id)
 
     auto_site_rule = or_(
-        Site.name == func.concat("站点-", ChargePoint.id),
-        Site.id == func.concat("site-", ChargePoint.id),
+        Site.name == func.concat("站点-", ChargePoint.ocpp_identity),
+        Site.site_code == func.concat("site-", ChargePoint.ocpp_identity),
     )
     cps = cp_q.filter(auto_site_rule).all()
 
@@ -524,19 +527,20 @@ def list_bindable_charge_points(
         curr_site = cp.site
         result.append(
             SiteDetailChargePoint(
-                id=cp.id,
+                id=str(cp.id),
+                ocpp_identity=cp.ocpp_identity,
                 vendor=cp.vendor,
                 model=cp.model,
                 status=st["status"],
                 last_seen=st["last_seen"],
-                site_id=cp.site_id,
+                site_id=str(cp.site_id),
                 site_name=curr_site.name if curr_site else None,
             )
         )
     return result
 
 
-class BindChargePointsRequest(BaseModel):
+class BindChargePointsRequest(StrictRequestModel):
     charge_point_ids: List[str] = Field(..., min_length=1)
     force_move: bool = False
 
@@ -550,25 +554,22 @@ def bind_charge_points(
 ) -> Dict[str, Any]:
     tenant_id = tenant_id_context.get()
 
-    site_q = db.query(Site).filter(Site.id == site_id)
-    if tenant_id and not current_user_obj.is_super_admin:
-        site_q = site_q.filter(Site.tenant_id == tenant_id)
-    target_site = site_q.first()
-    if not target_site:
-        raise HTTPException(status_code=404, detail="Site not found")
+    target_site = _get_scoped_site(db, site_id, current_user_obj)
 
     # 读取 charge points（按租户约束）
-    cp_q = db.query(ChargePoint).filter(ChargePoint.id.in_(req.charge_point_ids))
-    if tenant_id and not current_user_obj.is_super_admin:
-        cp_q = cp_q.filter(ChargePoint.tenant_id == tenant_id)
-    cps = cp_q.all()
-    found_ids = {cp.id for cp in cps}
-    missing = [cp_id for cp_id in req.charge_point_ids if cp_id not in found_ids]
+    cps = []
+    missing = []
+    for reference in req.charge_point_ids:
+        cp = get_charge_point_by_reference(db, reference)
+        if cp is None:
+            missing.append(reference)
+        else:
+            cps.append(cp)
     if missing:
         raise HTTPException(status_code=404, detail={"message": "Charge points not found", "missing": missing})
 
     # 跨租户保护：即使 super_admin，也禁止把不同 tenant 的 CP 绑到该站点
-    conflicts_tenant = [cp.id for cp in cps if str(cp.tenant_id) != str(target_site.tenant_id)]
+    conflicts_tenant = [cp.ocpp_identity for cp in cps if cp.tenant_id != target_site.tenant_id]
     if conflicts_tenant:
         raise HTTPException(
             status_code=400,
@@ -576,7 +577,7 @@ def bind_charge_points(
         )
 
     # 冲突：已经在其他站点
-    move_conflicts = [cp.id for cp in cps if cp.site_id != site_id]
+    move_conflicts = [cp.ocpp_identity for cp in cps if cp.site_id != target_site.id]
     if move_conflicts and not req.force_move:
         raise HTTPException(
             status_code=409,
@@ -588,20 +589,20 @@ def bind_charge_points(
 
     # 执行绑定/迁移
     for cp in cps:
-        cp.site_id = site_id
+        cp.site_id = target_site.id
 
     db.commit()
-    return {"success": True, "site_id": site_id, "bound": [cp.id for cp in cps]}
+    return {"success": True, "site_id": str(target_site.id), "bound": [str(cp.id) for cp in cps]}
 
 
-class CreateChargePointInSiteRequest(BaseModel):
+class CreateChargePointInSiteRequest(StrictRequestModel):
     """在站点下创建并预注册充电桩（用于 web 端录入硬件码）"""
 
-    id: str = Field(..., min_length=1, description="charge_point_id（硬件码）")
-    vendor: Optional[str] = None
-    model: Optional[str] = None
+    id: str = Field(..., min_length=1, max_length=64, pattern=r"^[A-Za-z0-9._:-]+$", description="OCPP identity（硬件码）")
+    vendor: Optional[str] = Field(None, max_length=100)
+    model: Optional[str] = Field(None, max_length=100)
     connector_count: int = Field(1, ge=1, le=16, description="枪口数量/EVSE 数量")
-    connector_type: str = Field("Type2", description="连接器类型（默认 Type2）")
+    connector_type: str = Field("Type2", min_length=1, max_length=50, description="连接器类型（默认 Type2）")
 
 
 @router.post("/{site_id}/charge-points", summary="在站点下创建充电桩（预注册）", status_code=201)
@@ -615,25 +616,17 @@ def create_charge_point_in_site(
     if not tenant_id:
         raise HTTPException(status_code=403, detail="Tenant ID required")
 
-    site_q = db.query(Site).filter(Site.id == site_id)
-    if tenant_id and not current_user_obj.is_super_admin:
-        site_q = site_q.filter(Site.tenant_id == tenant_id)
-    site = site_q.first()
-    if not site:
-        raise HTTPException(status_code=404, detail="Site not found")
+    site = _get_scoped_site(db, site_id, current_user_obj)
 
     # 确保 CP ID 合法（与 ws 严格模式一致）
     cp_id = (req.id or "").strip()
-    if not cp_id or not cp_id.isalnum():
-        raise HTTPException(status_code=400, detail="charge_point_id must be alphanumeric")
-
-    existing = db.query(ChargePoint).filter(ChargePoint.id == cp_id).first()
+    existing = db.query(ChargePoint).filter(ChargePoint.ocpp_identity == cp_id).first()
     if existing:
-        raise HTTPException(status_code=400, detail="Charge point already exists")
+        raise HTTPException(status_code=409, detail="Charge point already exists")
 
     # 创建 ChargePoint（直接绑定到站点）
     charge_point = ChargePoint(
-        id=cp_id,
+        ocpp_identity=cp_id,
         tenant_id=site.tenant_id,
         site_id=site.id,
         vendor=req.vendor,
@@ -647,7 +640,7 @@ def create_charge_point_in_site(
     for evse_no in range(1, int(req.connector_count) + 1):
         evse = EVSE(
             tenant_id=site.tenant_id,
-            charge_point_id=cp_id,
+            charge_point_id=charge_point.id,
             evse_id=evse_no,
             connector_type=req.connector_type or "Type2",
         )
@@ -657,7 +650,7 @@ def create_charge_point_in_site(
         evse_status = EVSEStatus(
             tenant_id=site.tenant_id,
             evse_id=evse.id,
-            charge_point_id=cp_id,
+            charge_point_id=charge_point.id,
             status="Unknown",
             last_seen=datetime.now(timezone.utc),
         )
@@ -675,12 +668,12 @@ def create_charge_point_in_site(
             try:
                 generate_qr_code(
                     db=db,
-                    charge_point_id=cp_id,
+                    charge_point_id=charge_point.id,
                     connector_id=evse_no,
                     output_dir=qr_storage_dir,
                 )
-                token_rec = ensure_qr_token(db, cp_id, evse_no)
-                qr_url = get_qr_code_url(cp_id, evse_no)
+                token_rec = ensure_qr_token(db, charge_point.id, evse_no)
+                qr_url = get_qr_code_url(str(charge_point.id), evse_no)
                 qr_urls.append({
                     "connector_id": evse_no,
                     "qr_token": token_rec.token,
@@ -694,8 +687,9 @@ def create_charge_point_in_site(
         # 二维码生成失败不影响充电桩创建
 
     return {
-        "id": charge_point.id,
-        "site_id": site.id,
+        "id": str(charge_point.id),
+        "ocpp_identity": charge_point.ocpp_identity,
+        "site_id": str(site.id),
         "tenant_id": str(site.tenant_id),
         "vendor": charge_point.vendor,
         "model": charge_point.model,

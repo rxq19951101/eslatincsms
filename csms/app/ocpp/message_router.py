@@ -79,6 +79,7 @@ class MessageRouter:
         message = {
             "message_id": message_id,
             "charger_id": charger_id,
+            "target_server": server_id,
             "action": action,
             "payload": payload,
             "from_server": manager.server_id,
@@ -122,8 +123,8 @@ class MessageRouter:
             }
     
     @staticmethod
-    def handle_routed_message(charger_id: str, message: dict):
-        """处理来自其他服务器的路由消息"""
+    async def handle_routed_message_async(charger_id: str, message: dict):
+        """在 FastAPI 主事件循环中处理来自其他服务器的路由消息。"""
         from app.ocpp.message_sender import message_sender
         
         action = message.get("action")
@@ -131,35 +132,34 @@ class MessageRouter:
         message_id = message.get("message_id")
         timeout = message.get("timeout", 5.0)
         
-        # 异步发送并返回响应
-        async def send_and_respond():
+        try:
+            result = await message_sender.send_call(charger_id, action, payload, timeout)
+        except Exception as e:
+            logger.error(f"处理路由消息失败: {e}", exc_info=True)
+            result = {"success": False, "error": str(e)}
+
+        response_key = f"ocpp:response:{message_id}"
+        distributed_connection_manager.redis_client.setex(
+            response_key,
+            int(timeout) + 1,
+            json.dumps(result),
+        )
+
+    @staticmethod
+    def handle_routed_message(charger_id: str, message: dict, loop=None):
+        """兼容同步调用方；跨线程时把任务投递到 FastAPI 主事件循环。"""
+        target_loop = loop
+        if target_loop is None:
             try:
-                result = await message_sender.send_call(charger_id, action, payload, timeout)
-                
-                # 将响应发送回请求服务器
-                response_key = f"ocpp:response:{message_id}"
-                manager = distributed_connection_manager
-                manager.redis_client.setex(
-                    response_key,
-                    int(timeout) + 1,
-                    json.dumps(result)
-                )
-            except Exception as e:
-                logger.error(f"处理路由消息失败: {e}", exc_info=True)
-                # 发送错误响应
-                response_key = f"ocpp:response:{message_id}"
-                manager = distributed_connection_manager
-                manager.redis_client.setex(
-                    response_key,
-                    int(timeout) + 1,
-                    json.dumps({
-                        "success": False,
-                        "error": str(e)
-                    })
-                )
-        
-        # 启动异步任务
-        asyncio.create_task(send_and_respond())
+                target_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                logger.error("无法处理 OCPP 路由消息：缺少运行中的 asyncio loop")
+                return
+        if target_loop.is_running():
+            asyncio.run_coroutine_threadsafe(
+                MessageRouter.handle_routed_message_async(charger_id, message),
+                target_loop,
+            )
 
 
 # 全局消息路由器实例

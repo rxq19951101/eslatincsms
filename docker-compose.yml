@@ -1,7 +1,7 @@
 #
 # 本地默认栈：数据库账号与 CSMS 运行方式与生产一致（ocpp_user / 生产级 env）
 # 启动: docker compose up -d --build
-# 端口: CSMS 9000, Admin 3000, Postgres 5432, Redis 6379, MQTT 1883/9001
+# 端口: CSMS 9000, Admin 3000, Postgres 5432, Redis 6379, OCPP WebSocket 9000/ocpp
 #
 # Admin 的 NEXT_PUBLIC_* 在「构建」时注入：Compose 只从「仓库根目录」的 .env 读取 ${VAR}。
 # 若密钥只在 admin/.env.local（给 npm run dev 用），Docker 构建不到，请复制一行到根 .env，或：
@@ -46,43 +46,20 @@ services:
       retries: 5
     restart: unless-stopped
 
-  mqtt-broker:
-    image: eclipse-mosquitto:2.0
-    container_name: ocpp-mqtt
-    ports:
-      - "1883:1883"
-      - "9001:9001"
-    volumes:
-      - mqtt_data:/mosquitto/data
-      - mqtt_log:/mosquitto/log
-      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
-    networks:
-      - ocppnet
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "mosquitto_pub -h localhost -t test -m 'healthcheck' && mosquitto_sub -h localhost -t test -C 1 -W 2 || exit 0"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 10s
-
   csms:
     build: ./csms
     container_name: ocpp-csms
     ports:
       - "9000:9000"
     environment:
-      - ENVIRONMENT=production
-      - DEBUG=false
+      - ENVIRONMENT=development
+      - DEBUG=true
       - DATABASE_URL=postgresql://ocpp_user:ocpp_password@db:5432/ocpp
       - REDIS_URL=redis://redis:6379/0
       - ENCRYPTION_KEY=${ENCRYPTION_KEY:-ocpp-local-encryption-key-change-in-production}
       - SECRET_KEY=${SECRET_KEY:-ocpp-local-secret-key-change-in-production-please}
-      - ENCRYPTION_SALT=ocpp_csms_salt
-      - MQTT_BROKER_HOST=mqtt-broker
-      - MQTT_BROKER_PORT=1883
-      - MQTT_USERNAME=
-      - MQTT_PASSWORD=
+      - ENCRYPTION_SALT=ocpp_local_development_salt
+      - OCPP_WS_REQUIRE_PRE_REGISTERED=false
       - LOG_LEVEL=INFO
       - LOG_FORMAT=json
       # Expo Web（localhost:8081）→ CSMS :9000 跨域；未设置时 main.py 默认已含 8081，此处可覆盖扩展
@@ -93,18 +70,16 @@ services:
       - ENABLE_HTTP_TRANSPORT=false
       # TEST 凭证与 MP 官方测试卡配套使用
       - MERCADOPAGO_ENVIRONMENT=sandbox
-      - MERCADOPAGO_ACCESS_TOKEN=TEST-159151764056006-012316-8feefb39f2f87255bb670202a21e2e68-3150452318
-      - MERCADOPAGO_PUBLIC_KEY=TEST-dcddb9cd-e2bb-4807-a069-ec1f4083bec7
-      - MERCADOPAGO_APP_ID=159151764056006
-      - MERCADOPAGO_CLIENT_SECRET=6KFW0uBilwuGI2eZ6A2HdXzBWvzISeg9
-      - MERCADOPAGO_WEBHOOK_SECRET=test-webhook-secret
+      - MERCADOPAGO_ACCESS_TOKEN=${MERCADOPAGO_ACCESS_TOKEN}
+      - MERCADOPAGO_PUBLIC_KEY=${MERCADOPAGO_PUBLIC_KEY}
+      - MERCADOPAGO_APP_ID=${MERCADOPAGO_APP_ID}
+      - MERCADOPAGO_CLIENT_SECRET=${MERCADOPAGO_CLIENT_SECRET}
+      - MERCADOPAGO_WEBHOOK_SECRET=${MERCADOPAGO_WEBHOOK_SECRET}
     depends_on:
       db:
         condition: service_healthy
       redis:
         condition: service_healthy
-      mqtt-broker:
-        condition: service_started
     networks:
       - ocppnet
     restart: unless-stopped
@@ -160,10 +135,6 @@ volumes:
   postgres_data:
     driver: local
   redis_data:
-    driver: local
-  mqtt_data:
-    driver: local
-  mqtt_log:
     driver: local
 
 networks:

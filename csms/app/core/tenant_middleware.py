@@ -4,6 +4,7 @@
 #
 
 from fastapi import Request, HTTPException
+from fastapi.responses import JSONResponse
 from typing import Optional
 import uuid
 from types import SimpleNamespace
@@ -18,7 +19,7 @@ from app.database.base import (
 from app.core.logging_config import get_logger
 
 logger = get_logger("ocpp_csms")
-from app.database.models import TenantMembership, EndUser
+from app.database.models import TenantMembership, AppUser
 
 
 def get_tenant_id_from_request(request: Request, current_user=None) -> Optional[uuid.UUID]:
@@ -28,7 +29,7 @@ def get_tenant_id_from_request(request: Request, current_user=None) -> Optional[
     优先级：
     1. X-Tenant-Id header（运营后台、App）
     2. 子域名 tenant.domain.com（可选）
-    3. 用户默认租户（EndUser 只属于一个租户时，或 AdminUser 的 is_primary 租户）
+    3. 管理员默认租户（AppUser 不绑定单一租户，必须显式提供租户上下文）
     """
     # 1. 从 X-Tenant-Id header（优先级最高）
     # FastAPI/Starlette 的 headers.get 是大小写不敏感的，但为了明确性，先尝试精确匹配，再尝试小写
@@ -60,10 +61,6 @@ def get_tenant_id_from_request(request: Request, current_user=None) -> Optional[
         except Exception as e:
             logger.warning(f"Failed to get user default tenant for {current_user.id}: {e}", exc_info=True)
     
-    # 4. EndUser 场景：从用户所属租户（EndUser 只属于一个租户）
-    if current_user and current_user.user_type == "end_user":
-        return get_end_user_tenant(current_user.id)
-    
     # 未找到租户
     return None
 
@@ -87,18 +84,6 @@ def get_user_default_tenant(admin_user_id: uuid.UUID) -> Optional[uuid.UUID]:
         db.close()
 
 
-def get_end_user_tenant(end_user_id: uuid.UUID) -> Optional[uuid.UUID]:
-    """获取终端用户所属的租户（EndUser 只属于一个租户）"""
-    db = SessionLocal()
-    try:
-        end_user = db.query(EndUser).filter(EndUser.id == end_user_id).first()
-        if end_user:
-            return end_user.tenant_id
-        return None
-    finally:
-        db.close()
-
-
 def validate_tenant_membership(user_id: uuid.UUID, tenant_id: uuid.UUID, is_super_admin: bool, db: Session) -> bool:
     """验证用户是否属于该租户"""
     if is_super_admin:
@@ -112,17 +97,6 @@ def validate_tenant_membership(user_id: uuid.UUID, tenant_id: uuid.UUID, is_supe
     ).first()
     
     return membership is not None
-
-
-def validate_end_user_tenant(end_user_id: uuid.UUID, tenant_id: uuid.UUID, db: Session) -> bool:
-    """
-    验证 EndUser 是否属于该租户。
-    注意：EndUser 只属于一个 tenant_id，因此只需要比对 end_users.tenant_id。
-    """
-    end_user = db.query(EndUser).filter(EndUser.id == end_user_id).first()
-    if not end_user:
-        return False
-    return end_user.tenant_id == tenant_id
 
 
 def should_use_super_connection(current_user, tenant_id_header) -> bool:
@@ -157,7 +131,7 @@ def load_authenticated_user(token_payload):
     audience = token_payload.get("aud")
     if user_type == "admin" and audience != "admin":
         raise HTTPException(status_code=401, detail="Invalid admin token audience")
-    if user_type == "end_user" and audience != "app":
+    if user_type == "app_user" and audience != "app":
         raise HTTPException(status_code=401, detail="Invalid app token audience")
 
     if user_type == "admin":
@@ -176,17 +150,16 @@ def load_authenticated_user(token_payload):
         finally:
             db.close()
 
-    if user_type == "end_user":
-        from app.database.models import EndUser
+    if user_type == "app_user":
         from app.database.base import SessionLocal
         db = SessionLocal()
         try:
-            user = db.query(EndUser).filter(EndUser.id == user_id).first()
+            user = db.query(AppUser).filter(AppUser.id == user_id).first()
             if not user or user.status != "active":
                 raise HTTPException(status_code=401, detail="User account is inactive or not found")
             return SimpleNamespace(
                 id=user.id,
-                user_type="end_user",
+                user_type="app_user",
                 is_super_admin=False,
             )
         finally:
@@ -208,13 +181,13 @@ def is_public_auth_path(path: str) -> bool:
     public_paths = (
         "/api/v1/admin/auth/login",
         "/api/v1/admin/auth/refresh",
-        "/api/v1/app/auth/register",
-        "/api/v1/app/auth/login",
         "/api/v1/app/auth/refresh",
         "/api/v1/app/auth/register-email",
         "/api/v1/app/auth/login-email",
         "/api/v1/app/auth/resend-verification",
         "/api/v1/app/auth/verify-email",
+        "/api/v1/app/auth/reset-password",
+        "/api/v1/app/auth/confirm-reset-password",
     )
     return path.startswith(public_paths)
 
@@ -248,15 +221,28 @@ async def tenant_middleware(request: Request, call_next):
                     raise HTTPException(status_code=401, detail="Invalid token audience")
                 current_user = load_authenticated_user(token_payload)
                 request.state.current_user = current_user
+        except HTTPException as exc:
+            return JSONResponse(
+                status_code=exc.status_code,
+                content={"success": False, "error": {"code": "AUTHENTICATION_ERROR", "message": exc.detail, "details": [], "status_code": exc.status_code}},
+                headers=exc.headers,
+            )
         except Exception:
             if request.headers.get("Authorization"):
-                raise
+                return JSONResponse(
+                    status_code=401,
+                    content={"success": False, "error": {"code": "AUTHENTICATION_ERROR", "message": "Invalid authentication token", "details": [], "status_code": 401}},
+                )
             logger.debug("No authenticated user in tenant middleware")
     
     # 所有 API v1 路由默认要求认证，只有显式白名单的认证接口公开。
     if not current_user:
         if request.url.path.startswith("/api/v1") and not is_public_auth_path(request.url.path):
-            raise HTTPException(status_code=401, detail="Authentication required")
+            return JSONResponse(
+                status_code=401,
+                content={"success": False, "error": {"code": "AUTHENTICATION_ERROR", "message": "Authentication required", "details": [], "status_code": 401}},
+                headers={"WWW-Authenticate": "Bearer"},
+            )
         return await call_next(request)
     
     # 提取 tenant_id（简化中间件日志，详细日志在路由层面）
@@ -291,7 +277,7 @@ async def tenant_middleware(request: Request, call_next):
     if tenant_id and current_user and not current_user.is_super_admin:
         # 说明：
         # - admin：校验 tenant_memberships（使用 super session，避免 RLS 影响）
-        # - end_user：校验 end_users.tenant_id（不需要 super session；避免触发 app_super 角色设置）
+        # - app_user：平台级账户不绑定单一租户，租户上下文由请求明确指定。
         user_type = getattr(current_user, "user_type", "admin")
 
         if user_type == "admin":
@@ -318,28 +304,6 @@ async def tenant_middleware(request: Request, call_next):
             finally:
                 db.close()
 
-        elif user_type == "end_user":
-            # EndUser 校验：使用普通 SessionLocal（get_end_user_tenant 已经用它能查询到 end_users）
-            db = SessionLocal()
-            try:
-                try:
-                    db.rollback()
-                except Exception:
-                    pass
-
-                if not validate_end_user_tenant(current_user.id, tenant_id, db):
-                    raise HTTPException(
-                        status_code=403,
-                        detail="TENANT_ACCESS_DENIED: End user does not belong to the specified tenant"
-                    )
-            except SQLAlchemyError:
-                try:
-                    db.rollback()
-                except Exception:
-                    pass
-                raise
-            finally:
-                db.close()
 
         else:
             raise HTTPException(
@@ -366,7 +330,7 @@ async def tenant_middleware(request: Request, call_next):
                 action="super_admin_cross_tenant_access",
                 resource_type="tenant",
                 resource_id=str(tenant_id) if tenant_id else None,
-                metadata={
+                audit_metadata={
                     "used_super_connection": True,
                     "request_path": str(request.url),
                     "request_method": request.method

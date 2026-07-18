@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import useSWR from 'swr';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -10,6 +10,16 @@ import { Users, RefreshCw } from 'lucide-react';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { apiGet, apiPost } from '@/lib/api';
 import { API_ENDPOINTS } from '@/lib/constants';
+import { useI18n } from '@/lib/i18n';
+import {
+  apiErrorMessageKey,
+  apiFieldErrors,
+  fieldErrors,
+  walletAdjustmentSchema,
+  WALLET_API_FIELD_MAPPING,
+  type FieldErrors,
+} from '@/lib/validation';
+import { IdempotencyIntentStore, requestIntent } from '@/lib/idempotency';
 
 interface AdminUser {
   id: string;
@@ -20,16 +30,6 @@ interface AdminUser {
   is_super_admin: boolean;
   last_login_at?: string;
   created_at: string;
-}
-
-interface EndUser {
-  id: string;
-  phone: string;
-  email?: string;
-  full_name?: string;
-  id_tag: string;
-  balance: number;
-  status: string;
 }
 
 interface AppUser {
@@ -51,41 +51,49 @@ export default function UsersPage() {
   const [adjustNote, setAdjustNote] = useState('');
   const [adjusting, setAdjusting] = useState(false);
   const [adjustError, setAdjustError] = useState<string | null>(null);
+  const [adjustErrors, setAdjustErrors] = useState<FieldErrors>({});
+  const adjustmentIntents = useRef(new IdempotencyIntentStore()).current;
+  const { t } = useI18n();
 
   const { data: adminUsers, mutate: refreshAdmin, isLoading: loadingAdmin } = useSWR<AdminUser[]>(
     tab === 'admin' ? API_ENDPOINTS.ADMIN_USERS : null,
-    (url) => apiGet<AdminUser[]>(url)
-  );
-
-  const { data: endUsers, mutate: refreshEnd, isLoading: loadingEnd } = useSWR<EndUser[]>(
-    tab === 'enduser' ? API_ENDPOINTS.END_USERS : null,
-    (url) => apiGet<EndUser[]>(url)
+    (url: string) => apiGet<AdminUser[]>(url)
   );
 
   const { data: appUsers, mutate: refreshApp, isLoading: loadingApp } = useSWR<AppUser[]>(
     tab === 'appuser' ? API_ENDPOINTS.APP_USERS : null,
-    (url) => apiGet<AppUser[]>(url)
+    (url: string) => apiGet<AppUser[]>(url)
   );
 
   const handleAdjust = async () => {
     if (!adjustUserId) return;
-    const amount = Number(adjustAmount);
-    if (!Number.isFinite(amount) || amount === 0) {
-      setAdjustError('请输入非零金额（正数入账，负数扣减）');
+    const result = walletAdjustmentSchema.safeParse({ amount: adjustAmount, description: adjustNote });
+    if (!result.success) {
+      setAdjustErrors(fieldErrors(result.error));
+      setAdjustError(null);
       return;
     }
     setAdjusting(true);
     setAdjustError(null);
+    setAdjustErrors({});
+    const payload = {
+      amount: result.data.amount,
+      description: result.data.description,
+    };
+    const intent = requestIntent(`wallet-adjust:${adjustUserId}`, payload);
+    const idempotencyKey = adjustmentIntents.keyFor(intent);
     try {
       await apiPost(API_ENDPOINTS.APP_USER_ADJUST_BALANCE(adjustUserId), {
-        amount,
-        description: adjustNote || undefined,
+        ...payload,
+        idempotency_key: idempotencyKey,
       });
+      adjustmentIntents.markSucceeded(intent);
       setAdjustUserId(null);
       setAdjustNote('');
       refreshApp();
     } catch (e) {
-      setAdjustError(e instanceof Error ? e.message : '调整失败');
+      setAdjustErrors(apiFieldErrors(e, WALLET_API_FIELD_MAPPING));
+      setAdjustError(t(apiErrorMessageKey(e, '调整失败')));
     } finally {
       setAdjusting(false);
     }
@@ -93,7 +101,6 @@ export default function UsersPage() {
 
   const refresh = () => {
     if (tab === 'admin') refreshAdmin();
-    else if (tab === 'enduser') refreshEnd();
     else refreshApp();
   };
 
@@ -101,53 +108,50 @@ export default function UsersPage() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-3xl font-bold text-white">用户管理</h1>
+          <h1 className="text-3xl font-bold text-white">{t('users')}</h1>
           <p className="text-slate-400 mt-1">
-            管理管理员、App 用户（钱包）与旧版终端用户。应用内支付关闭时，请在此为 App 用户调余额。
+            {t('adminUsersAndAppUsers')}
           </p>
         </div>
         <Button variant="outline" className="border-slate-600" onClick={refresh}>
           <RefreshCw className="h-4 w-4 mr-2" />
-          刷新
+          {t('refresh')}
         </Button>
       </div>
 
       <Tabs value={tab} onValueChange={setTab} className="space-y-6">
         <TabsList className="bg-slate-800/50 border-slate-700">
           <TabsTrigger value="appuser" className="data-[state=active]:bg-slate-700">
-            App 用户
+            {t('appUsers')}
           </TabsTrigger>
           <TabsTrigger value="admin" className="data-[state=active]:bg-slate-700">
-            管理员用户
-          </TabsTrigger>
-          <TabsTrigger value="enduser" className="data-[state=active]:bg-slate-700">
-            终端用户（旧）
+            {t('adminUsers')}
           </TabsTrigger>
         </TabsList>
 
         <TabsContent value="appuser">
           <Card className="bg-slate-800/80 backdrop-blur-sm border-slate-700">
             <CardHeader>
-              <CardTitle className="text-white">App 用户 ({appUsers?.length ?? 0})</CardTitle>
+              <CardTitle className="text-white">{t(`App 用户 (${appUsers?.length ?? 0})`)}</CardTitle>
             </CardHeader>
             <CardContent>
               {loadingApp ? (
-                <p className="text-slate-400 text-center py-8">加载中...</p>
+                <p className="text-slate-400 text-center py-8">{t('加载中...')}</p>
               ) : !appUsers?.length ? (
                 <div className="text-center py-12">
                   <Users className="h-12 w-12 text-slate-500 mx-auto mb-4" />
-                  <p className="text-slate-400">暂无 App 用户</p>
+                  <p className="text-slate-400">{t('暂无 App 用户')}</p>
                 </div>
               ) : (
                 <div className="overflow-x-auto">
                   <table className="w-full text-sm text-slate-300">
                     <thead>
                       <tr className="border-b border-slate-700 text-slate-400">
-                        <th className="text-left py-2 px-2">邮箱</th>
-                        <th className="text-left py-2 px-2">姓名</th>
-                        <th className="text-left py-2 px-2">余额 (COP)</th>
-                        <th className="text-left py-2 px-2">状态</th>
-                        <th className="text-left py-2 px-2">操作</th>
+                        <th className="text-left py-2 px-2">{t('邮箱')}</th>
+                        <th className="text-left py-2 px-2">{t('姓名')}</th>
+                        <th className="text-left py-2 px-2">{t('余额 (COP)')}</th>
+                        <th className="text-left py-2 px-2">{t('状态')}</th>
+                        <th className="text-left py-2 px-2">{t('操作')}</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -169,12 +173,15 @@ export default function UsersPage() {
                               variant="outline"
                               className="border-slate-600"
                               onClick={() => {
+                                adjustmentIntents.clear();
                                 setAdjustUserId(u.id);
                                 setAdjustAmount('10000');
+                                setAdjustNote('');
                                 setAdjustError(null);
+                                setAdjustErrors({});
                               }}
                             >
-                              调余额
+                              {t('调余额')}
                             </Button>
                           </td>
                         </tr>
@@ -186,32 +193,40 @@ export default function UsersPage() {
 
               {adjustUserId && (
                 <div className="mt-6 p-4 rounded-lg border border-slate-600 bg-slate-900/60 space-y-3">
-                  <p className="text-white text-sm font-medium">调整余额</p>
-                  <p className="text-slate-400 text-xs font-mono">{adjustUserId}</p>
+                  <p className="text-white text-sm font-medium">{t('调整余额')}</p>
+                  <p className="text-slate-400 text-sm">{appUsers?.find((user) => user.id === adjustUserId)?.email}</p>
                   <Input
                     type="number"
+                    step="0.01"
                     value={adjustAmount}
                     onChange={(e) => setAdjustAmount(e.target.value)}
-                    placeholder="金额（正数入账）"
+                    placeholder={t('金额（正数入账）')}
+                    aria-invalid={!!adjustErrors.amount}
                     className="bg-slate-800 border-slate-600 text-white"
                   />
+                  {adjustErrors.amount && <p className="text-red-400 text-sm">{t(adjustErrors.amount)}</p>}
                   <Input
                     value={adjustNote}
                     onChange={(e) => setAdjustNote(e.target.value)}
-                    placeholder="备注（可选）"
+                    placeholder={t('调整原因（必填）')}
+                    aria-invalid={!!adjustErrors.description}
                     className="bg-slate-800 border-slate-600 text-white"
                   />
+                  {adjustErrors.description && <p className="text-red-400 text-sm">{t(adjustErrors.description)}</p>}
                   {adjustError && <p className="text-red-400 text-sm">{adjustError}</p>}
                   <div className="flex gap-2">
                     <Button onClick={handleAdjust} disabled={adjusting}>
-                      {adjusting ? '提交中…' : '确认'}
+                      {adjusting ? t('提交中…') : t('确认')}
                     </Button>
                     <Button
                       variant="outline"
                       className="border-slate-600"
-                      onClick={() => setAdjustUserId(null)}
+                      onClick={() => {
+                        adjustmentIntents.clear();
+                        setAdjustUserId(null);
+                      }}
                     >
-                      取消
+                      {t('取消')}
                     </Button>
                   </div>
                 </div>
@@ -223,25 +238,25 @@ export default function UsersPage() {
         <TabsContent value="admin">
           <Card className="bg-slate-800/80 backdrop-blur-sm border-slate-700">
             <CardHeader>
-              <CardTitle className="text-white">管理员用户 ({adminUsers?.length ?? 0})</CardTitle>
+              <CardTitle className="text-white">{t(`管理员用户 (${adminUsers?.length ?? 0})`)}</CardTitle>
             </CardHeader>
             <CardContent>
               {loadingAdmin ? (
-                <p className="text-slate-400 text-center py-8">加载中...</p>
+                <p className="text-slate-400 text-center py-8">{t('加载中...')}</p>
               ) : !adminUsers?.length ? (
                 <div className="text-center py-12">
                   <Users className="h-12 w-12 text-slate-500 mx-auto mb-4" />
-                  <p className="text-slate-400">暂无管理员用户</p>
+                  <p className="text-slate-400">{t('暂无管理员用户')}</p>
                 </div>
               ) : (
                 <div className="overflow-x-auto">
                   <table className="w-full text-sm text-slate-300">
                     <thead>
                       <tr className="border-b border-slate-700 text-slate-400">
-                        <th className="text-left py-2 px-2">用户名</th>
-                        <th className="text-left py-2 px-2">邮箱</th>
-                        <th className="text-left py-2 px-2">状态</th>
-                        <th className="text-left py-2 px-2">角色</th>
+                        <th className="text-left py-2 px-2">{t('用户名')}</th>
+                        <th className="text-left py-2 px-2">{t('邮箱')}</th>
+                        <th className="text-left py-2 px-2">{t('状态')}</th>
+                        <th className="text-left py-2 px-2">{t('角色')}</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -251,11 +266,11 @@ export default function UsersPage() {
                           <td className="py-2 px-2">{u.email}</td>
                           <td className="py-2 px-2">
                             <Badge variant={u.is_active ? 'default' : 'destructive'}>
-                              {u.is_active ? '活跃' : '禁用'}
+                              {u.is_active ? t('活跃') : t('禁用')}
                             </Badge>
                           </td>
                           <td className="py-2 px-2">
-                            {u.is_super_admin ? '超级管理员' : '管理员'}
+                            {u.is_super_admin ? t('超级管理员') : t('管理员')}
                           </td>
                         </tr>
                       ))}
@@ -267,50 +282,6 @@ export default function UsersPage() {
           </Card>
         </TabsContent>
 
-        <TabsContent value="enduser">
-          <Card className="bg-slate-800/80 backdrop-blur-sm border-slate-700">
-            <CardHeader>
-              <CardTitle className="text-white">终端用户 ({endUsers?.length ?? 0})</CardTitle>
-            </CardHeader>
-            <CardContent>
-              {loadingEnd ? (
-                <p className="text-slate-400 text-center py-8">加载中...</p>
-              ) : !endUsers?.length ? (
-                <div className="text-center py-12">
-                  <Users className="h-12 w-12 text-slate-500 mx-auto mb-4" />
-                  <p className="text-slate-400">暂无终端用户</p>
-                </div>
-              ) : (
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm text-slate-300">
-                    <thead>
-                      <tr className="border-b border-slate-700 text-slate-400">
-                        <th className="text-left py-2 px-2">手机</th>
-                        <th className="text-left py-2 px-2">ID Tag</th>
-                        <th className="text-left py-2 px-2">余额</th>
-                        <th className="text-left py-2 px-2">状态</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {endUsers.map((u) => (
-                        <tr key={u.id} className="border-b border-slate-700/50">
-                          <td className="py-2 px-2">{u.phone}</td>
-                          <td className="py-2 px-2 font-mono text-xs">{u.id_tag}</td>
-                          <td className="py-2 px-2">${u.balance.toFixed(2)}</td>
-                          <td className="py-2 px-2">
-                            <Badge variant={u.status === 'active' ? 'default' : 'secondary'}>
-                              {u.status}
-                            </Badge>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </CardContent>
-          </Card>
-        </TabsContent>
       </Tabs>
     </div>
   );

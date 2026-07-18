@@ -17,7 +17,7 @@ from app.database.base import (
     SessionLocal
 )
 from app.database.models import (
-    Tenant, AdminUser, EndUser, TenantMembership, 
+    Tenant, AdminUser, TenantMembership,
     Role, ChargePoint, Site
 )
 from app.core.auth import get_password_hash, verify_password
@@ -46,7 +46,7 @@ def create_tenant_for_test(db_session: Session, name: str = "测试租户", **kw
             id=uuid.uuid4(),
             name=name,
             status="active",
-            subscription_plan="basic",
+            subscription_plan="pro",
             max_charge_points=10,
             max_users=50,
             **kwargs
@@ -223,7 +223,7 @@ class TestTenantManagementAPI:
         # 2. 创建租户
         tenant_data = {
             "name": "新租户",
-            "subscription_plan": "premium",
+            "subscription_plan": "enterprise",
             "max_charge_points": 100,
             "max_users": 500
         }
@@ -237,7 +237,7 @@ class TestTenantManagementAPI:
         assert response.status_code == 200
         tenant = response.json()
         assert tenant["name"] == "新租户"
-        assert tenant["subscription_plan"] == "premium"
+        assert tenant["subscription_plan"] == "enterprise"
         tenant_id = tenant["id"]
         
         # 3. 列出所有租户
@@ -644,61 +644,6 @@ class TestMultiTenantIsolationAPI:
                 assert charger.get("tenant_id") != str(tenant2.id) or len(chargers) == 0
 
 
-class TestEndUserAPI:
-    """测试终端用户API流程"""
-    
-    def test_end_user_registration_and_login(self, client: TestClient, db_session: Session):
-        """测试终端用户注册和登录流程"""
-        # 创建租户
-        tenant = create_tenant_for_test(db_session, name="测试租户")
-        
-        # 注册终端用户（不需要密码）
-        register_data = {
-            "phone": "13800138000",
-            "id_tag": "TAG001",
-            "tenant_id": str(tenant.id)
-        }
-        
-        response = client.post(
-            "/api/v1/app/auth/register",
-            json=register_data
-        )
-        
-        assert response.status_code == 200
-        user_data = response.json()
-        assert "user_id" in user_data
-        
-        # 登录（只需要phone和tenant_id，不需要密码）
-        login_response = client.post(
-            "/api/v1/app/auth/login",
-            json={
-                "phone": "13800138000",
-                "tenant_id": str(tenant.id)
-            }
-        )
-        
-        assert login_response.status_code == 200
-        login_data = login_response.json()
-        assert "access_token" in login_data
-        assert "refresh_token" in login_data
-        
-        return login_data["access_token"]
-    
-    def test_end_user_get_profile(self, client: TestClient, db_session: Session):
-        """测试终端用户获取个人信息"""
-        token = self.test_end_user_registration_and_login(client, db_session)
-        
-        # 获取个人信息
-        response = client.get(
-            "/api/v1/app/auth/me",
-            headers={"Authorization": f"Bearer {token}"}
-        )
-        
-        assert response.status_code == 200
-        user_info = response.json()
-        assert user_info["phone"] == "13800138000"
-
-
 class TestAlertAPI:
     """测试告警API流程"""
     
@@ -892,7 +837,7 @@ class TestPermissionAPI:
             headers={"Authorization": f"Bearer {token}"},
             json={
                 "name": "新租户",
-                "subscription_plan": "basic"
+                "subscription_plan": "pro"
             }
         )
         

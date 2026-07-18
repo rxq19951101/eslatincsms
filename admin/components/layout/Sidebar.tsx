@@ -20,24 +20,36 @@ import {
   Activity,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { useAuthStore } from '@/store/authStore';
+import { usePermissions, hasPermission } from '@/hooks/usePermissions';
+import { useI18n } from '@/lib/i18n';
+import Image from 'next/image';
 
 const navigation = [
-  { name: '仪表板', href: '/', icon: LayoutDashboard },
-  { name: '站点管理', href: '/sites', icon: Zap },
-  { name: '交易管理', href: '/transactions', icon: FileText },
-  { name: '活跃会话', href: '/sessions', icon: Activity },
-  { name: '支付管理', href: '/payments', icon: CreditCard },
-  { name: '统计报表', href: '/statistics', icon: BarChart3 },
-  { name: '告警管理', href: '/alerts', icon: Bell },
-  { name: '用户管理', href: '/users', icon: Users },
-  { name: '租户管理', href: '/tenants', icon: Building2 },
-  { name: '地图视图', href: '/map', icon: Map },
-  { name: '系统设置', href: '/settings', icon: Settings },
+  { key: 'dashboard', href: '/', icon: LayoutDashboard },
+  { key: 'sites', href: '/sites', icon: Zap, permission: 'sites.read' },
+  { key: 'transactions', href: '/transactions', icon: FileText, permission: 'transactions.read' },
+  { key: 'sessions', href: '/sessions', icon: Activity, permission: 'transactions.read' },
+  { key: 'payments', href: '/payments', icon: CreditCard, superAdminOnly: true },
+  { key: 'reports', href: '/statistics', icon: BarChart3, permission: 'reports.read' },
+  { key: 'alerts', href: '/alerts', icon: Bell, permission: 'alerts.read' },
+  { key: 'users', href: '/users', icon: Users, permission: 'admin_users.read' },
+  { key: 'tenants', href: '/tenants', icon: Building2, superAdminOnly: true },
+  { key: 'map', href: '/map', icon: Map, permission: 'sites.read' },
+  { key: 'settings', href: '/settings', icon: Settings, permission: 'configs.read' },
 ];
 
 export function Sidebar() {
   const pathname = usePathname();
+  const user = useAuthStore((state) => state.user);
+  const { permissions, isLoading } = usePermissions();
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+  const { t } = useI18n();
+  const visibleNavigation = navigation.filter((item) => {
+    if (item.superAdminOnly) return !!user?.is_super_admin;
+    if (!item.permission || user?.is_super_admin || isLoading) return true;
+    return hasPermission(permissions, item.permission);
+  });
 
   return (
     <>
@@ -63,22 +75,20 @@ export function Sidebar() {
         <div className="flex flex-col h-full">
           {/* Brand */}
           <div className="flex items-center gap-2 px-6 py-6 border-b border-slate-800">
-            <div className="p-2 bg-gradient-to-br from-purple-600 to-blue-600 rounded-lg">
-              <Zap className="h-6 w-6 text-white" />
-            </div>
+            <Image src="/brand/eslatin-symbol-dark.svg" alt="" aria-hidden="true" width={48} height={48} className="h-12 w-12 object-contain" />
             <div>
-              <h1 className="text-xl font-bold text-white">运营平台</h1>
-              <p className="text-xs text-slate-400">后台管理</p>
+              <h1 className="text-xl font-bold text-white">EsLatin</h1>
+              <p className="text-xs text-slate-400">{t('adminPortal')}</p>
             </div>
           </div>
 
           {/* Navigation */}
           <nav className="flex-1 px-4 py-6 space-y-1 overflow-y-auto">
-            {navigation.map((item) => {
+            {visibleNavigation.map((item) => {
               const isActive = pathname === item.href || pathname?.startsWith(item.href + '/');
               return (
                 <Link
-                  key={item.name}
+                  key={item.key}
                   href={item.href}
                   onClick={() => setIsMobileMenuOpen(false)}
                   className={cn(
@@ -89,7 +99,7 @@ export function Sidebar() {
                   )}
                 >
                   <item.icon className="h-5 w-5" />
-                  {item.name}
+                  {t(item.key as Parameters<typeof t>[0])}
                 </Link>
               );
             })}
@@ -102,8 +112,8 @@ export function Sidebar() {
                 A
               </div>
               <div className="flex-1 min-w-0">
-                <p className="text-sm font-medium text-white truncate">管理员</p>
-                <p className="text-xs text-slate-400 truncate">admin@example.com</p>
+                <p className="text-sm font-medium text-white truncate">{user?.username || t('管理员')}</p>
+                <p className="text-xs text-slate-400 truncate">{user?.email || ''}</p>
               </div>
             </div>
           </div>

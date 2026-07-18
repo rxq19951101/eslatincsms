@@ -9,9 +9,10 @@ from sqlalchemy.orm import Session
 from typing import List, Optional
 from uuid import UUID
 from app.database.base import get_db
-from app.database.models import AdminUser
+from app.database.models import AdminUser, TenantMembership
 from app.core.auth import get_current_user
-from app.core.permissions import get_current_admin_user
+from app.core.permissions import get_current_admin_user, require_permission
+from app.database.base import tenant_id_context
 from app.services.user_service import AdminUserService
 from app.core.logging_config import get_logger
 from app.core.api_logging import log_api_request, log_api_response, log_api_error, log_business_operation
@@ -42,6 +43,11 @@ class ChangePasswordRequest(BaseModel):
     new_password: str
 
 
+class UpdateOwnProfileRequest(BaseModel):
+    full_name: Optional[str] = None
+    email: Optional[EmailStr] = None
+
+
 class UserResponse(BaseModel):
     id: str
     username: str
@@ -61,10 +67,11 @@ async def list_users(
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=1000),
     is_active: Optional[bool] = Query(None),
-    current_user: dict = Depends(get_current_user),
+    current_user_obj=Depends(require_permission("admin_users.read")),
     db: Session = Depends(get_db)
 ):
     """获取管理员用户列表"""
+    current_user = current_user_obj
     try:
         log_api_request(
             method="GET",
@@ -74,12 +81,16 @@ async def list_users(
             params={"skip": skip, "limit": limit, "is_active": is_active}
         )
         
-        users = AdminUserService.list_admin_users(
-            db=db,
-            skip=skip,
-            limit=limit,
-            is_active=is_active
-        )
+        query = db.query(AdminUser)
+        if is_active is not None:
+            query = query.filter(AdminUser.is_active == is_active)
+        if not current_user_obj.is_super_admin:
+            tenant_id = tenant_id_context.get()
+            query = query.join(TenantMembership).filter(
+                TenantMembership.tenant_id == tenant_id,
+                TenantMembership.status == "active",
+            )
+        users = query.order_by(AdminUser.created_at.desc()).offset(skip).limit(limit).all()
         
         result = [
             UserResponse(
@@ -101,7 +112,7 @@ async def list_users(
             path="/api/v1/admin/users",
             operation="list_users",
             result="success",
-            current_user=current_user,
+            current_user=current_user_obj,
             details={"count": len(result)}
         )
         
@@ -121,21 +132,22 @@ async def list_users(
 @router.post("", response_model=UserResponse, summary="创建管理员")
 async def create_user(
     request_data: CreateUserRequest,
-    current_user: dict = Depends(get_current_user),
+    current_user_obj=Depends(require_permission("admin_users.write")),
     db: Session = Depends(get_db)
 ):
     """创建管理员用户"""
+    current_user = current_user_obj
     try:
         log_api_request(
             method="POST",
             path="/api/v1/admin/users",
             operation="create_user",
-            current_user=current_user,
+            current_user=current_user_obj,
             params={"username": request_data.username, "email": request_data.email}
         )
         
-        # 检查权限（需要超级管理员或租户管理员）
-        # 这里暂时允许所有认证用户创建，实际应该检查权限
+        if request_data.is_super_admin and not current_user_obj.is_super_admin:
+            raise HTTPException(status_code=403, detail="Only platform super admin can create super admin")
         
         try:
             admin_user = AdminUserService.create_admin_user(
@@ -152,7 +164,7 @@ async def create_user(
                 path="/api/v1/admin/users",
                 operation="create_user",
                 error=e,
-                current_user=current_user,
+                current_user=current_user_obj,
                 params={"username": request_data.username, "email": request_data.email}
             )
             raise HTTPException(status_code=400, detail=str(e))
@@ -162,7 +174,7 @@ async def create_user(
             entity_type="admin_user",
             entity_id=str(admin_user.id),
             result="success",
-            current_user=current_user,
+            current_user=current_user_obj,
             details={"username": admin_user.username, "email": admin_user.email}
         )
         
@@ -171,7 +183,7 @@ async def create_user(
             path="/api/v1/admin/users",
             operation="create_user",
             result="success",
-            current_user=current_user,
+            current_user=current_user_obj,
             details={"user_id": str(admin_user.id), "username": admin_user.username}
         )
         
@@ -203,10 +215,20 @@ async def create_user(
 @router.get("/{user_id}", response_model=UserResponse, summary="获取管理员详情")
 async def get_user(
     user_id: UUID,
-    current_user: dict = Depends(get_current_user),
+    current_user_obj=Depends(require_permission("admin_users.read")),
     db: Session = Depends(get_db)
 ):
     """获取管理员用户详情"""
+    current_user = current_user_obj
+    if not current_user_obj.is_super_admin:
+        tenant_id = tenant_id_context.get()
+        allowed = db.query(TenantMembership).filter(
+            TenantMembership.admin_user_id == user_id,
+            TenantMembership.tenant_id == tenant_id,
+            TenantMembership.status == "active",
+        ).first()
+        if not allowed:
+            raise HTTPException(status_code=404, detail="User not found")
     try:
         log_api_request(
             method="GET",
@@ -266,10 +288,20 @@ async def get_user(
 async def update_user(
     user_id: UUID,
     request_data: UpdateUserRequest,
-    current_user: dict = Depends(get_current_user),
+    current_user_obj=Depends(require_permission("admin_users.write")),
     db: Session = Depends(get_db)
 ):
     """更新管理员用户"""
+    current_user = current_user_obj
+    if not current_user_obj.is_super_admin:
+        tenant_id = tenant_id_context.get()
+        allowed = db.query(TenantMembership).filter(
+            TenantMembership.admin_user_id == user_id,
+            TenantMembership.tenant_id == tenant_id,
+            TenantMembership.status == "active",
+        ).first()
+        if not allowed:
+            raise HTTPException(status_code=404, detail="User not found")
     try:
         log_api_request(
             method="PUT",
@@ -354,10 +386,20 @@ async def update_user(
 @router.delete("/{user_id}", summary="删除管理员")
 async def delete_user(
     user_id: UUID,
-    current_user: dict = Depends(get_current_user),
+    current_user_obj=Depends(require_permission("admin_users.write")),
     db: Session = Depends(get_db)
 ):
     """删除管理员用户"""
+    current_user = current_user_obj
+    if not current_user_obj.is_super_admin:
+        tenant_id = tenant_id_context.get()
+        allowed = db.query(TenantMembership).filter(
+            TenantMembership.admin_user_id == user_id,
+            TenantMembership.tenant_id == tenant_id,
+            TenantMembership.status == "active",
+        ).first()
+        if not allowed:
+            raise HTTPException(status_code=404, detail="User not found")
     try:
         log_api_request(
             method="DELETE",
@@ -453,3 +495,29 @@ async def change_password(
         raise HTTPException(status_code=404, detail="User not found")
     
     return {"message": "Password changed successfully"}
+
+
+@router.put("/me/profile", summary="修改个人资料")
+async def update_own_profile(
+    request_data: UpdateOwnProfileRequest,
+    current_user_obj = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+):
+    """管理员只能修改自己的非权限资料。"""
+    try:
+        user = AdminUserService.update_admin_user(
+            db=db,
+            user_id=current_user_obj.id,
+            full_name=request_data.full_name,
+            email=request_data.email,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return {
+        "id": str(user.id),
+        "username": user.username,
+        "email": user.email,
+        "full_name": user.full_name,
+    }

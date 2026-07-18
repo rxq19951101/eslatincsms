@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 # 设置测试环境变量
 os.environ["ENVIRONMENT"] = "test"
 os.environ["DATABASE_URL"] = "sqlite:///:memory:"
+os.environ["RATE_LIMIT_ENABLED"] = "false"
 # 在Docker容器内使用redis服务名，本地测试使用localhost
 import socket
 try:
@@ -54,7 +55,7 @@ from app.database.models import (
     Site, ChargePoint, EVSE, EVSEStatus, Device,
     ChargingSession, DeviceEvent, DeviceConfig, ChargePointConfig,
     Order, Invoice, Payment, Tariff, MeterValue, PricingSnapshot, SupportMessage,
-    Tenant, AdminUser, EndUser, TenantMembership, Role, TenantMembershipRole,
+    Tenant, AdminUser, TenantMembership, Role, TenantMembershipRole,
     RefreshToken, Alert, AlertRule, SystemConfig, AuditLog
 )
 
@@ -335,10 +336,12 @@ def admin_client(client, db_session: Session):
 @pytest.fixture
 def sample_tenant(db_session: Session):
     """创建供共享测试数据使用的租户。"""
-    tenant = Tenant(id=uuid.uuid4(), name="测试租户", status="active")
-    db_session.add(tenant)
-    db_session.commit()
-    db_session.refresh(tenant)
+    tenant = db_session.query(Tenant).first()
+    if tenant is None:
+        tenant = Tenant(id=uuid.uuid4(), name="测试租户", status="active")
+        db_session.add(tenant)
+        db_session.commit()
+        db_session.refresh(tenant)
     return tenant
 
 
@@ -349,7 +352,7 @@ def sample_site(db_session: Session, sample_tenant: Tenant):
         id="test_site_1",
         tenant_id=sample_tenant.id,
         name="测试站点",
-        address="测试地址",
+        address="测试站点地址",
         latitude=39.9042,
         longitude=116.4074
     )

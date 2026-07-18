@@ -214,12 +214,6 @@ def get_db() -> Session:
         db.close()
 
 
-# 初始化数据库
-def init_db():
-    """初始化数据库表"""
-    Base.metadata.create_all(bind=engine)
-
-
 # 数据库健康检查
 def check_db_health(max_retries: int = 3, retry_delay: float = 2.0) -> bool:
     """
@@ -244,4 +238,3 @@ def check_db_health(max_retries: int = 3, retry_delay: float = 2.0) -> bool:
             logger.debug(f"数据库连接检查失败 (尝试 {attempt + 1}/{max_retries}): {e}")
             return False
     return False
-

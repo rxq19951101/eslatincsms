@@ -8,7 +8,7 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app.database.base import SessionLocal, init_db
+from app.database.base import SessionLocal
 from app.database.models import (
     Site, ChargePoint, EVSE, EVSEStatus,
     DeviceType, Device,
@@ -22,10 +22,6 @@ def create_test_data():
     """创建测试数据"""
     db = SessionLocal()
     try:
-        # 初始化数据库
-        init_db()
-        print("✓ 数据库表已初始化")
-        
         # 1. 创建设备类型
         device_type = db.query(DeviceType).filter(DeviceType.type_code == "zcf").first()
         if not device_type:
@@ -120,7 +116,7 @@ def create_test_data():
         else:
             print(f"✓ 充电桩已存在: {charge_point_id}")
         
-        # 5. 创建定价规则（Tariff.id是自增主键，不需要手动指定）
+        # 5. 创建定价规则（Tariff.id 由数据库模型生成 UUID）
         tariff = db.query(Tariff).filter(
             Tariff.site_id == site.id,
             Tariff.is_active == True

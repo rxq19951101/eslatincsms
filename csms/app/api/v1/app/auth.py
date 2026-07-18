@@ -1,5 +1,5 @@
 #
-# 终端用户认证API
+# App 用户认证 API
 # 提供注册、登录、登出、刷新token等功能
 #
 
@@ -25,6 +25,11 @@ from app.services.email_verification_service import (
     verify_by_code,
     verify_by_token,
 )
+from app.services.password_reset_service import (
+    can_request_password_reset,
+    consume_password_reset_token,
+    issue_password_reset,
+)
 from datetime import datetime, timezone
 import secrets
 from app.core.logging_config import get_logger
@@ -36,19 +41,6 @@ router = APIRouter()
 
 
 # ==================== 请求/响应模型 ====================
-
-class RegisterRequest(BaseModel):
-    phone: str
-    id_tag: str
-    email: Optional[str] = None
-    full_name: Optional[str] = None
-    tenant_id: UUID  # 爆改阶段：不再支持（保留字段仅用于兼容历史调用）
-
-
-class LoginRequest(BaseModel):
-    phone: str
-    tenant_id: UUID  # 爆改阶段：不再支持（保留字段仅用于兼容历史调用）
-
 
 class LoginResponse(BaseModel):
     access_token: str
@@ -94,11 +86,20 @@ class VerifyEmailCodeRequest(BaseModel):
     code: str = Field(..., min_length=4, max_length=8)
 
 
+class PasswordResetRequest(BaseModel):
+    email: str
+
+
+class ConfirmPasswordResetRequest(BaseModel):
+    token: str = Field(..., min_length=16)
+    new_password: str = Field(..., min_length=8, max_length=128)
+
+
 async def _login_response_for_user(app_user: AppUser, request: Request, db: Session) -> LoginResponse:
     """验证通过后签发 token（与 login-email 一致）。"""
     access_token, refresh_token = await create_token_pair(
         user_id=app_user.id,
-        user_type="end_user",
+        user_type="app_user",
         audience="app",
         is_super_admin=False,
         request=request,
@@ -116,7 +117,7 @@ async def _login_response_for_user(app_user: AppUser, request: Request, db: Sess
     await save_refresh_token(
         jti=unverified_payload.get("jti"),
         user_id=app_user.id,
-        user_type="end_user",
+        user_type="app_user",
         refresh_token=refresh_token,
         expires_at=datetime.fromtimestamp(unverified_payload.get("exp"), tz=timezone.utc),
         db=db,
@@ -138,32 +139,6 @@ async def _login_response_for_user(app_user: AppUser, request: Request, db: Sess
 
 
 # ==================== 认证端点 ====================
-
-@router.post("/register", summary="终端用户注册")
-async def register(
-    request_data: RegisterRequest,
-    request: Request,
-    db: Session = Depends(get_db)
-):
-    """爆改阶段：禁用旧手机号/租户注册入口（强制使用邮箱注册）"""
-    raise HTTPException(
-        status_code=status.HTTP_410_GONE,
-        detail="Deprecated endpoint. Use /api/v1/app/auth/register-email"
-    )
-
-
-@router.post("/login", response_model=LoginResponse, summary="终端用户登录")
-async def login(
-    request_data: LoginRequest,
-    request: Request,
-    db: Session = Depends(get_db)
-):
-    """爆改阶段：禁用旧手机号/租户登录入口（强制使用邮箱登录）"""
-    raise HTTPException(
-        status_code=status.HTTP_410_GONE,
-        detail="Deprecated endpoint. Use /api/v1/app/auth/login-email"
-    )
-
 
 @router.post("/refresh", response_model=RefreshTokenResponse, summary="刷新token")
 async def refresh(
@@ -368,7 +343,7 @@ async def delete_account(
                 detail="Cannot delete account while a charging session is active. Stop charging first.",
             )
 
-        await revoke_all_user_tokens(user_id, "end_user", db)
+        await revoke_all_user_tokens(user_id, "app_user", db)
 
         db.query(AppUserPaymentMethod).filter(AppUserPaymentMethod.app_user_id == user_id).delete()
 
@@ -606,7 +581,7 @@ async def login_with_email(
         # 生成 token pair
         access_token, refresh_token = await create_token_pair(
             user_id=app_user.id,
-            user_type="end_user",
+            user_type="app_user",
             audience="app",
             is_super_admin=False,
             request=request
@@ -630,7 +605,7 @@ async def login_with_email(
         await save_refresh_token(
             jti=refresh_jti,
             user_id=app_user.id,
-            user_type="end_user",
+            user_type="app_user",
             refresh_token=refresh_token,
             expires_at=refresh_expires_at,
             db=db,
@@ -712,6 +687,50 @@ async def resend_verification(
 
     issue_email_verification(db, user)
     return {"success": True, "message": "Verification email sent."}
+
+
+@router.post("/reset-password", summary="发送密码重置邮件")
+async def request_password_reset(
+    request_data: PasswordResetRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    email = (request_data.email or "").strip().lower()
+    user = db.query(AppUser).filter(AppUser.email == email).first()
+    # 无论用户是否存在都返回相同结果，避免邮箱枚举。
+    if not user:
+        return {"success": True, "message": "If the email exists, a reset link was sent."}
+
+    allowed, wait_s = can_request_password_reset(user)
+    if not allowed:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Please wait {wait_s} seconds before requesting another reset link",
+        )
+
+    issue_password_reset(db, user)
+    return {"success": True, "message": "If the email exists, a reset link was sent."}
+
+
+@router.post("/confirm-reset-password", summary="确认密码重置")
+async def confirm_password_reset(
+    request_data: ConfirmPasswordResetRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    from app.core.auth import get_password_hash
+
+    user = consume_password_reset_token(
+        db=db,
+        token=request_data.token,
+        new_password_hash=get_password_hash(request_data.new_password),
+    )
+    if not user:
+        raise HTTPException(status_code=400, detail="Invalid or expired password reset token")
+
+    # 密码变更后撤销旧 refresh token，避免旧登录会话继续有效。
+    await revoke_all_user_tokens(user.id, "app_user", db)
+    return {"success": True, "message": "Password reset successfully."}
 
 
 @router.post("/verify-email", response_model=LoginResponse, summary="用验证码验证邮箱并登录")

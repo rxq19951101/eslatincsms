@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Loader } from '@googlemaps/js-api-loader';
 import { Input } from '@/components/ui/input';
+import { useI18n } from '@/lib/i18n';
 
 interface GooglePlacesAutocompleteProps {
   value: string;
@@ -15,6 +16,7 @@ interface GooglePlacesAutocompleteProps {
 
 export default function GooglePlacesAutocomplete(props: GooglePlacesAutocompleteProps) {
   const { value, onChange, onSelect, placeholder, disabled, className } = props;
+  const { t, locale } = useI18n();
 
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -33,14 +35,16 @@ export default function GooglePlacesAutocomplete(props: GooglePlacesAutocomplete
   useEffect(() => {
     const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
     if (!apiKey) {
-      setError('Google Maps API 密钥未配置');
+      setError(t('Google Maps API 密钥未配置'));
       return;
     }
 
     const loader = new Loader({
       apiKey,
       version: 'weekly',
-      libraries: ['places']
+      libraries: ['places'],
+      language: locale === 'es' ? 'es' : locale === 'en' ? 'en' : 'zh-CN',
+      region: 'CO',
     });
 
     loader
@@ -55,9 +59,9 @@ export default function GooglePlacesAutocomplete(props: GooglePlacesAutocomplete
       })
       .catch((err) => {
         console.error('Google Maps API 加载失败:', err);
-        setError('地图服务加载失败');
+        setError(t('地图服务加载失败'));
       });
-  }, []);
+  }, [locale, t]);
 
   // 点击外部关闭下拉框
   useEffect(() => {
@@ -89,7 +93,7 @@ export default function GooglePlacesAutocomplete(props: GooglePlacesAutocomplete
     // 防抖：300ms 延迟
     debounceTimer.current = setTimeout(() => {
       if (!autocompleteServiceRef.current) {
-        setError('地图服务未就绪');
+        setError(t('地图服务未就绪'));
         return;
       }
 
@@ -118,7 +122,7 @@ export default function GooglePlacesAutocomplete(props: GooglePlacesAutocomplete
             setOpen(false);
           } else {
             console.error('Autocomplete 失败:', status);
-            setError('地址搜索失败');
+            setError(t('地址搜索失败'));
             setItems([]);
             setOpen(false);
           }
@@ -136,7 +140,7 @@ export default function GooglePlacesAutocomplete(props: GooglePlacesAutocomplete
   // 用户选中某个建议
   const handleSelect = (prediction: google.maps.places.AutocompletePrediction) => {
     if (!placesServiceRef.current || !sessionTokenRef.current) {
-      setError('地图服务未就绪');
+      setError(t('地图服务未就绪'));
       return;
     }
 
@@ -164,7 +168,7 @@ export default function GooglePlacesAutocomplete(props: GooglePlacesAutocomplete
           sessionTokenRef.current = null;
         } else {
           console.error('Place Details 失败:', status);
-          setError('获取地址详情失败');
+          setError(t('获取地址详情失败'));
         }
       }
     );
@@ -183,7 +187,7 @@ export default function GooglePlacesAutocomplete(props: GooglePlacesAutocomplete
 
       {loading && (
         <div className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-slate-400">
-          搜索中...
+          {t('搜索中...')}
         </div>
       )}
 

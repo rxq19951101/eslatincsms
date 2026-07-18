@@ -6,7 +6,8 @@
 from typing import List, Optional
 from uuid import UUID
 from sqlalchemy.orm import Session
-from app.database.models import TenantMembership, AdminUser, Tenant
+from app.database.models import TenantMembership, AdminUser, Tenant, TenantMembershipRole
+from app.services.role_service import RoleService
 from app.core.logging_config import get_logger
 
 logger = get_logger("ocpp_csms")
@@ -46,6 +47,11 @@ class MembershipService:
         )
         
         db.add(membership)
+        # 创建租户时，首个 primary 成员就是租户管理员。自动绑定租户管理员角色，
+        # 确保细粒度权限启用后不会把新租户锁在 403 状态。
+        if is_primary:
+            role = RoleService.ensure_default_tenant_admin_role(db, tenant_id)
+            db.add(TenantMembershipRole(membership=membership, role=role))
         db.commit()
         db.refresh(membership)
         

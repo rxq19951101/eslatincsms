@@ -21,6 +21,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app ./app
 COPY scripts ./scripts
 COPY tests ./tests
+COPY alembic ./alembic
+COPY alembic.ini ./alembic.ini
 COPY entrypoint.sh ./entrypoint.sh
 
 # 确保脚本可执行
@@ -33,7 +35,5 @@ EXPOSE 9000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
   CMD curl -f http://localhost:9000/health || exit 1
 
-# 直接启动 uvicorn（初始化应该在部署前手动完成）
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "9000"]
-
-
+# 先等待数据库并执行初始化/迁移，再启动应用
+ENTRYPOINT ["/app/entrypoint.sh"]

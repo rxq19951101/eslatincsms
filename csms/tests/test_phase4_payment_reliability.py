@@ -3,6 +3,7 @@ from decimal import Decimal
 from datetime import datetime, timezone
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 from app.database.models import AppUser, AppWalletTransaction, PaymentOrder, Tenant
 from app.domain.payment import transition_status
@@ -40,3 +41,34 @@ def test_approved_topup_is_ledger_idempotent(db_session):
         AppWalletTransaction.payment_order_id == order.id,
         AppWalletTransaction.type == "top_up",
     ).count() == 1
+
+
+@pytest.mark.parametrize(
+    ("provider_field", "provider_value"),
+    [
+        ("wompi_transaction_id", "wompi-transaction-unique"),
+        ("mercadopago_payment_id", "mp-payment-unique"),
+    ],
+)
+def test_payment_provider_ids_are_unique(db_session, provider_field, provider_value):
+    user = AppUser(
+        id=uuid.uuid4(),
+        email=f"{provider_field}@example.com",
+        password_hash="test",
+        balance=Decimal("0"),
+    )
+    common = {
+        "app_user_id": user.id,
+        "type": "top_up",
+        "amount": Decimal("10.00"),
+        "currency": "COP",
+        "payment_provider": "wompi" if provider_field.startswith("wompi") else "mercadopago",
+        "status": "created",
+        "expires_at": datetime.now(timezone.utc),
+        provider_field: provider_value,
+    }
+    db_session.add_all([user, PaymentOrder(**common), PaymentOrder(**common)])
+
+    with pytest.raises(IntegrityError):
+        db_session.commit()
+    db_session.rollback()

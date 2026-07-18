@@ -25,8 +25,8 @@ class AlertService:
         severity: str,
         title: str,
         description: Optional[str] = None,
-        charge_point_id: Optional[str] = None,
-        evse_id: Optional[int] = None,
+        charge_point_id: Optional[UUID] = None,
+        evse_id: Optional[UUID] = None,
         metadata: Optional[dict] = None
     ) -> Alert:
         """创建告警"""
@@ -68,9 +68,12 @@ class AlertService:
         return alert
     
     @staticmethod
-    def get_alert_by_id(db: Session, alert_id: UUID) -> Optional[Alert]:
+    def get_alert_by_id(db: Session, alert_id: UUID, tenant_id: Optional[UUID] = None) -> Optional[Alert]:
         """根据ID获取告警"""
-        return db.query(Alert).filter(Alert.id == alert_id).first()
+        query = db.query(Alert).filter(Alert.id == alert_id)
+        if tenant_id is not None:
+            query = query.filter(Alert.tenant_id == tenant_id)
+        return query.first()
     
     @staticmethod
     def list_alerts(
@@ -81,7 +84,7 @@ class AlertService:
         status: Optional[str] = None,
         severity: Optional[str] = None,
         alert_type: Optional[str] = None,
-        charge_point_id: Optional[str] = None
+        charge_point_id: Optional[UUID] = None
     ) -> List[Alert]:
         """获取告警列表"""
         query = db.query(Alert).filter(Alert.tenant_id == tenant_id)
@@ -101,10 +104,14 @@ class AlertService:
     def acknowledge_alert(
         db: Session,
         alert_id: UUID,
-        acknowledged_by: UUID
+        acknowledged_by: UUID,
+        tenant_id: Optional[UUID] = None,
     ) -> Optional[Alert]:
         """确认告警"""
-        alert = db.query(Alert).filter(Alert.id == alert_id).first()
+        query = db.query(Alert).filter(Alert.id == alert_id)
+        if tenant_id is not None:
+            query = query.filter(Alert.tenant_id == tenant_id)
+        alert = query.first()
         if not alert:
             return None
         
@@ -121,10 +128,14 @@ class AlertService:
     @staticmethod
     def resolve_alert(
         db: Session,
-        alert_id: UUID
+        alert_id: UUID,
+        tenant_id: Optional[UUID] = None,
     ) -> Optional[Alert]:
         """解决告警"""
-        alert = db.query(Alert).filter(Alert.id == alert_id).first()
+        query = db.query(Alert).filter(Alert.id == alert_id)
+        if tenant_id is not None:
+            query = query.filter(Alert.tenant_id == tenant_id)
+        alert = query.first()
         if not alert:
             return None
         
@@ -248,10 +259,14 @@ class AlertRuleService:
         name: Optional[str] = None,
         conditions: Optional[dict] = None,
         severity: Optional[str] = None,
-        is_enabled: Optional[bool] = None
+        is_enabled: Optional[bool] = None,
+        tenant_id: Optional[UUID] = None,
     ) -> Optional[AlertRule]:
         """更新告警规则"""
-        alert_rule = db.query(AlertRule).filter(AlertRule.id == rule_id).first()
+        query = db.query(AlertRule).filter(AlertRule.id == rule_id)
+        if tenant_id is not None:
+            query = query.filter(AlertRule.tenant_id == tenant_id)
+        alert_rule = query.first()
         if not alert_rule:
             return None
         
@@ -280,9 +295,12 @@ class AlertRuleService:
         return alert_rule
     
     @staticmethod
-    def delete_alert_rule(db: Session, rule_id: UUID) -> bool:
+    def delete_alert_rule(db: Session, rule_id: UUID, tenant_id: Optional[UUID] = None) -> bool:
         """删除告警规则"""
-        alert_rule = db.query(AlertRule).filter(AlertRule.id == rule_id).first()
+        query = db.query(AlertRule).filter(AlertRule.id == rule_id)
+        if tenant_id is not None:
+            query = query.filter(AlertRule.tenant_id == tenant_id)
+        alert_rule = query.first()
         if not alert_rule:
             return False
         

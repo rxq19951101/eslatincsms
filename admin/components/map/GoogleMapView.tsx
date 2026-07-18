@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { Loader } from '@googlemaps/js-api-loader';
+import { useI18n } from '@/lib/i18n';
 
 interface GoogleMapViewProps {
   center?: { lat: number; lng: number };
@@ -12,88 +13,6 @@ interface GoogleMapViewProps {
   /** 是否禁用交互（缩放、拖拽等），用于只读展示模式 */
   disableInteraction?: boolean;
 }
-
-// Google Maps 暗色主题样式
-const darkModeStyles: google.maps.MapTypeStyle[] = [
-  { elementType: 'geometry', stylers: [{ color: '#212121' }] },
-  { elementType: 'labels.text.stroke', stylers: [{ color: '#212121' }] },
-  { elementType: 'labels.text.fill', stylers: [{ color: '#746855' }] },
-  {
-    featureType: 'administrative.locality',
-    elementType: 'labels.text.fill',
-    stylers: [{ color: '#d59563' }]
-  },
-  {
-    featureType: 'poi',
-    elementType: 'labels.text.fill',
-    stylers: [{ color: '#d59563' }]
-  },
-  {
-    featureType: 'poi.park',
-    elementType: 'geometry',
-    stylers: [{ color: '#263c3f' }]
-  },
-  {
-    featureType: 'poi.park',
-    elementType: 'labels.text.fill',
-    stylers: [{ color: '#6b9a76' }]
-  },
-  {
-    featureType: 'road',
-    elementType: 'geometry',
-    stylers: [{ color: '#38414e' }]
-  },
-  {
-    featureType: 'road',
-    elementType: 'geometry.stroke',
-    stylers: [{ color: '#212a37' }]
-  },
-  {
-    featureType: 'road',
-    elementType: 'labels.text.fill',
-    stylers: [{ color: '#9ca5b3' }]
-  },
-  {
-    featureType: 'road.highway',
-    elementType: 'geometry',
-    stylers: [{ color: '#746855' }]
-  },
-  {
-    featureType: 'road.highway',
-    elementType: 'geometry.stroke',
-    stylers: [{ color: '#1f2835' }]
-  },
-  {
-    featureType: 'road.highway',
-    elementType: 'labels.text.fill',
-    stylers: [{ color: '#f3d19c' }]
-  },
-  {
-    featureType: 'transit',
-    elementType: 'geometry',
-    stylers: [{ color: '#2f3948' }]
-  },
-  {
-    featureType: 'transit.station',
-    elementType: 'labels.text.fill',
-    stylers: [{ color: '#d59563' }]
-  },
-  {
-    featureType: 'water',
-    elementType: 'geometry',
-    stylers: [{ color: '#17263c' }]
-  },
-  {
-    featureType: 'water',
-    elementType: 'labels.text.fill',
-    stylers: [{ color: '#515c6d' }]
-  },
-  {
-    featureType: 'water',
-    elementType: 'labels.text.stroke',
-    stylers: [{ color: '#17263c' }]
-  }
-];
 
 /** Advanced Marker 需要 mapId；可在 Cloud Console 创建或使用官方示例 ID */
 const DEFAULT_MAP_ID = 'DEMO_MAP_ID';
@@ -109,6 +28,7 @@ export default function GoogleMapView(props: GoogleMapViewProps) {
     zoom = 13,
     disableInteraction = false
   } = props;
+  const { locale, t } = useI18n();
 
   const mapRef = useRef<HTMLDivElement>(null);
   const googleMapRef = useRef<google.maps.Map | null>(null);
@@ -149,7 +69,7 @@ export default function GoogleMapView(props: GoogleMapViewProps) {
       const adv = new AdvancedMarkerElement({
         map,
         position: { lat: markerData.lat, lng: markerData.lng },
-        title: markerData.title || '充电站位置',
+        title: markerData.title || t('充电站位置'),
         content: pin.element,
         zIndex: 1000
       });
@@ -165,7 +85,7 @@ export default function GoogleMapView(props: GoogleMapViewProps) {
 
       markersRef.current.push(adv);
     }
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     if (googleMapRef.current) return;
@@ -174,7 +94,7 @@ export default function GoogleMapView(props: GoogleMapViewProps) {
 
     const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
     if (!apiKey) {
-      setError('Google Maps API 密钥未配置');
+      setError(t('Google Maps API 密钥未配置'));
       setLoading(false);
       return;
     }
@@ -184,7 +104,9 @@ export default function GoogleMapView(props: GoogleMapViewProps) {
     const loader = new Loader({
       apiKey,
       version: 'weekly',
-      libraries: ['places']
+      libraries: ['places'],
+      language: locale === 'es' ? 'es' : locale === 'en' ? 'en' : 'zh-CN',
+      region: 'CO'
     });
 
     loader
@@ -196,7 +118,6 @@ export default function GoogleMapView(props: GoogleMapViewProps) {
           center,
           zoom,
           mapId,
-          styles: darkModeStyles,
           disableDefaultUI: disableInteraction,
           zoomControl: !disableInteraction,
           mapTypeControl: false,
@@ -226,11 +147,11 @@ export default function GoogleMapView(props: GoogleMapViewProps) {
       .catch((err) => {
         console.error('Google Maps 加载失败:', err);
         mapInitStartedRef.current = false;
-        setError('地图加载失败，请检查网络连接或 Google Cloud 中 API/引荐来源限制');
+        setError(t('地图加载失败，请检查网络连接、项目结算账号以及 Maps JavaScript API 是否启用'));
         setLoading(false);
       });
     // markers / zoom 变更由下方 effect 处理，勿写入依赖以免重复初始化地图
-  }, [center?.lat, center?.lng, onClick, disableInteraction, clearAndAddMarkers, mapId]);
+  }, [center?.lat, center?.lng, onClick, disableInteraction, clearAndAddMarkers, mapId, locale]);
 
   useEffect(() => {
     if (googleMapRef.current && center) {
@@ -282,7 +203,7 @@ export default function GoogleMapView(props: GoogleMapViewProps) {
       <div ref={mapRef} className="w-full h-full rounded-md" />
       {loading && (
         <div className="absolute inset-0 flex items-center justify-center bg-slate-800/80 rounded-md">
-          <div className="text-slate-400 text-sm">加载地图中...</div>
+          <div className="text-slate-400 text-sm">{t('加载地图中...')}</div>
         </div>
       )}
     </div>

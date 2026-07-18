@@ -14,13 +14,14 @@ import { API_ENDPOINTS } from '@/lib/constants';
 import { setTokens } from '@/lib/auth';
 import { useAuthStore } from '@/store/authStore';
 import { useTenantStore } from '@/store/tenantStore';
-import { getTenantId } from '@/lib/tenant';
+import { getTenantId, clearCurrentTenantId } from '@/lib/tenant';
 import { LoginRequest, LoginResponse, AdminUser } from '@/types';
-import { Zap } from 'lucide-react';
+import { useI18n } from '@/lib/i18n';
+import Image from 'next/image';
 
 const loginSchema = z.object({
-  username: z.string().min(1, '用户名不能为空'),
-  password: z.string().min(1, '密码不能为空'),
+  username: z.string().min(1),
+  password: z.string().min(1),
 });
 
 type LoginFormValues = z.infer<typeof loginSchema>;
@@ -31,6 +32,7 @@ export default function LoginPage() {
   const { setCurrentTenant } = useTenantStore();
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const { t } = useI18n();
 
   const {
     register,
@@ -65,6 +67,7 @@ export default function LoginPage() {
         setUser(userData);
         // 初始化当前租户（用于 UI 展示）
         if (userData.is_super_admin) {
+          clearCurrentTenantId();
           setCurrentTenant(null);
         } else {
           const tid = getTenantId(userData);
@@ -96,29 +99,29 @@ export default function LoginPage() {
       console.error('Login failed:', err);
       
       // 处理不同类型的错误
-      let errorMessage = '登录失败，请稍后重试';
+      let errorMessage = t('loginFailed');
       
       if (err instanceof Error) {
         const message = err.message.toLowerCase();
         
         // 网络错误
         if (message.includes('failed to fetch') || message.includes('network')) {
-          errorMessage = '网络连接失败，请检查网络或后端服务是否正常运行';
+          errorMessage = t('networkError');
         }
         // 401 认证错误（用户名或密码错误）
         else if (message.includes('401') || message.includes('unauthorized') || 
                  message.includes('invalid username or password') ||
                  message.includes('用户名或密码错误')) {
-          errorMessage = '用户名或密码错误，请重新输入';
+          errorMessage = t('invalidCredentials');
         }
         // 403 账户被禁用
         else if (message.includes('403') || message.includes('forbidden') || 
                  message.includes('inactive')) {
-          errorMessage = '账户已被禁用，请联系管理员';
+          errorMessage = t('账户已被禁用，请联系管理员');
         }
         // 500 服务器错误
         else if (message.includes('500') || message.includes('internal server error')) {
-          errorMessage = '服务器内部错误，请联系技术支持';
+          errorMessage = t('服务器内部错误，请联系技术支持');
         }
         // 其他错误，显示原始消息
         else if (err.message) {
@@ -137,13 +140,11 @@ export default function LoginPage() {
       <Card className="w-full max-w-md bg-slate-800/80 backdrop-blur-lg border-slate-700 shadow-xl">
         <CardHeader className="space-y-1 text-center">
           <div className="flex justify-center mb-4">
-            <div className="p-3 bg-purple-600/20 rounded-full">
-              <Zap className="h-8 w-8 text-purple-400" />
-            </div>
+            <Image src="/brand/eslatin-full-dark.svg" alt="EsLatin" width={360} height={296} loading="eager" className="h-32 w-auto object-contain" />
           </div>
-          <CardTitle className="text-2xl font-bold text-white">充电桩运营平台</CardTitle>
+          <CardTitle className="text-2xl font-bold text-white">{t('loginTitle')}</CardTitle>
           <CardDescription className="text-slate-400">
-            请输入您的账号和密码登录
+            {t('loginSubtitle')}
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -156,35 +157,35 @@ export default function LoginPage() {
 
             <div className="space-y-2">
               <Label htmlFor="username" className="text-slate-300">
-                用户名
+                {t('username')}
               </Label>
               <Input
                 id="username"
                 type="text"
-                placeholder="请输入用户名"
+                placeholder={t('usernamePlaceholder')}
                 className="bg-slate-700/50 border-slate-600 text-white placeholder:text-slate-500 focus:border-purple-500"
                 {...register('username')}
                 disabled={isLoading}
               />
               {errors.username && (
-                <p className="text-sm text-red-400">{errors.username.message}</p>
+                <p className="text-sm text-red-400">{t('usernameRequired')}</p>
               )}
             </div>
 
             <div className="space-y-2">
               <Label htmlFor="password" className="text-slate-300">
-                密码
+                {t('password')}
               </Label>
               <Input
                 id="password"
                 type="password"
-                placeholder="请输入密码"
+                placeholder={t('passwordPlaceholder')}
                 className="bg-slate-700/50 border-slate-600 text-white placeholder:text-slate-500 focus:border-purple-500"
                 {...register('password')}
                 disabled={isLoading}
               />
               {errors.password && (
-                <p className="text-sm text-red-400">{errors.password.message}</p>
+                <p className="text-sm text-red-400">{t('passwordRequired')}</p>
               )}
             </div>
 
@@ -193,7 +194,7 @@ export default function LoginPage() {
               className="w-full bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-700 hover:to-blue-700 text-white"
               disabled={isLoading}
             >
-              {isLoading ? '登录中...' : '登录'}
+              {isLoading ? t('loggingIn') : t('login')}
             </Button>
           </form>
         </CardContent>

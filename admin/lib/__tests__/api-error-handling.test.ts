@@ -1,12 +1,10 @@
 import { describe, it, expect, vi, beforeEach, beforeAll, afterAll } from 'vitest';
-import { apiGet, apiPost } from '../api';
+import { ApiRequestError, apiGet } from '../api';
 import { setTokens, clearTokens } from '../auth';
-import { useAuthStore } from '@/store/authStore';
 import { server } from '@/__mocks__/server';
 
 // Mock fetch（直接 mock，不依赖 MSW）
 const mockFetch = vi.fn();
-const originalFetch = global.fetch;
 
 // Mock useAuthStore
 vi.mock('@/store/authStore', () => ({
@@ -28,7 +26,7 @@ vi.mock('@/store/authStore', () => ({
 // 在错误处理测试中，暂时禁用 MSW，使用直接的 fetch mock
 beforeAll(() => {
   server.close(); // 关闭 MSW server
-  global.fetch = mockFetch as any;
+  global.fetch = mockFetch as typeof fetch;
 });
 
 afterAll(() => {
@@ -41,7 +39,7 @@ describe('API Error Handling', () => {
     vi.clearAllMocks();
     clearTokens();
     // 确保使用 mock fetch
-    global.fetch = mockFetch as any;
+    global.fetch = mockFetch as typeof fetch;
   });
 
   describe('403 Forbidden 错误', () => {
@@ -99,6 +97,73 @@ describe('API Error Handling', () => {
       mockFetch.mockRejectedValueOnce(new Error('Network error'));
 
       await expect(apiGet('/test', { skipTenantId: true })).rejects.toThrow('Network error');
+    });
+  });
+
+  describe('422 字段错误', () => {
+    it('兼容标准 envelope 中的 FastAPI loc/msg details', async () => {
+      setTokens('test-token', 'refresh-token');
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 422,
+        statusText: 'Unprocessable Entity',
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: async () => ({
+          success: false,
+          error: {
+            message: '请求数据验证失败',
+            details: [{ loc: ['body', 'name'], msg: 'String should have at least 2 characters' }],
+          },
+        }),
+      });
+
+      const error = await apiGet('/test', { skipTenantId: true }).catch((caught) => caught);
+      expect(error).toBeInstanceOf(ApiRequestError);
+      if (!(error instanceof ApiRequestError)) {
+        throw new Error('Expected ApiRequestError');
+      }
+      expect(error.status).toBe(422);
+      expect(error.fieldErrors).toEqual({ name: 'String should have at least 2 characters' });
+    });
+
+    it('解析真实 backend field/path/message/type details', async () => {
+      setTokens('test-token', 'refresh-token');
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 422,
+        statusText: 'Unprocessable Entity',
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: async () => ({
+          success: false,
+          error: {
+            message: '请求数据验证失败',
+            details: [
+              {
+                field: 'tenant.max_users',
+                path: ['body', 'tenant', 'max_users'],
+                message: 'Input should be less than or equal to 10000000',
+                type: 'less_than_equal',
+              },
+              {
+                field: 'admin.username',
+                path: ['body', 'admin', 'username'],
+                message: 'String should match pattern',
+                type: 'string_pattern_mismatch',
+              },
+            ],
+          },
+          detail: 'legacy detail must not override the envelope',
+        }),
+      });
+
+      const error = await apiGet('/test', { skipTenantId: true }).catch((caught) => caught);
+      expect(error).toBeInstanceOf(ApiRequestError);
+      if (!(error instanceof ApiRequestError)) throw new Error('Expected ApiRequestError');
+      expect(error.message).toBe('请求数据验证失败');
+      expect(error.fieldErrors).toEqual({
+        'tenant.max_users': 'Input should be less than or equal to 10000000',
+        'admin.username': 'String should match pattern',
+      });
     });
   });
 

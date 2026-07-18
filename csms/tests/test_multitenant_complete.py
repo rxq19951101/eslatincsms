@@ -18,7 +18,7 @@ from app.database.base import (
     SessionLocal
 )
 from app.database.models import (
-    Tenant, AdminUser, EndUser, TenantMembership, 
+    Tenant, AdminUser, TenantMembership,
     Role, TenantMembershipRole, ChargePoint, Site,
     RefreshToken, Alert, AlertRule, SystemConfig
 )
@@ -38,7 +38,7 @@ from app.services.token_service import (
     hash_token,
     verify_token_hash
 )
-from app.services.user_service import AdminUserService, EndUserService
+from app.services.user_service import AdminUserService
 from app.services.membership_service import MembershipService
 from app.services.tenant_service import TenantService
 from app.core.tenant_middleware import (
@@ -68,7 +68,7 @@ def create_tenant_for_test(db_session: Session, name: str = "测试租户", **kw
             id=uuid.uuid4(),
             name=name,
             status="active",
-            subscription_plan="basic",
+            subscription_plan="pro",
             max_charge_points=10,
             max_users=50,
             **kwargs
@@ -103,7 +103,7 @@ class TestTenantIsolation:
                 id=uuid.uuid4(),
                 name="测试租户1",
                 status="active",
-                subscription_plan="basic",
+                subscription_plan="pro",
                 max_charge_points=10,
                 max_users=50
             )
@@ -134,7 +134,7 @@ class TestTenantIsolation:
             id="SITE-001",
             tenant_id=tenant1.id,
             name="租户1站点",
-            address="地址1",
+            address="租户一测试地址",
             latitude=39.9042,
             longitude=116.4074
         )
@@ -142,7 +142,7 @@ class TestTenantIsolation:
             id="SITE-002",
             tenant_id=tenant2.id,
             name="租户2站点",
-            address="地址2",
+            address="租户二测试地址",
             latitude=40.0,
             longitude=117.0
         )
@@ -178,7 +178,7 @@ class TestTenantIsolation:
             id="SITE-001",
             tenant_id=tenant1.id,
             name="站点1",
-            address="地址1",
+            address="租户一测试地址",
             latitude=39.9,
             longitude=116.4
         )
@@ -186,7 +186,7 @@ class TestTenantIsolation:
             id="SITE-002",
             tenant_id=tenant2.id,
             name="站点2",
-            address="地址2",
+            address="租户二测试地址",
             latitude=40.0,
             longitude=117.0
         )
@@ -217,7 +217,7 @@ class TestTenantIsolation:
             ChargePoint.tenant_id == tenant1.id
         ).all()
         assert len(charge_points) == 1
-        assert charge_points[0].id == "CP-001"
+        assert charge_points[0].ocpp_identity == "CP-001"
         
         tenant_id_context.set(None)
 
@@ -283,7 +283,7 @@ class TestAuthentication:
         # 创建app token
         app_data = {
             "user_id": str(user_id),
-            "user_type": "end_user",
+            "user_type": "app_user",
             "aud": "app"
         }
         app_token = create_access_token(app_data)
@@ -509,25 +509,6 @@ class TestUserService:
         # 注意：由于使用了测试辅助函数，验证密码可能失败，但对象创建是成功的
         assert admin_user.is_super_admin is False
     
-    def test_create_end_user(self, db_session: Session):
-        """测试创建终端用户"""
-        tenant = Tenant(id=uuid.uuid4(), name="测试租户", status="active")
-        db_session.add(tenant)
-        db_session.commit()
-        
-        user = EndUserService.create_end_user(
-            db=db_session,
-            tenant_id=tenant.id,
-            phone="13800138000",
-            id_tag="TAG001"
-        )
-        db_session.commit()
-        
-        assert user is not None
-        assert user.phone == "13800138000"
-        assert user.id_tag == "TAG001"
-        assert user.tenant_id == tenant.id
-    
     def test_check_username_uniqueness(self, db_session: Session):
         """测试用户名唯一性检查（按租户）"""
         tenant1 = create_tenant_for_test(db_session, name="租户1")
@@ -563,7 +544,7 @@ class TestTenantService:
         tenant = TenantService.create_tenant(
             db=db_session,
             name="新租户",
-            subscription_plan="premium",
+            subscription_plan="enterprise",
             max_charge_points=100,
             max_users=500
         )
@@ -571,7 +552,7 @@ class TestTenantService:
         
         assert tenant is not None
         assert tenant.name == "新租户"
-        assert tenant.subscription_plan == "premium"
+        assert tenant.subscription_plan == "enterprise"
         assert tenant.max_charge_points == 100
         assert tenant.max_users == 500
     
@@ -584,17 +565,18 @@ class TestTenantService:
             id="SITE-001",
             tenant_id=tenant.id,
             name="站点1",
-            address="地址1",
+            address="租户一测试地址",
             latitude=39.9,
             longitude=116.4
         )
+        db_session.add(site)
+        db_session.flush()
         charge_point = ChargePoint(
             id="CP-001",
             tenant_id=tenant.id,
             site_id=site.id,
             is_active=True
         )
-        db_session.add(site)
         db_session.add(charge_point)
         db_session.commit()
         
@@ -641,7 +623,7 @@ class TestSuperAdmin:
             id="SITE-001",
             tenant_id=tenant1.id,
             name="租户1站点",
-            address="地址1",
+            address="租户一测试地址",
             latitude=39.9,
             longitude=116.4
         )
@@ -649,7 +631,7 @@ class TestSuperAdmin:
             id="SITE-002",
             tenant_id=tenant2.id,
             name="租户2站点",
-            address="地址2",
+            address="租户二测试地址",
             latitude=40.0,
             longitude=117.0
         )

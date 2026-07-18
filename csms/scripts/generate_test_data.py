@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 from app.database.models import (
     Tenant, Site, ChargePoint, EVSE, EVSEStatus, Device,
     ChargingSession, MeterValue, Order, Invoice, Tariff,
-    EndUser, Alert
+    AppUser, Alert
 )
 from app.core.auth import get_password_hash
 
@@ -211,22 +211,21 @@ class TestDataGenerator:
         return evses
     
     def generate_users(self):
-        """生成终端用户"""
+        """生成平台 App 用户"""
         print(f"\n5. 生成 {self.config['users']} 个用户...")
         tenant_id = self.get_tenant_id()
         users = []
         
         for i in range(self.config['users']):
-            phone = f"138{random.randint(10000000, 99999999)}"
+            email = f"test-user-{uuid.uuid4().hex[:12]}@example.local"
             name = random.choice(self.user_names) + str(i+1)
             
-            user = EndUser(
-                # id字段是UUID，使用默认值自动生成
-                tenant_id=tenant_id,
-                phone=phone,
-                id_tag=f"RFID_{i+1:08d}",
-                full_name=name,  # 使用full_name而不是nickname
-                balance=Decimal(str(random.uniform(0, 500))),  # Decimal需要字符串
+            user = AppUser(
+                email=email,
+                phone=f"138{random.randint(10000000, 99999999)}",
+                full_name=name,
+                password_hash=get_password_hash("test123"),
+                balance=Decimal(str(random.uniform(0, 500))),
                 status='active',
                 last_login_at=datetime.now(timezone.utc) - timedelta(days=random.randint(0, 7))
             )
@@ -462,7 +461,7 @@ class TestDataGenerator:
             from app.database.models import (
                 PricingSnapshot, Payment, Invoice, MeterValue,
                 ChargingSession, Order, EVSEStatus, EVSE,
-                ChargePoint, Site, Device, Tariff, EndUser, Alert
+                ChargePoint, Site, Device, Tariff, Alert
             )
             
             tables = [
@@ -478,8 +477,7 @@ class TestDataGenerator:
                 ('tariffs', Tariff),             # 10. 引用site
                 ('sites', Site),                 # 11. 被charge_points和tariffs引用
                 ('devices', Device),             # 12. 被charge_points引用
-                ('end_users', EndUser),          # 13. 独立
-                ('alerts', Alert),               # 14. 引用charge_point
+                ('alerts', Alert),               # 13. 引用charge_point
             ]
             
             for table_name, model in tables:

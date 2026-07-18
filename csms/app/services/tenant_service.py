@@ -7,14 +7,57 @@ from typing import List, Optional
 from uuid import UUID
 from sqlalchemy.orm import Session
 from sqlalchemy import func
-from app.database.models import Tenant, ChargePoint, EndUser, TenantMembership
+from app.database.models import AdminUser, Tenant, ChargePoint, TenantMembership, TenantMembershipRole
+from app.core.auth import get_password_hash
+from app.services.role_service import RoleService
 from app.core.logging_config import get_logger
 
 logger = get_logger("ocpp_csms")
 
+VALID_SUBSCRIPTION_PLANS = {"free", "pro", "enterprise"}
+
 
 class TenantService:
     """租户服务"""
+
+    @staticmethod
+    def provision_tenant(
+        db: Session,
+        *,
+        tenant_data: dict,
+        admin_data: dict,
+    ) -> tuple[Tenant, AdminUser, TenantMembership]:
+        """Create a tenant, its first admin, role and membership in one transaction."""
+        tenant = Tenant(**tenant_data)
+        admin = AdminUser(
+            username=admin_data["username"],
+            email=admin_data["email"],
+            password_hash=get_password_hash(admin_data["password"]),
+            full_name=admin_data.get("full_name"),
+            is_active=True,
+            is_super_admin=False,
+        )
+        try:
+            db.add_all([tenant, admin])
+            db.flush()
+            membership = TenantMembership(
+                tenant_id=tenant.id,
+                admin_user_id=admin.id,
+                is_primary=True,
+                status="active",
+            )
+            db.add(membership)
+            db.flush()
+            role = RoleService.ensure_default_tenant_admin_role(db, tenant.id)
+            db.add(TenantMembershipRole(membership_id=membership.id, role_id=role.id))
+            db.commit()
+            db.refresh(tenant)
+            db.refresh(admin)
+            db.refresh(membership)
+            return tenant, admin, membership
+        except Exception:
+            db.rollback()
+            raise
     
     @staticmethod
     def create_tenant(
@@ -27,6 +70,8 @@ class TenantService:
         settings: Optional[dict] = None
     ) -> Tenant:
         """创建租户"""
+        if subscription_plan not in VALID_SUBSCRIPTION_PLANS:
+            raise ValueError("subscription_plan must be one of: free, pro, enterprise")
         # 检查域名是否已存在
         if domain:
             existing = db.query(Tenant).filter(Tenant.domain == domain).first()
@@ -105,6 +150,8 @@ class TenantService:
         if status is not None:
             tenant.status = status
         if subscription_plan is not None:
+            if subscription_plan not in VALID_SUBSCRIPTION_PLANS:
+                raise ValueError("subscription_plan must be one of: free, pro, enterprise")
             tenant.subscription_plan = subscription_plan
         if max_charge_points is not None:
             tenant.max_charge_points = max_charge_points
@@ -166,9 +213,9 @@ class TenantService:
         if not tenant:
             return False, 0, 0
         
-        current_count = db.query(EndUser).filter(
-            EndUser.tenant_id == tenant_id,
-            EndUser.status == "active"
+        current_count = db.query(TenantMembership).filter(
+            TenantMembership.tenant_id == tenant_id,
+            TenantMembership.status == "active"
         ).count()
         
         max_count = tenant.max_users
@@ -188,9 +235,9 @@ class TenantService:
             ChargePoint.is_active == True
         ).count()
         
-        user_count = db.query(EndUser).filter(
-            EndUser.tenant_id == tenant_id,
-            EndUser.status == "active"
+        user_count = db.query(TenantMembership).filter(
+            TenantMembership.tenant_id == tenant_id,
+            TenantMembership.status == "active"
         ).count()
         
         membership_count = db.query(TenantMembership).filter(

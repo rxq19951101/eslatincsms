@@ -5,12 +5,13 @@
 
 from typing import List, Optional
 from datetime import datetime, timezone
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from app.database.base import get_db, tenant_id_context
 from app.database.models import ChargingSession, ChargePoint, EVSE
 from app.core.permissions import get_current_admin_user
 from app.core.logging_config import get_logger
+from app.core.asset_identifiers import get_tenant_charge_point_by_reference
 
 logger = get_logger("ocpp_csms")
 
@@ -35,18 +36,26 @@ def list_transactions(
     )
     
     tenant_id = tenant_id_context.get()
-    query = db.query(ChargingSession)
-    
-    # 添加租户过滤（如果不是超级管理员）
-    if tenant_id and not current_user_obj.is_super_admin:
-        query = query.filter(ChargingSession.tenant_id == tenant_id)
+    if not tenant_id:
+        raise HTTPException(status_code=403, detail="Tenant ID required")
+    query = db.query(ChargingSession).filter(ChargingSession.tenant_id == tenant_id)
     
     if charge_point_id:
-        query = query.filter(ChargingSession.charge_point_id == charge_point_id)
+        charge_point = get_tenant_charge_point_by_reference(db, charge_point_id, tenant_id)
+        if not charge_point:
+            raise HTTPException(status_code=404, detail="Charge point not found")
+        query = query.filter(ChargingSession.charge_point_id == charge_point.id)
     if status:
         query = query.filter(ChargingSession.status == status)
     
     sessions = query.order_by(ChargingSession.start_time.desc()).offset(offset).limit(limit).all()
+    identities = {
+        cp.id: cp.ocpp_identity
+        for cp in db.query(ChargePoint).filter(
+            ChargePoint.tenant_id == tenant_id,
+            ChargePoint.id.in_({s.charge_point_id for s in sessions}),
+        ).all()
+    } if sessions else {}
     
     logger.info(f"[API] GET /api/v1/transactions 成功 | 返回 {len(sessions)} 个会话")
     
@@ -67,7 +76,8 @@ def list_transactions(
         result.append({
             "id": s.id,
             "transaction_id": s.transaction_id,
-            "charge_point_id": s.charge_point_id,
+            "charge_point_id": str(s.charge_point_id),
+            "ocpp_identity": identities.get(s.charge_point_id),
             "id_tag": s.id_tag,
             "user_id": s.user_id,
             "start_time": s.start_time.isoformat() if s.start_time else None,
@@ -90,11 +100,21 @@ def list_active_sessions(
     from app.database.models import MeterValue
 
     tenant_id = tenant_id_context.get()
-    query = db.query(ChargingSession).filter(ChargingSession.status == "ongoing")
-    if tenant_id and not current_user_obj.is_super_admin:
-        query = query.filter(ChargingSession.tenant_id == tenant_id)
+    if not tenant_id:
+        raise HTTPException(status_code=403, detail="Tenant ID required")
+    query = db.query(ChargingSession).filter(
+        ChargingSession.status == "ongoing",
+        ChargingSession.tenant_id == tenant_id,
+    )
 
     sessions = query.order_by(ChargingSession.start_time.desc()).limit(limit).all()
+    identities = {
+        cp.id: cp.ocpp_identity
+        for cp in db.query(ChargePoint).filter(
+            ChargePoint.tenant_id == tenant_id,
+            ChargePoint.id.in_({s.charge_point_id for s in sessions}),
+        ).all()
+    } if sessions else {}
     result = []
     for s in sessions:
         latest = (
@@ -127,7 +147,8 @@ def list_active_sessions(
         result.append({
             "id": s.id,
             "transaction_id": s.transaction_id,
-            "charge_point_id": s.charge_point_id,
+            "charge_point_id": str(s.charge_point_id),
+            "ocpp_identity": identities.get(s.charge_point_id),
             "user_id": s.user_id,
             "start_time": s.start_time.isoformat() if s.start_time else None,
             "energy_kwh": energy_kwh,
@@ -136,4 +157,3 @@ def list_active_sessions(
             "status": s.status,
         })
     return result
-

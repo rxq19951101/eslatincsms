@@ -1,11 +1,12 @@
 #
 # APP用户 - 钱包API（简化版）
-# - 余额存放在 end_users.balance
+# - 余额存放在 app_users.balance
 # - 流水存放在 wallet_transactions
 #
 
 from typing import List, Dict, Any, Optional
 from decimal import Decimal
+from uuid import UUID
 import os
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -250,14 +251,16 @@ def top_up(
                 raise HTTPException(status_code=404, detail="User not found")
 
             ledger_id = f"mock_topup_{app_user.id}_{req.idempotency_key}"
-            existing_tx = db.query(AppWalletTransaction).filter(AppWalletTransaction.id == ledger_id).first()
+            existing_tx = db.query(AppWalletTransaction).filter(
+                AppWalletTransaction.transaction_number == ledger_id
+            ).first()
             if existing_tx:
                 return WalletBalanceResponse(balance=Decimal(str(app_user.balance or 0)), currency="COP")
 
             app_user = db.query(AppUser).filter(AppUser.id == app_user.id).with_for_update().one()
             app_user.balance = Decimal(str(app_user.balance or 0)) + amount
             tx = AppWalletTransaction(
-                id=ledger_id,
+                transaction_number=ledger_id,
                 app_user_id=app_user.id,
                 operator_tenant_id=operator_tenant.id,
                 charge_point_id=None,
@@ -289,7 +292,7 @@ def top_up(
                 details={"amount": float(amount), "new_balance": float(app_user.balance or 0)}
             )
 
-            return WalletBalanceResponse(balance=float(app_user.balance or 0), currency="USD")
+            return WalletBalanceResponse(balance=float(app_user.balance or 0), currency="COP")
         except HTTPException:
             raise
         except Exception as e:
@@ -319,7 +322,7 @@ def top_up(
 
 
 class UnpaidChargeResponse(BaseModel):
-    session_id: int
+    session_id: str
     charge_point_id: str
     amount: Decimal
     currency: str
@@ -363,8 +366,8 @@ def get_unpaid_charges(
 
                 result.append(
                     UnpaidChargeResponse(
-                        session_id=session.id,
-                        charge_point_id=session.charge_point_id,
+                        session_id=str(session.id),
+                        charge_point_id=str(session.charge_point_id),
                         amount=float(amount),
                         currency="COP",
                         created_at=session.created_at.isoformat() if session.created_at else "",
@@ -405,7 +408,7 @@ def get_unpaid_charges(
 
 
 class PayUnpaidChargeRequest(BaseModel):
-    session_id: int = Field(..., description="充电会话ID")
+    session_id: UUID = Field(..., description="内部充电会话 UUID")
 
 
 @router.post("/pay-unpaid-charge", summary="补缴欠费（创建新的支付订单）")
@@ -457,7 +460,7 @@ def pay_unpaid_charge(
                 type="charging",
                 amount=float(amount),
                 currency="COP",
-                metadata={"session_id": session.id},
+                metadata={"session_id": str(session.id)},
             )
 
             log_api_response(
@@ -471,7 +474,7 @@ def pay_unpaid_charge(
 
             return {
                 "message": "Please use /api/v1/app/wallet/payments/create to create payment order",
-                "session_id": session.id,
+                "session_id": str(session.id),
                 "estimated_amount": float(amount),
             }
         except HTTPException:

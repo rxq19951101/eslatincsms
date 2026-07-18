@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func, and_
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal
+from uuid import UUID
 
 from app.core.logging_config import get_logger
 from app.core.api_logging import log_api_request, log_api_response, log_api_error, log_business_operation
@@ -21,11 +22,9 @@ from app.services.billing_service import BillingService
 from app.services.qr_service import resolve_qr_token
 
 from app.api.v1.ocpp_control import (
-    RemoteStartRequest,
-    RemoteStopRequest,
     check_charger_connection,
-    remote_start,
-    remote_stop,
+    send_remote_start,
+    send_remote_stop,
 )
 
 logger = get_logger("ocpp_csms")
@@ -60,7 +59,7 @@ class StopChargingRequest(BaseModel):
 
 
 class SettleChargingRequest(BaseModel):
-    session_id: int = Field(..., description="charging_sessions.id（停止后用该session结算）", ge=1)
+    session_id: UUID = Field(..., description="charging_sessions.id UUID（停止后用该session结算）")
 
 
 @router.post("/start", summary="扫码启动充电（终端用户）")
@@ -188,12 +187,13 @@ async def start_charging_by_scan(
     )
 
     # 复用 ocpp_control 的实现
-        result = await remote_start(
-        RemoteStartRequest(
-                chargePointId=token_rec.charge_point_id,
-            idTag=id_tag,
-                connectorId=token_rec.connector_id,
-            )
+        charge_point = db.query(ChargePoint).filter(ChargePoint.id == token_rec.charge_point_id).first()
+        if not charge_point:
+            raise HTTPException(status_code=404, detail="Charge point not found")
+        result = await send_remote_start(
+            charge_point.ocpp_identity,
+            id_tag,
+            token_rec.connector_id,
         )
         
         log_api_response(
@@ -318,7 +318,7 @@ def check_charger_status(
             is_online = time_diff.total_seconds() < 300  # 5分钟内更新过才认为在线
 
         # RemoteStart 依赖实时 WebSocket/MQTT，仅有 DB 心跳不够
-        is_connected = check_charger_connection(charge_point_id)
+        is_connected = check_charger_connection(charger.ocpp_identity)
         is_online = is_online and is_connected
 
         # 检查用户是否有欠费
@@ -395,7 +395,9 @@ def check_charger_status(
             connector_status = evse_status.status or "Unknown"
 
         result = {
-            "charger_id": charge_point_id,
+            "charger_id": str(charger.id),
+            "charge_point_id": str(charger.id),
+            "ocpp_identity": charger.ocpp_identity,
             "connector_id": connector_id,
             "status": status,
             "is_online": is_online,
@@ -417,7 +419,12 @@ def check_charger_status(
             operation="check_charger_status",
             result="success",
             current_user=current_user_obj,
-            details={"charge_point_id": charge_point_id, "status": status, "is_online": is_online}
+            details={
+                "charge_point_id": str(charger.id),
+                "ocpp_identity": charger.ocpp_identity,
+                "status": status,
+                "is_online": is_online,
+            }
         )
         
         return result
@@ -645,12 +652,10 @@ async def stop_charging(
             details={"charge_point_id": charge_point_id, "transaction_id": session.transaction_id}
         )
 
-        result = await remote_stop(
-            RemoteStopRequest(
-                chargePointId=charge_point_id,
-                transactionId=session.transaction_id,
-            )
-        )
+        charge_point = db.query(ChargePoint).filter(ChargePoint.id == charge_point_id).first()
+        if not charge_point:
+            raise HTTPException(status_code=404, detail="Charge point not found")
+        result = await send_remote_stop(charge_point.ocpp_identity, session.transaction_id)
 
         log_api_response(
             method="POST",
@@ -689,7 +694,7 @@ def settle_charging(
     - 仅当 session 已结束（end_time 或 meter_stop 存在）才允许结算
     - 根据 Tariff（优先桩级，其次站点级）读取 price_per_kwh
     - 费用 = energy_kwh * price_per_kwh（无电量则为0）
-    - 钱包：EndUser.balance -= 费用（不足则扣到 0，避免出现负余额）
+    - 钱包：AppUser.balance -= 费用（不足则扣到 0，避免出现负余额）
     - 流水幂等：WalletTransaction.id 固定为 charge_{session_id}，重复调用不会重复扣费
     """
     try:
@@ -818,8 +823,8 @@ def _extract_first_numeric(sampled_values: Any, measurand: str) -> Optional[floa
 
 @router.get("/meter-values", summary="获取充电过程实时数据（MeterValues）")
 def get_meter_values(
-    session_id: int = Query(..., ge=1, description="charging_sessions.id"),
-    since_id: Optional[int] = Query(None, ge=1, description="增量拉取：只返回 id > since_id 的数据"),
+    session_id: UUID = Query(..., description="charging_sessions.id UUID"),
+    since_id: Optional[UUID] = Query(None, description="增量拉取起点 meter_values.id UUID"),
     limit: int = Query(50, ge=1, le=200),
     current_user_obj: AppUser = Depends(get_current_app_user),
 ):
@@ -921,4 +926,3 @@ def get_meter_values(
         raise
     finally:
         db.close()
-

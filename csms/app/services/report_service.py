@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func, and_, extract, case
 from app.database.models import (
     ChargePoint, Order, Invoice, ChargingSession, 
-    EndUser, Site, EVSEStatus, MeterValue
+    AppUser, Site, EVSEStatus, MeterValue
 )
 from app.core.logging_config import get_logger
 
@@ -152,17 +152,19 @@ class ReportService:
         tenant_id: UUID
     ) -> Dict[str, Any]:
         """获取用户统计"""
-        total_users = db.query(EndUser).filter(
-            EndUser.tenant_id == tenant_id,
-            EndUser.status == "active"
-        ).count()
-        
-        # 今日活跃用户（有订单或登录）
+        # AppUser 是平台级用户，不绑定单一租户；租户口径按实际使用过该租户的用户统计。
+        total_users = db.query(func.count(func.distinct(ChargingSession.user_id))).filter(
+            ChargingSession.tenant_id == tenant_id,
+            ChargingSession.user_id.isnot(None),
+        ).scalar() or 0
+
+        # 今日活跃用户（今天在该租户有充电会话）
         today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0)
-        active_today = db.query(EndUser).filter(
-            EndUser.tenant_id == tenant_id,
-            EndUser.last_login_at >= today_start
-        ).count()
+        active_today = db.query(func.count(func.distinct(ChargingSession.user_id))).filter(
+            ChargingSession.tenant_id == tenant_id,
+            ChargingSession.user_id.isnot(None),
+            ChargingSession.start_time >= today_start,
+        ).scalar() or 0
         
         return {
             "total_users": total_users,
@@ -232,6 +234,37 @@ class ReportService:
         if format == "json":
             return json.dumps(rows, ensure_ascii=False, indent=2).encode("utf-8")
 
+        buf = io.StringIO()
+        if rows:
+            writer = csv.DictWriter(buf, fieldnames=list(rows[0].keys()))
+            writer.writeheader()
+            writer.writerows(rows)
+        else:
+            buf.write("date,total_revenue,total_energy_kwh,invoice_count\n")
+        return buf.getvalue().encode("utf-8-sig")
+
+    @staticmethod
+    def export_all_tenants_report(
+        db: Session,
+        report_type: str,
+        start_date: datetime,
+        end_date: datetime,
+        format: str = "csv",
+    ) -> bytes:
+        """导出总管理员的全租户汇总报表。"""
+        loaders = {
+            "revenue": ReportService.get_all_tenants_revenue_report,
+            "energy": ReportService.get_all_tenants_energy_report,
+            "orders": ReportService.get_all_tenants_orders_report,
+        }
+        loader = loaders.get(report_type)
+        if not loader:
+            raise ValueError("Unsupported report type")
+        rows = loader(db, start_date, end_date, "day")
+        if format == "json":
+            return json.dumps(rows, ensure_ascii=False, indent=2, default=str).encode("utf-8")
+        if format not in {"csv", "excel"}:
+            raise ValueError("Unsupported export format")
         buf = io.StringIO()
         if rows:
             writer = csv.DictWriter(buf, fieldnames=list(rows[0].keys()))
@@ -363,15 +396,13 @@ class ReportService:
         
         注意：此方法仅供超级管理员使用，需要使用 SuperSessionLocal 绕过 RLS
         """
-        # 不过滤 tenant_id
-        total_users = db.query(EndUser).filter(
-            EndUser.status == "active"
-        ).count()
+        total_users = db.query(AppUser).filter(AppUser.status == "active").count()
         
         # 今日活跃用户
         today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0)
-        active_today = db.query(EndUser).filter(
-            EndUser.last_login_at >= today_start
+        active_today = db.query(AppUser).filter(
+            AppUser.status == "active",
+            AppUser.last_login_at >= today_start,
         ).count()
         
         return {

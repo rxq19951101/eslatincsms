@@ -2,15 +2,28 @@
 数据库模型单元测试
 """
 import pytest
+import uuid
 from datetime import datetime, timezone
 from app.database.models import (
     Site, ChargePoint, EVSE, EVSEStatus, Device,
-    ChargingSession, DeviceEvent, Order, Invoice, Payment, Tariff
+    ChargingSession, DeviceEvent, Order, Invoice, Payment, PaymentOrder, Tariff
 )
 
 
 class TestDatabaseModels:
     """数据库模型测试类"""
+
+    def test_frozen_and_provider_constraints_are_in_metadata(self):
+        site_checks = {constraint.name for constraint in Site.__table__.constraints}
+        charge_point_checks = {constraint.name for constraint in ChargePoint.__table__.constraints}
+        payment_order_constraints = {
+            constraint.name for constraint in PaymentOrder.__table__.constraints
+        }
+
+        assert "ck_sites_code_format" in site_checks
+        assert "ck_charge_points_ocpp_identity_format" in charge_point_checks
+        assert "uq_payment_orders_wompi_transaction_id" in payment_order_constraints
+        assert "uq_payment_orders_mercadopago_payment_id" in payment_order_constraints
     
     def test_site_creation(self, db_session, sample_tenant):
         """测试创建站点"""
@@ -18,14 +31,15 @@ class TestDatabaseModels:
             id="test_site_1",
             tenant_id=sample_tenant.id,
             name="测试站点",
-            address="测试地址",
+            address="测试站点地址",
             latitude=39.9042,
             longitude=116.4074
         )
         db_session.add(site)
         db_session.commit()
         
-        assert site.id == "test_site_1"
+        assert str(site.id) != "test_site_1"
+        assert site.site_code == "test_site_1"
         assert site.name == "测试站点"
         assert site.latitude == 39.9042
     
@@ -41,7 +55,8 @@ class TestDatabaseModels:
         db_session.add(charge_point)
         db_session.commit()
         
-        assert charge_point.id == "CP-TEST-001"
+        assert str(charge_point.id) != "CP-TEST-001"
+        assert charge_point.ocpp_identity == "CP-TEST-001"
         assert charge_point.site_id == sample_site.id
     
     def test_device_creation(self, db_session, sample_tenant):
@@ -197,7 +212,7 @@ class TestDatabaseModels:
     def test_order_creation(self, db_session, sample_charge_point):
         """测试创建订单"""
         order = Order(
-            id="ORDER-TEST-001",  # Order.id是主键，必须提供
+            order_number="ORDER-TEST-001",
             tenant_id=sample_charge_point.tenant_id,
             charge_point_id=sample_charge_point.id,
             user_id="TEST_USER_001",
@@ -207,7 +222,8 @@ class TestDatabaseModels:
         db_session.add(order)
         db_session.commit()
         
-        assert order.id == "ORDER-TEST-001"
+        assert isinstance(order.id, uuid.UUID)
+        assert order.order_number == "ORDER-TEST-001"
         assert order.user_id == "TEST_USER_001"
         assert order.status == "ongoing"
     

@@ -16,17 +16,7 @@ max_retries=30
 retry_count=0
 
 while [ $retry_count -lt $max_retries ]; do
-    if python3 -c "
-import psycopg2
-import os
-import sys
-try:
-    conn = psycopg2.connect(os.getenv('DATABASE_URL', 'postgresql://ocpp_user:ocpp_password@db:5432/ocpp'))
-    conn.close()
-    sys.exit(0)
-except:
-    sys.exit(1)
-" 2>/dev/null; then
+    if pg_isready -h db -p 5432 -U "${POSTGRES_USER:-ocpp_user}" -d "${POSTGRES_DB:-ocpp}" >/dev/null 2>&1; then
         echo "✓ 数据库连接成功"
         break
     fi
@@ -41,47 +31,12 @@ if [ $retry_count -eq $max_retries ]; then
     exit 1
 fi
 
-# 检查数据库是否已初始化
+# Alembic 是唯一 schema 入口；每次启动都升级到 head。
 echo ""
-echo "检查数据库是否已初始化..."
-TABLES_COUNT=$(python3 -c "
-import psycopg2
-import os
-conn = psycopg2.connect(os.getenv('DATABASE_URL', 'postgresql://ocpp_user:ocpp_password@db:5432/ocpp'))
-cur = conn.cursor()
-cur.execute(\"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE'\")
-count = cur.fetchone()[0]
-print(count)
-conn.close()
-")
-
-if [ "$TABLES_COUNT" -gt "5" ]; then
-    echo "✓ 数据库已包含 $TABLES_COUNT 个表，跳过表结构初始化"
-else
-    echo "数据库表数量: $TABLES_COUNT，开始初始化表结构..."
-    
-    # 执行初始化SQL
-    if [ -f "/app/scripts/init_database.sql" ]; then
-        echo "执行 init_database.sql..."
-        # 从 DATABASE_URL 中提取数据库信息
-        DB_HOST=$(echo $DATABASE_URL | sed -n 's|.*@\([^:]*\):[0-9]*/.*|\1|p')
-        DB_USER=$(echo $DATABASE_URL | sed -n 's|.*://\([^:]*\):.*|\1|p')
-        DB_PASS=$(echo $DATABASE_URL | sed -n 's|.*://[^:]*:\([^@]*\)@.*|\1|p')
-        DB_NAME=$(echo $DATABASE_URL | sed -n 's|.*/\([^?]*\).*|\1|p')
-        
-        export PGPASSWORD="${DB_PASS}"
-        psql -h "${DB_HOST}" -U "${DB_USER}" -d "${DB_NAME}" -f /app/scripts/init_database.sql
-        
-        if [ $? -eq 0 ]; then
-            echo "✓ 数据库表结构初始化成功"
-        else
-            echo "❌ 数据库表结构初始化失败"
-            exit 1
-        fi
-    else
-        echo "⚠️  未找到 init_database.sql 文件"
-    fi
-fi
+echo "执行 Alembic upgrade head..."
+cd /app
+alembic upgrade head
+echo "✓ 数据库 schema 已升级到 Alembic head"
 
 # 检查是否需要创建初始数据
 echo ""

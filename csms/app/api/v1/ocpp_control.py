@@ -3,15 +3,22 @@
 # 提供OCPP远程控制功能（RemoteStart, RemoteStop等）
 #
 
-from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from typing import List, Literal, Optional
+from fastapi import APIRouter, Depends, Header, HTTPException
+from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.core.exceptions import ChargerNotConnectedException
 from app.core.logging_config import get_logger
-from app.database import SessionLocal
-from app.database.models import ChargePoint
+from app.core.asset_identifiers import (
+    get_charge_point_by_reference,
+    get_tenant_charge_point_by_reference,
+)
+from app.core.permissions import require_permission
+from app.database.base import get_db, tenant_id_context
+from app.database.models import AuditLog, ChargePoint, ChargingSession, EVSE, OutboxEvent
 from app.services.outbox_service import OutboxService
+from app.api.validation import StrictRequestModel
 import uuid
 
 settings = get_settings()
@@ -82,205 +89,301 @@ def check_charger_connection(charge_point_id: str) -> bool:
     return is_connected
 
 
-def record_remote_command(charge_point_id: str, event_type: str, payload: dict) -> None:
-    """把远程控制请求写入 Outbox，供异步发送/重试和审计使用。"""
-    db = SessionLocal()
-    try:
-        cp = db.query(ChargePoint).filter(ChargePoint.id == charge_point_id).first()
-        if not cp or not cp.tenant_id:
-            return
-        command_id = str(uuid.uuid4())
-        OutboxService.enqueue(
-            db,
-            tenant_id=cp.tenant_id,
-            aggregate_type="ChargePoint",
-            aggregate_id=charge_point_id,
-            event_type=event_type,
-            idempotency_key=f"remote-command:{command_id}",
-            payload={"command_id": command_id, "charge_point_id": charge_point_id, **payload},
+def _scoped_charge_point(db: Session, reference: str) -> ChargePoint:
+    tenant_id = tenant_id_context.get()
+    if not tenant_id:
+        raise HTTPException(status_code=403, detail="Tenant ID required")
+    cp = get_tenant_charge_point_by_reference(db, reference, tenant_id)
+    if not cp:
+        if get_charge_point_by_reference(db, reference):
+            raise HTTPException(status_code=403, detail="Charge point belongs to another tenant")
+        raise HTTPException(status_code=404, detail="Charge point not found")
+    return cp
+
+
+def _record_remote_command(
+    db: Session,
+    *,
+    charge_point: ChargePoint,
+    admin,
+    action: str,
+    payload: dict,
+    idempotency_key: Optional[str],
+) -> tuple[OutboxEvent, bool]:
+    command_key = (idempotency_key or str(uuid.uuid4())).strip()
+    if not command_key or len(command_key) > 255:
+        raise HTTPException(status_code=422, detail="Idempotency-Key must contain 1-255 characters")
+    stored_key = f"remote-command:{command_key}"
+    existing = db.query(OutboxEvent).filter(
+        OutboxEvent.tenant_id == charge_point.tenant_id,
+        OutboxEvent.idempotency_key == stored_key,
+    ).first()
+    if existing:
+        return existing, False
+
+    command_id = str(uuid.uuid4())
+    event = OutboxService.enqueue(
+        db,
+        tenant_id=charge_point.tenant_id,
+        aggregate_type="ChargePoint",
+        aggregate_id=str(charge_point.id),
+        event_type=f"{action}Requested",
+        idempotency_key=stored_key,
+        payload={
+            "command_id": command_id,
+            "charge_point_id": str(charge_point.id),
+            "ocpp_identity": charge_point.ocpp_identity,
+            **payload,
+        },
+    )
+    db.add(AuditLog(
+        tenant_id=charge_point.tenant_id,
+        actor_id=admin.id,
+        actor_type="admin",
+        action=f"ocpp.{action}",
+        resource_type="charge_point",
+        resource_id=str(charge_point.id),
+        after_data={"ocpp_identity": charge_point.ocpp_identity, **payload},
+        audit_metadata={"command_id": command_id, "idempotency_key": command_key},
+    ))
+    db.commit()
+    return event, True
+
+
+def _store_remote_command_response(
+    db: Session,
+    event: OutboxEvent,
+    response: "RemoteResponse",
+) -> None:
+    """Persist the first device response so an idempotent replay is truthful."""
+    payload = dict(event.payload or {})
+    payload["command_result"] = {
+        "kind": "response",
+        "success": response.success,
+        "message": response.message,
+        "details": response.details,
+    }
+    event.payload = payload
+    event.status = "published" if response.success else "failed"
+    event.last_error = None if response.success else response.message
+    db.commit()
+
+
+def _store_remote_command_error(
+    db: Session,
+    event: OutboxEvent,
+    exc: HTTPException,
+) -> None:
+    """Persist the first HTTP failure, including offline charger failures."""
+    payload = dict(event.payload or {})
+    payload["command_result"] = {
+        "kind": "http_error",
+        "status_code": exc.status_code,
+        "detail": exc.detail,
+        "error_code": getattr(exc, "error_code", "HTTP_ERROR"),
+    }
+    event.payload = payload
+    event.status = "failed"
+    event.last_error = str(exc.detail)
+    db.commit()
+
+
+def _replay_remote_command(event: OutboxEvent) -> "RemoteResponse":
+    """Return or raise the exact first recorded outcome for an idempotency key."""
+    result = (event.payload or {}).get("command_result")
+    if not result:
+        raise HTTPException(status_code=409, detail="Original command outcome is not yet available")
+    if result.get("kind") == "http_error":
+        exc = HTTPException(
+            status_code=result["status_code"],
+            detail=result["detail"],
         )
-        db.commit()
-    except Exception:
-        db.rollback()
-        logger.exception("记录远程控制 Outbox 失败: charge_point_id=%s", charge_point_id)
-    finally:
-        db.close()
+        exc.error_code = result.get("error_code", "HTTP_ERROR")
+        raise exc
+
+    details = dict(result.get("details") or {})
+    details.update({
+        "command_id": (event.payload or {}).get("command_id"),
+        "idempotent_replay": True,
+    })
+    return RemoteResponse(
+        success=bool(result.get("success")),
+        message=result.get("message") or "远程命令失败",
+        details=details,
+    )
 
 
-class RemoteStartRequest(BaseModel):
-    chargePointId: str
-    idTag: str
-    connectorId: int = 1
+async def _execute_remote_command(db: Session, event: OutboxEvent, sender) -> "RemoteResponse":
+    try:
+        response = await sender()
+    except HTTPException as exc:
+        _store_remote_command_error(db, event, exc)
+        raise
+    except Exception as exc:
+        failure = HTTPException(status_code=502, detail="Failed to send remote command")
+        _store_remote_command_error(db, event, failure)
+        raise failure from exc
+    _store_remote_command_response(db, event, response)
+    return response
 
 
-class RemoteStopRequest(BaseModel):
-    chargePointId: str
-    transactionId: int
+class RemoteStartRequest(StrictRequestModel):
+    charge_point_id: str = Field(..., min_length=1, max_length=64)
+    id_tag: str = Field(..., min_length=1, max_length=20)
+    connector_id: int = Field(1, ge=1, le=255)
 
 
-class ChangeConfigurationRequest(BaseModel):
-    chargePointId: str
-    key: str
-    value: str
+class RemoteStopRequest(StrictRequestModel):
+    charge_point_id: str = Field(..., min_length=1, max_length=64)
+    transaction_id: int = Field(..., ge=0)
 
 
-class GetConfigurationRequest(BaseModel):
-    chargePointId: str
-    keys: Optional[List[str]] = None
+class ChangeConfigurationRequest(StrictRequestModel):
+    charge_point_id: str = Field(..., min_length=1, max_length=64)
+    key: str = Field(..., min_length=1, max_length=100)
+    value: str = Field(..., max_length=500)
 
 
-class ResetRequest(BaseModel):
-    chargePointId: str
-    type: str  # Hard or Soft
+class GetConfigurationRequest(StrictRequestModel):
+    charge_point_id: str = Field(..., min_length=1, max_length=64)
+    keys: Optional[List[str]] = Field(None, max_length=100)
 
 
-class UnlockConnectorRequest(BaseModel):
-    chargePointId: str
-    connectorId: int
+class ResetRequest(StrictRequestModel):
+    charge_point_id: str = Field(..., min_length=1, max_length=64)
+    type: Literal["Soft", "Hard"]
+
+
+class UnlockConnectorRequest(StrictRequestModel):
+    charge_point_id: str = Field(..., min_length=1, max_length=64)
+    connector_id: int = Field(..., ge=1, le=255)
 
 
 class RemoteResponse(BaseModel):
     success: bool
     message: str
-    details: dict = None
+    details: Optional[dict] = None
+
+
+async def send_remote_start(charge_point_identity: str, id_tag: str, connector_id: int) -> RemoteResponse:
+    if not check_charger_connection(charge_point_identity):
+        raise ChargerNotConnectedException(charge_point_identity)
+    payload = {"connectorId": connector_id, "idTag": id_tag}
+    if settings.enable_distributed:
+        result = await message_handler.send_to_charger(charge_point_identity, "RemoteStartTransaction", payload)
+    else:
+        result = await message_handler.send_call(charge_point_identity, "RemoteStartTransaction", payload)
+    success = result.get("success", False)
+    return RemoteResponse(success=success, message="远程启动请求已发送" if success else "远程启动失败", details=result)
+
+
+async def send_remote_stop(charge_point_identity: str, transaction_id: int) -> RemoteResponse:
+    if not check_charger_connection(charge_point_identity):
+        raise ChargerNotConnectedException(charge_point_identity)
+    payload = {"transactionId": transaction_id}
+    if settings.enable_distributed:
+        result = await message_handler.send_to_charger(charge_point_identity, "RemoteStopTransaction", payload)
+    else:
+        result = await message_handler.send_call(charge_point_identity, "RemoteStopTransaction", payload)
+    success = result.get("success", False)
+    return RemoteResponse(success=success, message="远程停止请求已发送" if success else "远程停止失败", details=result)
 
 
 @router.post("/remote-start-transaction", response_model=RemoteResponse, summary="远程启动充电")
-@router.post("/remoteStart", response_model=RemoteResponse, summary="远程启动充电")  # 兼容旧路径
-async def remote_start(req: RemoteStartRequest) -> RemoteResponse:
+async def remote_start(
+    req: RemoteStartRequest,
+    idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
+    admin=Depends(require_permission("chargers.control")),
+    db: Session = Depends(get_db),
+) -> RemoteResponse:
     """远程启动充电事务"""
     logger.info(
         f"[API] POST /api/v1/ocpp_control/remoteStart | "
-        f"充电桩ID: {req.chargePointId} | "
-        f"用户标签: {req.idTag} | "
-        f"连接器ID: {req.connectorId}"
+        f"充电桩ID: {req.charge_point_id} | "
+        f"用户标签: {req.id_tag} | "
+        f"连接器ID: {req.connector_id}"
     )
-    
-    # 检查连接状态（同时检查 WebSocket 和 MQTT）
-    is_connected = check_charger_connection(req.chargePointId)
-    
-    if not is_connected:
-        logger.warning(f"[API] 远程启动失败: 充电桩 {req.chargePointId} 未连接 (transport_manager可用: {TRANSPORT_MANAGER_AVAILABLE}, adapters: {len(transport_manager.adapters) if TRANSPORT_MANAGER_AVAILABLE and transport_manager and hasattr(transport_manager, 'adapters') else 0})")
-        raise ChargerNotConnectedException(req.chargePointId)
-
-    record_remote_command(req.chargePointId, "RemoteStartTransactionRequested", {
-        "connector_id": req.connectorId, "id_tag": req.idTag,
-    })
-    
-    # 使用消息处理器（支持分布式）
-    if settings.enable_distributed:
-        result = await message_handler.send_to_charger(
-            req.chargePointId,
-            "RemoteStartTransaction",
-            {
-                "connectorId": req.connectorId,
-                "idTag": req.idTag
-            }
-        )
-    else:
-        result = await message_handler.send_call(
-            req.chargePointId,
-            "RemoteStartTransaction",
-            {
-                "connectorId": req.connectorId,
-                "idTag": req.idTag
-            }
-        )
-    
-    success = result.get("success", False)
-    logger.info(
-        f"[API] POST /api/v1/ocpp_control/remoteStart {'成功' if success else '失败'} | "
-        f"充电桩ID: {req.chargePointId} | "
-        f"用户标签: {req.idTag}"
+    cp = _scoped_charge_point(db, req.charge_point_id)
+    evse = db.query(EVSE).filter(EVSE.charge_point_id == cp.id, EVSE.evse_id == req.connector_id).first()
+    if not evse:
+        raise HTTPException(status_code=422, detail="connector_id does not exist on this charge point")
+    event, is_new = _record_remote_command(
+        db, charge_point=cp, admin=admin, action="remote_start",
+        payload={"connector_id": req.connector_id, "id_tag": req.id_tag},
+        idempotency_key=idempotency_key,
     )
-    
-    return RemoteResponse(
-        success=success,
-        message="远程启动请求已发送" if success else "远程启动失败",
-        details=result
+    if not is_new:
+        return _replay_remote_command(event)
+    return await _execute_remote_command(
+        db, event, lambda: send_remote_start(cp.ocpp_identity, req.id_tag, req.connector_id)
     )
 
 
 @router.post("/remote-stop-transaction", response_model=RemoteResponse, summary="远程停止充电")
-@router.post("/remoteStop", response_model=RemoteResponse, summary="远程停止充电")  # 兼容旧路径
-async def remote_stop(req: RemoteStopRequest) -> RemoteResponse:
+async def remote_stop(
+    req: RemoteStopRequest,
+    idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
+    admin=Depends(require_permission("chargers.control")),
+    db: Session = Depends(get_db),
+) -> RemoteResponse:
     """远程停止充电事务"""
     logger.info(
         f"[API] POST /api/v1/ocpp_control/remoteStop | "
-        f"充电桩ID: {req.chargePointId} | "
-        f"交易ID: {req.transactionId}"
+        f"充电桩ID: {req.charge_point_id} | "
+        f"交易ID: {req.transaction_id}"
     )
-    
-    # 检查连接状态（同时检查 WebSocket 和 MQTT）
-    is_connected = check_charger_connection(req.chargePointId)
-    
-    if not is_connected:
-        logger.warning(f"[API] 远程停止失败: 充电桩 {req.chargePointId} 未连接")
-        raise ChargerNotConnectedException(req.chargePointId)
-
-    record_remote_command(req.chargePointId, "RemoteStopTransactionRequested", {
-        "transaction_id": req.transactionId,
-    })
-    
-    # 使用消息处理器（支持分布式）
-    if settings.enable_distributed:
-        result = await message_handler.send_to_charger(
-            req.chargePointId,
-            "RemoteStopTransaction",
-            {
-                "transactionId": req.transactionId
-            }
-        )
-    else:
-        result = await message_handler.send_call(
-            req.chargePointId,
-            "RemoteStopTransaction",
-            {
-                "transactionId": req.transactionId
-            }
-        )
-    
-    success = result.get("success", False)
-    logger.info(
-        f"[API] POST /api/v1/ocpp_control/remoteStop {'成功' if success else '失败'} | "
-        f"充电桩ID: {req.chargePointId} | "
-        f"交易ID: {req.transactionId}"
+    cp = _scoped_charge_point(db, req.charge_point_id)
+    active_session = db.query(ChargingSession).filter(
+        ChargingSession.charge_point_id == cp.id,
+        ChargingSession.transaction_id == req.transaction_id,
+        ChargingSession.status == "ongoing",
+        ChargingSession.end_time.is_(None),
+    ).first()
+    if not active_session:
+        raise HTTPException(status_code=422, detail="transaction_id is not an active OCPP transaction for this charge point")
+    event, is_new = _record_remote_command(
+        db, charge_point=cp, admin=admin, action="remote_stop",
+        payload={"transaction_id": req.transaction_id, "session_id": active_session.id},
+        idempotency_key=idempotency_key,
     )
-    
-    return RemoteResponse(
-        success=success,
-        message="远程停止请求已发送" if success else "远程停止失败",
-        details=result
+    if not is_new:
+        return _replay_remote_command(event)
+    return await _execute_remote_command(
+        db, event, lambda: send_remote_stop(cp.ocpp_identity, req.transaction_id)
     )
 
 
 @router.post("/change-configuration", response_model=RemoteResponse, summary="更改配置")
-@router.post("/changeConfiguration", response_model=RemoteResponse, summary="更改配置")  # 兼容旧路径
-async def change_configuration(req: ChangeConfigurationRequest) -> RemoteResponse:
+async def change_configuration(
+    req: ChangeConfigurationRequest,
+    admin=Depends(require_permission("chargers.control")),
+    db: Session = Depends(get_db),
+) -> RemoteResponse:
     """更改充电桩配置参数"""
+    cp = _scoped_charge_point(db, req.charge_point_id)
     logger.info(
         f"[API] POST /api/v1/ocpp/change-configuration | "
-        f"充电桩ID: {req.chargePointId} | "
+        f"充电桩ID: {req.charge_point_id} | "
         f"配置键: {req.key} | "
         f"配置值: {req.value}"
     )
     
     # 检查连接状态（同时检查 WebSocket 和 MQTT）
-    is_connected = check_charger_connection(req.chargePointId)
+    is_connected = check_charger_connection(cp.ocpp_identity)
     
     if not is_connected:
-        logger.warning(f"[API] 更改配置失败: 充电桩 {req.chargePointId} 未连接")
-        raise ChargerNotConnectedException(req.chargePointId)
+        logger.warning(f"[API] 更改配置失败: 充电桩 {cp.ocpp_identity} 未连接")
+        raise ChargerNotConnectedException(cp.ocpp_identity)
     
     if settings.enable_distributed:
         result = await message_handler.send_to_charger(
-            req.chargePointId,
+            cp.ocpp_identity,
             "ChangeConfiguration",
             {"key": req.key, "value": req.value}
         )
     else:
         result = await message_handler.send_call(
-            req.chargePointId,
+            cp.ocpp_identity,
             "ChangeConfiguration",
             {"key": req.key, "value": req.value}
         )
@@ -294,32 +397,36 @@ async def change_configuration(req: ChangeConfigurationRequest) -> RemoteRespons
 
 
 @router.post("/get-configuration", response_model=RemoteResponse, summary="获取配置")
-@router.post("/getConfiguration", response_model=RemoteResponse, summary="获取配置")  # 兼容旧路径
-async def get_configuration(req: GetConfigurationRequest) -> RemoteResponse:
+async def get_configuration(
+    req: GetConfigurationRequest,
+    admin=Depends(require_permission("chargers.read")),
+    db: Session = Depends(get_db),
+) -> RemoteResponse:
     """获取充电桩配置参数"""
+    cp = _scoped_charge_point(db, req.charge_point_id)
     logger.info(
         f"[API] POST /api/v1/ocpp/get-configuration | "
-        f"充电桩ID: {req.chargePointId} | "
+        f"充电桩ID: {req.charge_point_id} | "
         f"配置键: {req.keys or '全部'}"
     )
     
     # 检查连接状态（同时检查 WebSocket 和 MQTT）
-    is_connected = check_charger_connection(req.chargePointId)
+    is_connected = check_charger_connection(cp.ocpp_identity)
     
     if not is_connected:
-        logger.warning(f"[API] 获取配置失败: 充电桩 {req.chargePointId} 未连接")
-        raise ChargerNotConnectedException(req.chargePointId)
+        logger.warning(f"[API] 获取配置失败: 充电桩 {cp.ocpp_identity} 未连接")
+        raise ChargerNotConnectedException(cp.ocpp_identity)
     
     payload = {"key": req.keys} if req.keys else {}
     if settings.enable_distributed:
         result = await message_handler.send_to_charger(
-            req.chargePointId,
+            cp.ocpp_identity,
             "GetConfiguration",
             payload
         )
     else:
         result = await message_handler.send_call(
-            req.chargePointId,
+            cp.ocpp_identity,
             "GetConfiguration",
             payload
         )
@@ -333,70 +440,83 @@ async def get_configuration(req: GetConfigurationRequest) -> RemoteResponse:
 
 
 @router.post("/reset", response_model=RemoteResponse, summary="重置充电桩")
-async def reset_charger(req: ResetRequest) -> RemoteResponse:
+async def reset_charger(
+    req: ResetRequest,
+    idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
+    admin=Depends(require_permission("chargers.control")),
+    db: Session = Depends(get_db),
+) -> RemoteResponse:
     """重置充电桩（软重启或硬重启）"""
     logger.info(
         f"[API] POST /api/v1/ocpp/reset | "
-        f"充电桩ID: {req.chargePointId} | "
+        f"充电桩ID: {req.charge_point_id} | "
         f"重置类型: {req.type}"
     )
-    
-    # 检查连接状态（同时检查 WebSocket 和 MQTT）
-    is_connected = check_charger_connection(req.chargePointId)
-    
-    if not is_connected:
-        logger.warning(f"[API] 重置失败: 充电桩 {req.chargePointId} 未连接")
-        raise ChargerNotConnectedException(req.chargePointId)
-    
-    if settings.enable_distributed:
-        result = await message_handler.send_to_charger(
-            req.chargePointId,
-            "Reset",
-            {"type": req.type}
-        )
-    else:
-        result = await message_handler.send_call(
-            req.chargePointId,
-            "Reset",
-            {"type": req.type}
-        )
-    
-    success = result.get("success", False)
-    return RemoteResponse(
-        success=success,
-        message="重置请求已发送" if success else "重置失败",
-        details=result
+    cp = _scoped_charge_point(db, req.charge_point_id)
+    event, is_new = _record_remote_command(
+        db, charge_point=cp, admin=admin, action="reset",
+        payload={"type": req.type}, idempotency_key=idempotency_key,
     )
+    if not is_new:
+        return _replay_remote_command(event)
+
+    async def send_reset() -> RemoteResponse:
+        if not check_charger_connection(cp.ocpp_identity):
+            raise ChargerNotConnectedException(cp.ocpp_identity)
+        if settings.enable_distributed:
+            result = await message_handler.send_to_charger(
+                cp.ocpp_identity,
+                "Reset",
+                {"type": req.type}
+            )
+        else:
+            result = await message_handler.send_call(
+                cp.ocpp_identity,
+                "Reset",
+                {"type": req.type}
+            )
+        success = result.get("success", False)
+        return RemoteResponse(
+            success=success,
+            message="重置请求已发送" if success else "重置失败",
+            details=result,
+        )
+
+    return await _execute_remote_command(db, event, send_reset)
 
 
 @router.post("/unlock-connector", response_model=RemoteResponse, summary="解锁连接器")
-@router.post("/unlockConnector", response_model=RemoteResponse, summary="解锁连接器")  # 兼容旧路径
-async def unlock_connector(req: UnlockConnectorRequest) -> RemoteResponse:
+async def unlock_connector(
+    req: UnlockConnectorRequest,
+    admin=Depends(require_permission("chargers.control")),
+    db: Session = Depends(get_db),
+) -> RemoteResponse:
     """解锁连接器"""
+    cp = _scoped_charge_point(db, req.charge_point_id)
     logger.info(
         f"[API] POST /api/v1/ocpp/unlock-connector | "
-        f"充电桩ID: {req.chargePointId} | "
-        f"连接器ID: {req.connectorId}"
+        f"充电桩ID: {req.charge_point_id} | "
+        f"连接器ID: {req.connector_id}"
     )
     
     # 检查连接状态（同时检查 WebSocket 和 MQTT）
-    is_connected = check_charger_connection(req.chargePointId)
+    is_connected = check_charger_connection(cp.ocpp_identity)
     
     if not is_connected:
-        logger.warning(f"[API] 解锁连接器失败: 充电桩 {req.chargePointId} 未连接")
-        raise ChargerNotConnectedException(req.chargePointId)
+        logger.warning(f"[API] 解锁连接器失败: 充电桩 {cp.ocpp_identity} 未连接")
+        raise ChargerNotConnectedException(cp.ocpp_identity)
     
     if settings.enable_distributed:
         result = await message_handler.send_to_charger(
-            req.chargePointId,
+            cp.ocpp_identity,
             "UnlockConnector",
-            {"connectorId": req.connectorId}
+            {"connectorId": req.connector_id}
         )
     else:
         result = await message_handler.send_call(
-            req.chargePointId,
+            cp.ocpp_identity,
             "UnlockConnector",
-            {"connectorId": req.connectorId}
+            {"connectorId": req.connector_id}
         )
     
     success = result.get("success", False)
@@ -408,8 +528,14 @@ async def unlock_connector(req: UnlockConnectorRequest) -> RemoteResponse:
 
 
 @router.get("/connected", summary="获取所有已连接的充电桩列表")
-async def get_connected_chargers() -> dict:
+async def get_connected_chargers(
+    admin=Depends(require_permission("chargers.read")),
+    db: Session = Depends(get_db),
+) -> dict:
     """获取所有已连接的充电桩ID列表"""
+    tenant_id = tenant_id_context.get()
+    if not tenant_id:
+        raise HTTPException(status_code=403, detail="Tenant ID required")
     logger.info("[API] GET /api/v1/ocpp/connected | 获取已连接充电桩列表")
     
     connected_ids = []
@@ -436,42 +562,20 @@ async def get_connected_chargers() -> dict:
         ws_connected = []
     
     # 合并连接列表（去重，优先使用charger_websockets）
-    all_connected = list(set(ws_connected + connected_ids))
+    all_connected = set(ws_connected + connected_ids)
+    scoped_connected = {
+        identity for (identity,) in db.query(ChargePoint.ocpp_identity).filter(
+            ChargePoint.tenant_id == tenant_id,
+            ChargePoint.ocpp_identity.in_(all_connected),
+        ).all()
+    } if all_connected else set()
     
-    logger.info(f"[API] GET /api/v1/ocpp/connected 成功 | 总共 {len(all_connected)} 个已连接充电桩")
+    logger.info(f"[API] GET /api/v1/ocpp/connected 成功 | 总共 {len(scoped_connected)} 个已连接充电桩")
     
     return {
-        "connected_chargers": all_connected,
-        "count": len(all_connected),
+        "connected_chargers": sorted(scoped_connected),
+        "count": len(scoped_connected),
         "sources": {
-            "websocket": list(set(ws_connected + connected_ids))
+            "websocket": sorted(scoped_connected)
         }
     }
-
-
-@router.get("/debug/connection-status/{charge_point_id}", summary="调试：检查连接状态")
-async def debug_connection_status(charge_point_id: str):
-    """调试端点：检查充电桩的连接状态"""
-    result = {
-        "charge_point_id": charge_point_id,
-        "transport_manager_available": TRANSPORT_MANAGER_AVAILABLE,
-        "transport_manager_initialized": False,
-        "adapters": {},
-        "connection_status": {}
-    }
-    
-    if TRANSPORT_MANAGER_AVAILABLE and transport_manager:
-        result["transport_manager_initialized"] = hasattr(transport_manager, 'adapters') and len(transport_manager.adapters) > 0
-        result["adapters"] = {
-            str(k): {
-                "type": str(k),
-                "initialized": hasattr(v, 'is_connected'),
-                "connected": v.is_connected(charge_point_id) if hasattr(v, 'is_connected') else False
-            }
-            for k, v in transport_manager.adapters.items()
-        }
-        
-    result["connection_status"]["connection_manager"] = connection_manager.is_connected(charge_point_id)
-    result["connection_status"]["transport_manager"] = transport_manager.is_connected(charge_point_id) if TRANSPORT_MANAGER_AVAILABLE and transport_manager and hasattr(transport_manager, 'adapters') and transport_manager.adapters else False
-    
-    return result

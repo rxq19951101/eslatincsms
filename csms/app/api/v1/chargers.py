@@ -5,13 +5,16 @@
 
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy import or_, func
 from app.database.base import get_db, tenant_id_context
 from app.database.models import ChargePoint, Site, EVSE, EVSEStatus, Tariff, QrToken
 from app.core.logging_config import get_logger
 from app.core.permissions import get_current_admin_user
+from app.core.asset_identifiers import get_charge_point_by_reference, get_site_by_reference
+from app.api.validation import StrictRequestModel
 from app.core.permissions import has_permission
 from app.services.role_service import MembershipRoleService
 from datetime import datetime, timezone
@@ -22,10 +25,10 @@ logger = get_logger("ocpp_csms")
 router = APIRouter()
 
 
-class CreateChargerRequest(BaseModel):
-    id: str
-    vendor: Optional[str] = None
-    model: Optional[str] = None
+class CreateChargerRequest(StrictRequestModel):
+    id: str = Field(..., min_length=1, max_length=64, pattern=r"^[A-Za-z0-9._:-]+$")
+    vendor: Optional[str] = Field(None, max_length=100)
+    model: Optional[str] = Field(None, max_length=100)
     site_id: Optional[str] = None
 
 
@@ -38,10 +41,22 @@ class ChargerPricingUpdateRequest(BaseModel):
 
 class ChargerPricingResponse(BaseModel):
     charge_point_id: str
-    tariff_id: int
+    tariff_id: str
     base_price_per_kwh: Decimal
     service_fee: Decimal
     valid_from: str
+
+
+def _get_scoped_charge_point(db: Session, reference: str, current_user_obj) -> ChargePoint:
+    charge_point = get_charge_point_by_reference(db, reference)
+    if not charge_point:
+        raise HTTPException(status_code=404, detail=f"充电桩 {reference} 未找到")
+    tenant_id = tenant_id_context.get()
+    if tenant_id and charge_point.tenant_id != tenant_id:
+        raise HTTPException(status_code=403, detail="Charge point belongs to another tenant")
+    if not tenant_id and not current_user_obj.is_super_admin:
+        raise HTTPException(status_code=403, detail="Tenant ID required")
+    return charge_point
 
 
 @router.get("", summary="获取所有充电桩")
@@ -148,7 +163,8 @@ def list_chargers(
         is_configured = has_location and has_pricing
         
         result.append({
-            "id": cp.id,
+            "id": str(cp.id),
+            "ocpp_identity": cp.ocpp_identity,
             "vendor": cp.vendor,
             "model": cp.model,
             "status": status,
@@ -177,15 +193,7 @@ def get_charger(
     """获取单个充电桩的详细信息（使用新表结构）"""
     logger.info(f"[API] GET /api/v1/chargers/{charge_point_id} | 请求充电桩详情")
     
-    tenant_id = tenant_id_context.get()
-    query = db.query(ChargePoint).filter(ChargePoint.id == charge_point_id)
-    if tenant_id and not current_user_obj.is_super_admin:
-        query = query.filter(ChargePoint.tenant_id == tenant_id)
-    
-    charge_point = query.first()
-    if not charge_point:
-        logger.warning(f"[API] GET /api/v1/chargers/{charge_point_id} | 充电桩未找到")
-        raise HTTPException(status_code=404, detail=f"充电桩 {charge_point_id} 未找到")
+    charge_point = _get_scoped_charge_point(db, charge_point_id, current_user_obj)
     
     # 获取站点信息
     site = charge_point.site if charge_point.site_id else None
@@ -255,7 +263,8 @@ def get_charger(
             default_connector_type = evse.connector_type
     
     return {
-        "id": charge_point.id,
+        "id": str(charge_point.id),
+        "ocpp_identity": charge_point.ocpp_identity,
         "vendor": charge_point.vendor,
         "model": charge_point.model,
         "serial_number": charge_point.serial_number,
@@ -291,26 +300,32 @@ def create_charger(
         raise HTTPException(status_code=403, detail="Tenant ID required")
     
     # 检查是否已存在（按租户）
-    query = db.query(ChargePoint).filter(ChargePoint.id == req.id)
-    if tenant_id and not current_user_obj.is_super_admin:
-        query = query.filter(ChargePoint.tenant_id == tenant_id)
-    
-    existing = query.first()
+    existing = db.query(ChargePoint).filter(ChargePoint.ocpp_identity == req.id).first()
     if existing:
         logger.warning(f"[API] POST /api/v1/chargers | 充电桩 {req.id} 已存在")
-        raise HTTPException(status_code=400, detail=f"充电桩 {req.id} 已存在")
+        raise HTTPException(status_code=409, detail=f"充电桩 {req.id} 已存在")
+
+    site = get_site_by_reference(db, req.site_id) if req.site_id else None
+    if not site:
+        raise HTTPException(status_code=422, detail="site_id must reference an existing site")
+    if site.tenant_id != tenant_id:
+        raise HTTPException(status_code=403, detail="Site belongs to another tenant")
     
     # 创建新充电桩
     charge_point = ChargePoint(
-        id=req.id,
+        ocpp_identity=req.id,
         tenant_id=tenant_id,
         vendor=req.vendor,
         model=req.model,
-        site_id=req.site_id,
+        site_id=site.id,
         is_active=True
     )
     db.add(charge_point)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=f"充电桩 {req.id} 已存在") from exc
     db.refresh(charge_point)
     
     # 为已存在的EVSE生成二维码（爆改：token-only）
@@ -320,17 +335,17 @@ def create_charger(
         qr_storage_dir = get_qr_storage_dir()
         
         # 查询该充电桩的所有EVSE
-        evses = db.query(EVSE).filter(EVSE.charge_point_id == req.id).all()
+        evses = db.query(EVSE).filter(EVSE.charge_point_id == charge_point.id).all()
         for evse in evses:
             try:
                 generate_qr_code(
                     db=db,
-                    charge_point_id=req.id,
+                    charge_point_id=charge_point.id,
                     connector_id=evse.evse_id,
                     output_dir=qr_storage_dir,
                 )
-                token_rec = ensure_qr_token(db, req.id, evse.evse_id)
-                qr_url = get_qr_code_url(req.id, evse.evse_id)
+                token_rec = ensure_qr_token(db, charge_point.id, evse.evse_id)
+                qr_url = get_qr_code_url(str(charge_point.id), evse.evse_id)
                 qr_urls.append({
                     "connector_id": evse.evse_id,
                     "qr_token": token_rec.token,
@@ -345,18 +360,19 @@ def create_charger(
     
     logger.info(f"[API] POST /api/v1/chargers 成功 | 充电桩ID: {req.id}")
     return {
-        "id": charge_point.id,
+        "id": str(charge_point.id),
+        "ocpp_identity": charge_point.ocpp_identity,
         "vendor": charge_point.vendor,
         "model": charge_point.model,
-        "site_id": charge_point.site_id,
+        "site_id": str(charge_point.site_id),
         "is_active": charge_point.is_active,
         "qr_codes": qr_urls,  # 二维码URL列表（如果有EVSE）
     }
 
 
-class UpdateChargerRequest(BaseModel):
-    vendor: Optional[str] = None
-    model: Optional[str] = None
+class UpdateChargerRequest(StrictRequestModel):
+    vendor: Optional[str] = Field(None, max_length=100)
+    model: Optional[str] = Field(None, max_length=100)
 
 
 @router.put("/{charge_point_id}", summary="更新充电桩")
@@ -369,15 +385,7 @@ def update_charger(
     """更新充电桩信息"""
     logger.info(f"[API] PUT /api/v1/chargers/{charge_point_id}")
     
-    tenant_id = tenant_id_context.get()
-    query = db.query(ChargePoint).filter(ChargePoint.id == charge_point_id)
-    if tenant_id and not current_user_obj.is_super_admin:
-        query = query.filter(ChargePoint.tenant_id == tenant_id)
-    
-    charge_point = query.first()
-    if not charge_point:
-        logger.warning(f"[API] PUT /api/v1/chargers/{charge_point_id} | 充电桩未找到")
-        raise HTTPException(status_code=404, detail=f"充电桩 {charge_point_id} 未找到")
+    charge_point = _get_scoped_charge_point(db, charge_point_id, current_user_obj)
     
     if req.vendor is not None:
         charge_point.vendor = req.vendor
@@ -389,7 +397,8 @@ def update_charger(
     
     logger.info(f"[API] PUT /api/v1/chargers/{charge_point_id} 成功")
     return {
-        "id": charge_point.id,
+        "id": str(charge_point.id),
+        "ocpp_identity": charge_point.ocpp_identity,
         "vendor": charge_point.vendor,
         "model": charge_point.model,
     }
@@ -404,15 +413,7 @@ def delete_charger(
     """删除充电桩"""
     logger.info(f"[API] DELETE /api/v1/chargers/{charge_point_id}")
     
-    tenant_id = tenant_id_context.get()
-    query = db.query(ChargePoint).filter(ChargePoint.id == charge_point_id)
-    if tenant_id and not current_user_obj.is_super_admin:
-        query = query.filter(ChargePoint.tenant_id == tenant_id)
-    
-    charge_point = query.first()
-    if not charge_point:
-        logger.warning(f"[API] DELETE /api/v1/chargers/{charge_point_id} | 充电桩未找到")
-        raise HTTPException(status_code=404, detail=f"充电桩 {charge_point_id} 未找到")
+    charge_point = _get_scoped_charge_point(db, charge_point_id, current_user_obj)
     
     db.delete(charge_point)
     db.commit()
@@ -442,12 +443,7 @@ def update_charger_pricing(
     if not current_user_obj.is_super_admin and not has_permission(perms, "tariffs.edit"):
         raise HTTPException(status_code=403, detail="Permission denied")
 
-    q = db.query(ChargePoint).filter(ChargePoint.id == charge_point_id)
-    if tenant_id and not current_user_obj.is_super_admin:
-        q = q.filter(ChargePoint.tenant_id == tenant_id)
-    cp = q.first()
-    if not cp:
-        raise HTTPException(status_code=404, detail=f"充电桩 {charge_point_id} 未找到")
+    cp = _get_scoped_charge_point(db, charge_point_id, current_user_obj)
 
     now = datetime.now(timezone.utc)
 
@@ -471,7 +467,7 @@ def update_charger_pricing(
         tenant_id=cp.tenant_id,
         site_id=cp.site_id,
         charge_point_id=cp.id,
-        name=f"充电桩覆盖定价-{cp.id}",
+        name=f"充电桩覆盖定价-{cp.ocpp_identity}",
         base_price_per_kwh=req.base_price_per_kwh,
         service_fee=service_fee,
         valid_from=now,
@@ -483,8 +479,8 @@ def update_charger_pricing(
     db.refresh(new_tariff)
 
     return ChargerPricingResponse(
-        charge_point_id=cp.id,
-        tariff_id=new_tariff.id,
+        charge_point_id=str(cp.id),
+        tariff_id=str(new_tariff.id),
         base_price_per_kwh=float(new_tariff.base_price_per_kwh),
         service_fee=float(new_tariff.service_fee or 0),
         valid_from=new_tariff.valid_from.isoformat() if new_tariff.valid_from else "",
@@ -498,17 +494,10 @@ def get_charger_qr_codes(
     db: Session = Depends(get_db)
 ) -> dict:
     """获取充电桩所有connector的二维码URL列表"""
-    tenant_id = tenant_id_context.get()
-    query = db.query(ChargePoint).filter(ChargePoint.id == charge_point_id)
-    if tenant_id and not current_user_obj.is_super_admin:
-        query = query.filter(ChargePoint.tenant_id == tenant_id)
-    
-    charge_point = query.first()
-    if not charge_point:
-        raise HTTPException(status_code=404, detail=f"充电桩 {charge_point_id} 未找到")
+    charge_point = _get_scoped_charge_point(db, charge_point_id, current_user_obj)
     
     # 查询所有EVSE
-    evses = db.query(EVSE).filter(EVSE.charge_point_id == charge_point_id).order_by(EVSE.evse_id).all()
+    evses = db.query(EVSE).filter(EVSE.charge_point_id == charge_point.id).order_by(EVSE.evse_id).all()
     
     from app.services.qr_service import get_qr_code_url, get_qr_code_path, get_qr_storage_dir
     
@@ -516,15 +505,15 @@ def get_charger_qr_codes(
     qr_list = []
     
     for evse in evses:
-        qr_path = get_qr_code_path(charge_point_id, evse.evse_id, qr_storage_dir)
-        qr_url = get_qr_code_url(charge_point_id, evse.evse_id)
+        qr_path = get_qr_code_path(str(charge_point.id), evse.evse_id, qr_storage_dir)
+        qr_url = get_qr_code_url(str(charge_point.id), evse.evse_id)
         
         # 检查文件是否存在
         exists = qr_path.exists()
         token_rec = (
             db.query(QrToken)
             .filter(
-                QrToken.charge_point_id == charge_point_id,
+                QrToken.charge_point_id == charge_point.id,
                 QrToken.connector_id == evse.evse_id,
                 QrToken.revoked_at.is_(None),
             )
@@ -540,7 +529,8 @@ def get_charger_qr_codes(
         })
     
     return {
-        "charge_point_id": charge_point_id,
+        "charge_point_id": str(charge_point.id),
+        "ocpp_identity": charge_point.ocpp_identity,
         "qr_codes": qr_list,
     }
 
@@ -553,18 +543,11 @@ def get_charger_qr_code(
     db: Session = Depends(get_db)
 ) -> dict:
     """获取指定connector的二维码信息"""
-    tenant_id = tenant_id_context.get()
-    query = db.query(ChargePoint).filter(ChargePoint.id == charge_point_id)
-    if tenant_id and not current_user_obj.is_super_admin:
-        query = query.filter(ChargePoint.tenant_id == tenant_id)
-    
-    charge_point = query.first()
-    if not charge_point:
-        raise HTTPException(status_code=404, detail=f"充电桩 {charge_point_id} 未找到")
+    charge_point = _get_scoped_charge_point(db, charge_point_id, current_user_obj)
     
     # 验证connector是否存在
     evse = db.query(EVSE).filter(
-        EVSE.charge_point_id == charge_point_id,
+        EVSE.charge_point_id == charge_point.id,
         EVSE.evse_id == connector_id
     ).first()
     
@@ -574,12 +557,12 @@ def get_charger_qr_code(
     from app.services.qr_service import get_qr_code_url, get_qr_code_path, get_qr_storage_dir, build_qr_payload
     
     qr_storage_dir = get_qr_storage_dir()
-    qr_path = get_qr_code_path(charge_point_id, connector_id, qr_storage_dir)
-    qr_url = get_qr_code_url(charge_point_id, connector_id)
+    qr_path = get_qr_code_path(str(charge_point.id), connector_id, qr_storage_dir)
+    qr_url = get_qr_code_url(str(charge_point.id), connector_id)
     token_rec = (
         db.query(QrToken)
         .filter(
-            QrToken.charge_point_id == charge_point_id,
+            QrToken.charge_point_id == charge_point.id,
             QrToken.connector_id == connector_id,
             QrToken.revoked_at.is_(None),
         )
@@ -588,7 +571,8 @@ def get_charger_qr_code(
     payload = build_qr_payload(token_rec.token) if token_rec else None
     
     return {
-        "charge_point_id": charge_point_id,
+        "charge_point_id": str(charge_point.id),
+        "ocpp_identity": charge_point.ocpp_identity,
         "connector_id": connector_id,
         "qr_token": token_rec.token if token_rec else None,
         "qr_url": qr_url,
@@ -606,18 +590,11 @@ def generate_charger_qr_code(
     db: Session = Depends(get_db)
 ) -> dict:
     """为指定connector生成二维码"""
-    tenant_id = tenant_id_context.get()
-    query = db.query(ChargePoint).filter(ChargePoint.id == charge_point_id)
-    if tenant_id and not current_user_obj.is_super_admin:
-        query = query.filter(ChargePoint.tenant_id == tenant_id)
-    
-    charge_point = query.first()
-    if not charge_point:
-        raise HTTPException(status_code=404, detail=f"充电桩 {charge_point_id} 未找到")
+    charge_point = _get_scoped_charge_point(db, charge_point_id, current_user_obj)
     
     # 验证connector是否存在
     evse = db.query(EVSE).filter(
-        EVSE.charge_point_id == charge_point_id,
+        EVSE.charge_point_id == charge_point.id,
         EVSE.evse_id == connector_id
     ).first()
     
@@ -630,17 +607,18 @@ def generate_charger_qr_code(
         qr_storage_dir = get_qr_storage_dir()
         qr_path = generate_qr_code(
             db=db,
-            charge_point_id=charge_point_id,
+            charge_point_id=charge_point.id,
             connector_id=connector_id,
             output_dir=qr_storage_dir,
         )
-        token_rec = ensure_qr_token(db, charge_point_id, connector_id)
-        qr_url = get_qr_code_url(charge_point_id, connector_id)
+        token_rec = ensure_qr_token(db, charge_point.id, connector_id)
+        qr_url = get_qr_code_url(str(charge_point.id), connector_id)
         
         logger.info(f"[API] 成功生成二维码: {charge_point_id} connector {connector_id} -> {qr_path}")
         
         return {
-            "charge_point_id": charge_point_id,
+            "charge_point_id": str(charge_point.id),
+            "ocpp_identity": charge_point.ocpp_identity,
             "connector_id": connector_id,
             "qr_token": token_rec.token,
             "qr_url": qr_url,
@@ -659,17 +637,10 @@ def generate_all_charger_qr_codes(
     db: Session = Depends(get_db)
 ) -> dict:
     """为充电桩所有connector生成二维码"""
-    tenant_id = tenant_id_context.get()
-    query = db.query(ChargePoint).filter(ChargePoint.id == charge_point_id)
-    if tenant_id and not current_user_obj.is_super_admin:
-        query = query.filter(ChargePoint.tenant_id == tenant_id)
-    
-    charge_point = query.first()
-    if not charge_point:
-        raise HTTPException(status_code=404, detail=f"充电桩 {charge_point_id} 未找到")
+    charge_point = _get_scoped_charge_point(db, charge_point_id, current_user_obj)
     
     # 查询所有EVSE
-    evses = db.query(EVSE).filter(EVSE.charge_point_id == charge_point_id).order_by(EVSE.evse_id).all()
+    evses = db.query(EVSE).filter(EVSE.charge_point_id == charge_point.id).order_by(EVSE.evse_id).all()
     
     if not evses:
         raise HTTPException(status_code=404, detail=f"充电桩 {charge_point_id} 没有找到任何connector")
@@ -684,12 +655,12 @@ def generate_all_charger_qr_codes(
         try:
             qr_path = generate_qr_code(
                 db=db,
-                charge_point_id=charge_point_id,
+                charge_point_id=charge_point.id,
                 connector_id=evse.evse_id,
                 output_dir=qr_storage_dir,
             )
-            token_rec = ensure_qr_token(db, charge_point_id, evse.evse_id)
-            qr_url = get_qr_code_url(charge_point_id, evse.evse_id)
+            token_rec = ensure_qr_token(db, charge_point.id, evse.evse_id)
+            qr_url = get_qr_code_url(str(charge_point.id), evse.evse_id)
             results.append({
                 "connector_id": evse.evse_id,
                 "qr_token": token_rec.token,
@@ -705,7 +676,8 @@ def generate_all_charger_qr_codes(
             })
     
     return {
-        "charge_point_id": charge_point_id,
+        "charge_point_id": str(charge_point.id),
+        "ocpp_identity": charge_point.ocpp_identity,
         "generated": results,
         "errors": errors,
         "total": len(evses),

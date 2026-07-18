@@ -8,6 +8,7 @@ import { API_ENDPOINTS } from '@/lib/constants';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { ArrowLeft, RefreshCw, CheckCircle2, XCircle, Clock, AlertCircle } from 'lucide-react';
+import { useI18n } from '@/lib/i18n';
 
 interface PaymentOrderDetail {
   id: string;
@@ -23,7 +24,7 @@ interface PaymentOrderDetail {
   redirect_url?: string;
   expires_at: string;
   payment_deadline_at?: string;
-  metadata?: any;
+  metadata?: Record<string, unknown>;
   created_at: string;
   paid_at?: string;
   updated_at: string;
@@ -41,6 +42,8 @@ interface PaymentOrderDetail {
 const fetcher = (url: string) => apiGet<PaymentOrderDetail>(url);
 
 export default function PaymentDetailPage() {
+  const { t, locale } = useI18n();
+  const dateLocale = locale === 'zh-CN' ? 'zh-CN' : locale === 'es' ? 'es-CO' : 'en-US';
   const router = useRouter();
   const params = useParams();
   const orderId = params.id as string;
@@ -58,9 +61,9 @@ export default function PaymentDetailPage() {
     try {
       await apiPost(API_ENDPOINTS.PAYMENT_RECONCILE(orderId));
       await mutate();
-      alert('对账成功');
-    } catch (error: any) {
-      alert(`对账失败: ${error.message}`);
+      alert(t('对账成功'));
+    } catch (error: unknown) {
+      alert(`${t('对账失败')}: ${error instanceof Error ? error.message : t('请求失败')}`);
     } finally {
       setReconciling(false);
     }
@@ -85,7 +88,7 @@ export default function PaymentDetailPage() {
   if (isLoading) {
     return (
       <div className="flex items-center justify-center h-full">
-        <div className="text-slate-400">加载中...</div>
+        <div className="text-slate-400">{t('加载中...')}</div>
       </div>
     );
   }
@@ -93,7 +96,7 @@ export default function PaymentDetailPage() {
   if (error || !payment) {
     return (
       <div className="flex items-center justify-center h-full">
-        <div className="text-red-400">加载失败: {error?.message || 'Order not found'}</div>
+        <div className="text-red-400">{t('加载失败')}: {error?.message || 'Order not found'}</div>
       </div>
     );
   }
@@ -109,11 +112,11 @@ export default function PaymentDetailPage() {
             className="text-slate-400 hover:text-white"
           >
             <ArrowLeft className="h-4 w-4 mr-2" />
-            返回
+            {t('返回')}
           </Button>
           <div>
-            <h1 className="text-3xl font-bold text-white">支付订单详情</h1>
-            <p className="text-slate-400 mt-1">订单号: {payment.reference}</p>
+            <h1 className="text-3xl font-bold text-white">{t('支付订单详情')}</h1>
+            <p className="text-slate-400 mt-1">{t('订单号')}: {payment.reference}</p>
           </div>
         </div>
         <Button
@@ -123,7 +126,7 @@ export default function PaymentDetailPage() {
           className="bg-slate-800/80 border-slate-700"
         >
           <RefreshCw className={`h-4 w-4 mr-2 ${reconciling ? 'animate-spin' : ''}`} />
-          对账
+          {t('对账')}
         </Button>
       </div>
 
@@ -132,52 +135,52 @@ export default function PaymentDetailPage() {
         <CardHeader>
           <CardTitle className="text-white flex items-center gap-2">
             {getStatusIcon(payment.status)}
-            订单信息
+            {t('订单信息')}
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="grid grid-cols-2 gap-4">
             <div>
-              <div className="text-sm text-slate-400 mb-1">订单ID</div>
+              <div className="text-sm text-slate-400 mb-1">{t('订单 ID')}</div>
               <div className="text-white font-mono">{payment.id}</div>
             </div>
             <div>
-              <div className="text-sm text-slate-400 mb-1">参考号</div>
+              <div className="text-sm text-slate-400 mb-1">{t('参考号')}</div>
               <div className="text-white font-mono">{payment.reference}</div>
             </div>
             <div>
-              <div className="text-sm text-slate-400 mb-1">用户邮箱</div>
-              <div className="text-white">{payment.user_email || payment.app_user_id}</div>
+              <div className="text-sm text-slate-400 mb-1">{t('用户邮箱')}</div>
+              <div className="text-white">{payment.user_email || t('未提供')}</div>
             </div>
             <div>
-              <div className="text-sm text-slate-400 mb-1">订单类型</div>
-              <div className="text-white">{payment.type === 'top_up' ? '钱包充值' : '充电支付'}</div>
+              <div className="text-sm text-slate-400 mb-1">{t('订单类型')}</div>
+              <div className="text-white">{payment.type === 'top_up' ? t('钱包充值') : t('充电支付')}</div>
             </div>
             <div>
-              <div className="text-sm text-slate-400 mb-1">金额</div>
+              <div className="text-sm text-slate-400 mb-1">{t('金额')}</div>
               <div className="text-white font-semibold">{payment.amount} {payment.currency}</div>
             </div>
             <div>
-              <div className="text-sm text-slate-400 mb-1">状态</div>
+              <div className="text-sm text-slate-400 mb-1">{t('状态')}</div>
               <div className="text-white">{payment.status}</div>
             </div>
             <div>
-              <div className="text-sm text-slate-400 mb-1">Wompi 交易ID</div>
+              <div className="text-sm text-slate-400 mb-1">{t('Wompi 交易 ID')}</div>
               <div className="text-white font-mono text-sm">{payment.wompi_transaction_id || 'N/A'}</div>
             </div>
             <div>
-              <div className="text-sm text-slate-400 mb-1">创建时间</div>
-              <div className="text-white">{new Date(payment.created_at).toLocaleString('zh-CN')}</div>
+              <div className="text-sm text-slate-400 mb-1">{t('创建时间')}</div>
+              <div className="text-white">{new Date(payment.created_at).toLocaleString(dateLocale)}</div>
             </div>
             {payment.paid_at && (
               <div>
-                <div className="text-sm text-slate-400 mb-1">支付时间</div>
-                <div className="text-white">{new Date(payment.paid_at).toLocaleString('zh-CN')}</div>
+                <div className="text-sm text-slate-400 mb-1">{t('支付时间')}</div>
+                <div className="text-white">{new Date(payment.paid_at).toLocaleString(dateLocale)}</div>
               </div>
             )}
             <div>
-              <div className="text-sm text-slate-400 mb-1">过期时间</div>
-              <div className="text-white">{new Date(payment.expires_at).toLocaleString('zh-CN')}</div>
+              <div className="text-sm text-slate-400 mb-1">{t('过期时间')}</div>
+              <div className="text-white">{new Date(payment.expires_at).toLocaleString(dateLocale)}</div>
             </div>
           </div>
         </CardContent>
@@ -187,7 +190,7 @@ export default function PaymentDetailPage() {
       {payment.webhook_events && payment.webhook_events.length > 0 && (
         <Card className="bg-slate-800/80 backdrop-blur-sm border-slate-700">
           <CardHeader>
-            <CardTitle className="text-white">Webhook 事件记录</CardTitle>
+            <CardTitle className="text-white">{t('Webhook 事件记录')}</CardTitle>
           </CardHeader>
           <CardContent>
             <div className="space-y-3">
@@ -201,23 +204,23 @@ export default function PaymentDetailPage() {
                       <span className="font-semibold text-white">{event.event_type || 'Unknown'}</span>
                       {event.processed ? (
                         <span className="px-2 py-1 rounded text-xs bg-green-500/20 text-green-400 border border-green-500/30">
-                          已处理
+                          {t('已处理')}
                         </span>
                       ) : (
                         <span className="px-2 py-1 rounded text-xs bg-yellow-500/20 text-yellow-400 border border-yellow-500/30">
-                          未处理
+                          {t('未处理')}
                         </span>
                       )}
                     </div>
                     <div className="text-xs text-slate-400">
-                      {new Date(event.created_at).toLocaleString('zh-CN')}
+                      {new Date(event.created_at).toLocaleString(dateLocale)}
                     </div>
                   </div>
                   <div className="text-sm text-slate-400 space-y-1">
                     <div>Transaction ID: <span className="font-mono">{event.wompi_transaction_id}</span></div>
                     <div>Event ID: <span className="font-mono">{event.wompi_event_id}</span></div>
                     {event.processed_at && (
-                      <div>处理时间: {new Date(event.processed_at).toLocaleString('zh-CN')}</div>
+                      <div>{t('处理时间:')} {new Date(event.processed_at).toLocaleString(dateLocale)}</div>
                     )}
                   </div>
                 </div>
@@ -231,7 +234,7 @@ export default function PaymentDetailPage() {
       {payment.metadata && (
         <Card className="bg-slate-800/80 backdrop-blur-sm border-slate-700">
           <CardHeader>
-            <CardTitle className="text-white">元数据</CardTitle>
+            <CardTitle className="text-white">{t('元数据')}</CardTitle>
           </CardHeader>
           <CardContent>
             <pre className="text-sm text-slate-300 bg-slate-900/50 p-4 rounded-lg overflow-auto">

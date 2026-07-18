@@ -7,7 +7,7 @@ import pytest
 from uuid import uuid4
 from sqlalchemy.orm import Session
 from app.database.base import tenant_id_context, is_super_admin_context, use_super_connection_context
-from app.database.models import Tenant, ChargePoint, Order, EndUser
+from app.database.models import Tenant, Site, ChargePoint, Order
 from app.core.tenant_middleware import validate_tenant_membership
 
 
@@ -29,18 +29,35 @@ def test_rls_tenant_isolation(db_session: Session):
         db.add(tenant1)
         db.add(tenant2)
         db.commit()
+
+        site1 = Site(
+            tenant_id=tenant1.id,
+            name="租户一站点",
+            address="租户一测试地址",
+            latitude=1.0,
+            longitude=1.0,
+        )
+        site2 = Site(
+            tenant_id=tenant2.id,
+            name="租户二站点",
+            address="租户二测试地址",
+            latitude=2.0,
+            longitude=2.0,
+        )
+        db.add_all([site1, site2])
+        db.commit()
         
         # 为每个租户创建充电桩
         cp1 = ChargePoint(
             id="CP-001",
             tenant_id=tenant1.id,
-            site_id="SITE-001",
+            site_id=site1.id,
             is_active=True
         )
         cp2 = ChargePoint(
             id="CP-002",
             tenant_id=tenant2.id,
-            site_id="SITE-002",
+            site_id=site2.id,
             is_active=True
         )
         db.add(cp1)

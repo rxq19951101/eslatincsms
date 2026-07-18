@@ -8,6 +8,7 @@ import logging
 import json
 from typing import Callable
 from fastapi import Request, Response
+from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp
 from app.core.observability import trace_id_context
@@ -187,7 +188,18 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         window_start = now - 60
         hits = [t for t in self._hits.get(client, []) if t > window_start]
         if len(hits) >= self.requests_per_minute:
-            return Response(status_code=429, content="Rate limit exceeded")
+            return JSONResponse(
+                status_code=429,
+                content={
+                    "success": False,
+                    "error": {
+                        "code": "RATE_LIMIT_EXCEEDED",
+                        "message": "Rate limit exceeded",
+                        "details": [],
+                        "status_code": 429,
+                    },
+                },
+            )
         hits.append(now)
         self._hits[client] = hits
         return await call_next(request)

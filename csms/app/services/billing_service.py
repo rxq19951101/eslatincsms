@@ -168,13 +168,13 @@ class BillingService:
                     if invoice.energy_kwh and float(invoice.energy_kwh) > 0
                     else 0
                 )),
-                invoice_id=invoice.id,
+                invoice_id=str(invoice.id),
             )
 
-        tx_id = f"charge_{session.id}"
+        transaction_number = f"charge_{session.id}"
         existing_tx = (
             db.query(AppWalletTransaction)
-            .filter(AppWalletTransaction.id == tx_id)
+            .filter(AppWalletTransaction.transaction_number == transaction_number)
             .first()
         )
         if existing_tx:
@@ -245,9 +245,9 @@ class BillingService:
         db.add(snapshot)
         db.flush()
 
-        invoice_id = generate_invoice_id(order_id)
+        invoice_number = generate_invoice_id(order.order_number if order else None)
         invoice = Invoice(
-            id=invoice_id,
+            invoice_number=invoice_number,
             tenant_id=tenant_id,
             session_id=session.id,
             order_id=order_id,
@@ -269,27 +269,27 @@ class BillingService:
             new_bal = Decimal("0")
         app_user.balance = new_bal
 
-        tx_id = f"charge_{session.id}"
+        transaction_number = f"charge_{session.id}"
         wallet_tx = AppWalletTransaction(
-            id=tx_id,
+            transaction_number=transaction_number,
             app_user_id=app_user.id,
             operator_tenant_id=tenant_id,
             charge_point_id=session.charge_point_id,
             type="charge",
             amount=Decimal("0") - total,
-            description=f"充电扣费（session {session.id}，invoice {invoice_id}）",
+            description=f"充电扣费（session {session.id}，invoice {invoice_number}）",
         )
         db.add(wallet_tx)
 
-        payment_id = generate_payment_id(invoice_id)
+        payment_number = generate_payment_id(invoice_number)
         payment = Payment(
-            id=payment_id,
+            payment_number=payment_number,
             tenant_id=tenant_id,
-            invoice_id=invoice_id,
+            invoice_id=invoice.id,
             amount=total,
             payment_method="wallet",
             payment_provider="app_wallet",
-            transaction_id=tx_id,
+            transaction_id=transaction_number,
             status="completed",
             completed_at=now,
         )
@@ -309,9 +309,9 @@ class BillingService:
         db.refresh(app_user)
 
         logger.info(
-            "Session settled: session_id=%s invoice_id=%s amount=%s",
+            "Session settled: session_id=%s invoice_number=%s amount=%s",
             session.id,
-            invoice_id,
+            invoice_number,
             total,
         )
 
@@ -322,5 +322,5 @@ class BillingService:
             charged_amount=Decimal(str(total)),
             energy_kwh=float(costs["energy_kwh"]),
             price_per_kwh=Decimal(str(costs["price_per_kwh"])),
-            invoice_id=invoice_id,
+            invoice_id=str(invoice.id),
         )
