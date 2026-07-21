@@ -16,6 +16,7 @@ import { getUnpaidCharges, payUnpaidCharge, type UnpaidCharge } from '../../api/
 import { formatMoneyCOP } from '../../utils/formatMoney';
 import { fetchWalletBalance } from '../../store/slices/walletSlice';
 import { useAppDispatch } from '../../hooks/useRedux';
+import { publicChargerIdentity } from '../../utils/localizedDisplay';
 
 type Nav = StackNavigationProp<RootStackParamList, 'UnpaidBills'>;
 
@@ -45,14 +46,14 @@ const UnpaidBillsScreen = () => {
     }, [load])
   );
 
-  const onPay = async (sessionId: number) => {
+  const onPay = async (sessionId: string) => {
     try {
       await payUnpaidCharge(sessionId);
       dispatch(fetchWalletBalance());
       await load();
       Alert.alert(t.common.success, t.wallet.payOk);
-    } catch (e: any) {
-      Alert.alert(t.wallet.payFail, e?.message || t.common.retry);
+    } catch {
+      Alert.alert(t.wallet.payFail, t.common.retry);
     }
   };
 
@@ -71,8 +72,10 @@ const UnpaidBillsScreen = () => {
           contentContainerStyle={styles.list}
           renderItem={({ item }) => (
             <View style={styles.card}>
-              <Text style={styles.cardTitle}>{t.wallet.unpaidSession.replace('{id}', String(item.session_id))}</Text>
-              <Text style={styles.cardSub}>{item.charge_point_id}</Text>
+              <Text style={styles.cardTitle}>{t.wallet.unpaidCharge}</Text>
+              <Text style={styles.cardSub}>
+                {item.charge_point_name || publicChargerIdentity(item, t.common.unknown)}
+              </Text>
               <Text style={styles.amount}>{formatMoneyCOP(item.amount)}</Text>
               <Button title={t.wallet.payNow} onPress={() => onPay(item.session_id)} size="small" />
             </View>

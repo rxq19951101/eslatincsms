@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import secrets
+import hashlib
 from pathlib import Path
 from typing import Optional
 
@@ -121,8 +122,13 @@ def generate_qr_code(
     file_path = output_dir / filename
     img.save(str(file_path))
     
+    token_digest = hashlib.sha256(token_rec.token.encode("utf-8")).hexdigest()[:12]
     logger.info(
-        f"二维码已生成: {file_path} (cp={charge_point_id} connector={connector_id} token={token_rec.token})"
+        "二维码已生成: %s (cp=%s connector=%s qr_sha256=%s)",
+        file_path,
+        charge_point_id,
+        connector_id,
+        token_digest,
     )
     return file_path
 

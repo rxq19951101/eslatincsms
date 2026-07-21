@@ -13,28 +13,29 @@ import { useI18n } from '@/lib/i18n';
 interface PaymentOrderDetail {
   id: string;
   app_user_id: string;
-  user_email?: string;
+  user_email?: string | null;
   type: string;
   amount: number;
   currency: string;
-  reference: string;
+  reference: string | null;
+  external_reference?: string | null;
   status: string;
-  wompi_transaction_id?: string;
-  integrity_signature?: string;
-  redirect_url?: string;
+  wompi_transaction_id?: string | null;
+  integrity_signature?: string | null;
+  redirect_url?: string | null;
   expires_at: string;
-  payment_deadline_at?: string;
-  metadata?: Record<string, unknown>;
+  payment_deadline_at?: string | null;
+  metadata?: Record<string, unknown> | null;
   created_at: string;
-  paid_at?: string;
+  paid_at?: string | null;
   updated_at: string;
   webhook_events: Array<{
     id: string;
-    wompi_transaction_id: string;
-    wompi_event_id: string;
-    event_type?: string;
+    wompi_transaction_id?: string | null;
+    wompi_event_id?: string | null;
+    event_type?: string | null;
     processed: boolean;
-    processed_at?: string;
+    processed_at?: string | null;
     created_at: string;
   }>;
 }
@@ -116,7 +117,9 @@ export default function PaymentDetailPage() {
           </Button>
           <div>
             <h1 className="text-3xl font-bold text-white">{t('支付订单详情')}</h1>
-            <p className="text-slate-400 mt-1">{t('订单号')}: {payment.reference}</p>
+            <p className="text-slate-400 mt-1">
+              {t('订单号')}: {payment.reference || payment.external_reference || t('未提供')}
+            </p>
           </div>
         </div>
         <Button
@@ -146,7 +149,9 @@ export default function PaymentDetailPage() {
             </div>
             <div>
               <div className="text-sm text-slate-400 mb-1">{t('参考号')}</div>
-              <div className="text-white font-mono">{payment.reference}</div>
+              <div className="text-white font-mono">
+                {payment.reference || payment.external_reference || t('未提供')}
+              </div>
             </div>
             <div>
               <div className="text-sm text-slate-400 mb-1">{t('用户邮箱')}</div>

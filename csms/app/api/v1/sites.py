@@ -5,10 +5,10 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy import func, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 from app.core.id_generator import generate_site_id
 from app.core.asset_identifiers import OCPP_IDENTITY_PATTERN, get_charge_point_by_reference, get_site_by_reference
 from app.core.logging_config import get_logger
-from app.core.permissions import get_current_admin_user
+from app.core.permissions import get_current_admin_user, require_permission
 from app.database.base import get_db, tenant_id_context
 from app.database.models import ChargePoint, EVSE, EVSEStatus, Site, Tariff
 from datetime import datetime, timedelta, timezone
@@ -70,6 +70,9 @@ class SiteListItem(BaseModel):
 class SiteDetailChargePoint(BaseModel):
     id: str
     ocpp_identity: str
+    display_code: str
+    display_name: Optional[str]
+    location_hint: Optional[str]
     vendor: Optional[str]
     model: Optional[str]
     status: str
@@ -144,7 +147,9 @@ def list_sites(
     tenant_id = tenant_id_context.get()
 
     base = db.query(Site)
-    if tenant_id and not current_user_obj.is_super_admin:
+    # 只要明确选择了租户，列表就必须进入该租户作用域；超级管理员只有在
+    # 不携带租户上下文的“全平台”视图下才能看到全部站点。
+    if tenant_id:
         base = base.filter(Site.tenant_id == tenant_id)
 
     if not include_inactive:
@@ -209,7 +214,7 @@ def list_sites(
 @router.post("", response_model=SiteDetailResponse, summary="创建站点", status_code=201)
 def create_site(
     req: SiteCreateRequest,
-    current_user_obj=Depends(get_current_admin_user),
+    current_user_obj=Depends(require_permission("sites.write")),
     db: Session = Depends(get_db),
 ) -> SiteDetailResponse:
     _require_tenant_id_for_create(current_user_obj)
@@ -319,6 +324,9 @@ def get_site_detail(
             SiteDetailChargePoint(
                 id=str(cp.id),
                 ocpp_identity=cp.ocpp_identity,
+                display_code=cp.display_code,
+                display_name=cp.display_name,
+                location_hint=cp.location_hint,
                 vendor=cp.vendor,
                 model=cp.model,
                 status=status_to_use,
@@ -529,6 +537,9 @@ def list_bindable_charge_points(
             SiteDetailChargePoint(
                 id=str(cp.id),
                 ocpp_identity=cp.ocpp_identity,
+                display_code=cp.display_code,
+                display_name=cp.display_name,
+                location_hint=cp.location_hint,
                 vendor=cp.vendor,
                 model=cp.model,
                 status=st["status"],
@@ -599,10 +610,52 @@ class CreateChargePointInSiteRequest(StrictRequestModel):
     """在站点下创建并预注册充电桩（用于 web 端录入硬件码）"""
 
     id: str = Field(..., min_length=1, max_length=64, pattern=r"^[A-Za-z0-9._:-]+$", description="OCPP identity（硬件码）")
+    display_code: str = Field(..., min_length=1, max_length=16, pattern=r"^[A-Z][A-Z0-9-]{0,15}$")
+    display_name: Optional[str] = Field(None, max_length=80)
+    location_hint: Optional[str] = Field(None, max_length=160)
     vendor: Optional[str] = Field(None, max_length=100)
     model: Optional[str] = Field(None, max_length=100)
     connector_count: int = Field(1, ge=1, le=16, description="枪口数量/EVSE 数量")
-    connector_type: str = Field("Type2", min_length=1, max_length=50, description="连接器类型（默认 Type2）")
+    connector_type: Literal[
+        "Type2", "CCS1", "CCS2", "CHAdeMO", "NACS", "GB_T_AC", "GB_T_DC"
+    ] = Field("Type2", description="连接器类型（默认 Type2）")
+    evses: Optional[List["EVSEProvisioningRequest"]] = None
+
+    @field_validator("display_code", mode="before")
+    @classmethod
+    def normalize_display_code(cls, value: str) -> str:
+        return value.strip().upper()
+
+    @field_validator("display_name", "location_hint", mode="before")
+    @classmethod
+    def normalize_optional_label(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
+
+    @model_validator(mode="after")
+    def validate_evses(self):
+        if self.evses:
+            ids = [item.evse_id for item in self.evses]
+            references = [item.physical_reference for item in self.evses]
+            if len(ids) != len(set(ids)):
+                raise ValueError("EVSE IDs must be unique")
+            if len(references) != len(set(references)):
+                raise ValueError("EVSE physical references must be unique")
+        return self
+
+
+class EVSEProvisioningRequest(StrictRequestModel):
+    evse_id: int = Field(..., ge=1, le=16)
+    physical_reference: str = Field(..., min_length=1, max_length=64, pattern=r"^[A-Za-z0-9._:-]+$")
+    connector_type: Literal[
+        "Type2", "CCS1", "CCS2", "CHAdeMO", "NACS", "GB_T_AC", "GB_T_DC"
+    ]
+    max_power_kw: float = Field(..., gt=0, le=1000, allow_inf_nan=False)
+
+
+CreateChargePointInSiteRequest.model_rebuild()
 
 
 @router.post("/{site_id}/charge-points", summary="在站点下创建充电桩（预注册）", status_code=201)
@@ -623,26 +676,57 @@ def create_charge_point_in_site(
     existing = db.query(ChargePoint).filter(ChargePoint.ocpp_identity == cp_id).first()
     if existing:
         raise HTTPException(status_code=409, detail="Charge point already exists")
+    duplicate_display_code = db.query(ChargePoint.id).filter(
+        ChargePoint.site_id == site.id,
+        ChargePoint.display_code == req.display_code,
+    ).first()
+    if duplicate_display_code:
+        raise HTTPException(status_code=409, detail="Display code already exists in this site")
 
     # 创建 ChargePoint（直接绑定到站点）
+    from app.core.ocpp_auth import generate_ocpp_secret, hash_ocpp_secret
+    ocpp_secret = generate_ocpp_secret()
     charge_point = ChargePoint(
         ocpp_identity=cp_id,
         tenant_id=site.tenant_id,
         site_id=site.id,
+        display_code=req.display_code,
+        display_name=req.display_name,
+        location_hint=req.location_hint,
         vendor=req.vendor,
         model=req.model,
+        ocpp_auth_secret_hash=hash_ocpp_secret(ocpp_secret),
+        commissioning_status="draft",
         is_active=True,
     )
     db.add(charge_point)
-    db.flush()
+    try:
+        db.flush()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Charge point identity or display code already exists",
+        ) from exc
 
     # 创建 EVSE + EVSEStatus
-    for evse_no in range(1, int(req.connector_count) + 1):
+    evse_specs = req.evses or [
+        EVSEProvisioningRequest(
+            evse_id=evse_no,
+            physical_reference=f"{req.display_code}-{evse_no}",
+            connector_type=req.connector_type or "Type2",
+            max_power_kw=7.0,
+        )
+        for evse_no in range(1, int(req.connector_count) + 1)
+    ]
+    for spec in evse_specs:
         evse = EVSE(
             tenant_id=site.tenant_id,
             charge_point_id=charge_point.id,
-            evse_id=evse_no,
-            connector_type=req.connector_type or "Type2",
+            evse_id=spec.evse_id,
+            connector_type=spec.connector_type,
+            max_power_kw=spec.max_power_kw,
+            physical_reference=spec.physical_reference,
         )
         db.add(evse)
         db.flush()
@@ -664,7 +748,8 @@ def create_charge_point_in_site(
         from app.services.qr_service import generate_qr_code, get_qr_code_url, get_qr_storage_dir, ensure_qr_token
         qr_storage_dir = get_qr_storage_dir()
         
-        for evse_no in range(1, int(req.connector_count) + 1):
+        for spec in evse_specs:
+            evse_no = spec.evse_id
             try:
                 generate_qr_code(
                     db=db,
@@ -689,11 +774,21 @@ def create_charge_point_in_site(
     return {
         "id": str(charge_point.id),
         "ocpp_identity": charge_point.ocpp_identity,
+        "display_code": charge_point.display_code,
+        "display_name": charge_point.display_name,
+        "location_hint": charge_point.location_hint,
         "site_id": str(site.id),
         "tenant_id": str(site.tenant_id),
         "vendor": charge_point.vendor,
         "model": charge_point.model,
-        "connector_count": int(req.connector_count),
-        "connector_type": req.connector_type,
+        "connector_count": len(evse_specs),
+        "evses": [item.model_dump() for item in evse_specs],
+        "commissioning_status": charge_point.commissioning_status,
+        "ocpp_credentials": {
+            "username": charge_point.ocpp_identity,
+            "secret": ocpp_secret,
+            "query_url": f"/ocpp?id={charge_point.ocpp_identity}",
+            "path_url": f"/ocpp/{charge_point.ocpp_identity}",
+        },
         "qr_codes": qr_urls,  # 二维码URL列表
     }

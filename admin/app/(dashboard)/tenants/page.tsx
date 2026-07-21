@@ -21,6 +21,7 @@ import { useAuthStore } from '@/store/authStore';
 import type { TenantProvisionResponse, TenantProvisionResult, TenantRecord } from '@/types';
 import { Building2, Copy, Plus, Trash2 } from 'lucide-react';
 import { useI18n } from '@/lib/i18n';
+import { matchesSearchQuery } from '@/lib/search';
 import {
   apiErrorMessageKey,
   apiFieldErrors,
@@ -72,21 +73,14 @@ export default function TenantsPage() {
   const [createdResult, setCreatedResult] = useState<TenantProvisionResult | null>(null);
 
   const { data: tenants, error, isLoading, mutate } = useSWR<TenantRecord[]>(
-    API_ENDPOINTS.TENANTS,
+    isSuperAdmin ? API_ENDPOINTS.TENANTS : null,
     fetcher,
     { refreshInterval: 30000 }
   );
 
   const filteredTenants = useMemo(() => {
     const list = tenants || [];
-    const q = searchQuery.trim().toLowerCase();
-    if (!q) return list;
-    return list.filter((t) => {
-      return (
-        t.name.toLowerCase().includes(q) ||
-        String(t.domain || '').toLowerCase().includes(q)
-      );
-    });
+    return list.filter((tenant) => matchesSearchQuery(searchQuery, [tenant.name, tenant.domain]));
   }, [tenants, searchQuery]);
 
   const resetCreateForm = () => {
@@ -204,13 +198,14 @@ export default function TenantsPage() {
   }
 
   return (
-    <div className="space-y-6">
+    <div data-testid="admin-tenants-page" className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-3xl font-bold text-white">{t('租户管理')}</h1>
           <p className="text-slate-400 mt-1">{t('管理系统租户（仅超级管理员）')}</p>
         </div>
         <Button
+          data-testid="admin-tenant-create-open"
           onClick={handleOpen}
           className="bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-700 hover:to-blue-700"
         >
@@ -253,7 +248,7 @@ export default function TenantsPage() {
                 </thead>
                 <tbody>
                   {filteredTenants.map((tenant) => (
-                    <tr key={tenant.id} className="border-b border-slate-700/50 hover:bg-slate-700/30">
+                    <tr key={tenant.id} data-testid="admin-tenant-row" data-tenant-domain={tenant.domain || ''} className="border-b border-slate-700/50 hover:bg-slate-700/30">
                       <td className="py-3 px-4 text-white">{tenant.name}</td>
                       <td className="py-3 px-4 text-slate-300">{tenant.domain || '-'}</td>
                       <td className="py-3 px-4 text-slate-300">{tenant.status}</td>

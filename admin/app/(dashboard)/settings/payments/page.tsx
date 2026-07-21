@@ -1,7 +1,7 @@
 'use client';
 
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
-import { CreditCard, CheckCircle2, XCircle, Eye, EyeOff } from 'lucide-react';
+import { CreditCard, CheckCircle2, XCircle } from 'lucide-react';
 import { useI18n } from '@/lib/i18n';
 
 export default function PaymentsSettingsPage() {

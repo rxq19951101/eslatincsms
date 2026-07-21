@@ -80,13 +80,8 @@ def create_tenant_for_test(db_session: Session, name: str = "测试租户", **kw
 
 
 def get_password_hash_for_test(password: str) -> str:
-    """辅助函数：在测试中获取密码哈希（处理 bcrypt 版本兼容性问题）"""
-    try:
-        return get_password_hash(password)
-    except (ValueError, AttributeError) as e:
-        # bcrypt 版本兼容性问题，使用简单的哈希作为后备
-        import hashlib
-        return f"test_hash_{hashlib.sha256(password.encode()).hexdigest()}"
+    """测试与生产使用同一 bcrypt 入口。"""
+    return get_password_hash(password)
 
 
 class TestTenantIsolation:
@@ -227,25 +222,13 @@ class TestAuthentication:
     
     def test_password_hashing(self):
         """测试密码哈希"""
-        # 注意：bcrypt 库在某些版本中有内部 bug 检测问题
-        # 使用较短的密码来避免触发内部检测逻辑
         password = "test123"
-        try:
-            hashed = get_password_hash(password)
-            assert hashed != password
-            assert len(hashed) > 0
-            
-            # 验证密码（可能会失败如果使用后备方案）
-            try:
-                assert verify_password(password, hashed) is True
-                assert verify_password("wrong_password", hashed) is False
-            except Exception:
-                # 如果验证失败，可能是使用了后备哈希方案
-                # 在这种情况下，至少验证哈希已生成
-                assert hashed.startswith(("$2b$", "$pbkdf2-sha256$"))
-        except (ValueError, AttributeError, TypeError) as e:
-            # 如果遇到 bcrypt 版本兼容性问题，跳过测试
-            pytest.skip(f"bcrypt 版本兼容性问题: {e}")
+        hashed = get_password_hash(password)
+        assert hashed != password
+        assert hashed.startswith("$csms-bcrypt-sha256$v=1$")
+        assert verify_password(password, hashed) is True
+        assert verify_password("wrong_password", hashed) is False
+        assert verify_password(password, "not-a-bcrypt-hash") is False
     
     def test_jwt_token_creation(self):
         """测试JWT token创建"""
@@ -490,13 +473,12 @@ class TestUserService:
     
     def test_create_admin_user(self, db_session: Session):
         """测试创建管理员用户"""
-        # 由于 bcrypt 版本兼容性问题，直接创建 AdminUser 对象而不是使用服务层
-        # 这样可以避免在测试中触发 bcrypt 的内部 bug 检测逻辑
+        password = "password123"
         admin_user = AdminUser(
             id=uuid.uuid4(),
             username="newadmin",
             email="newadmin@example.com",
-            password_hash=get_password_hash_for_test("password123"),
+            password_hash=get_password_hash_for_test(password),
             is_super_admin=False
         )
         db_session.add(admin_user)
@@ -506,7 +488,7 @@ class TestUserService:
         assert admin_user is not None
         assert admin_user.username == "newadmin"
         assert admin_user.email == "newadmin@example.com"
-        # 注意：由于使用了测试辅助函数，验证密码可能失败，但对象创建是成功的
+        assert verify_password(password, admin_user.password_hash) is True
         assert admin_user.is_super_admin is False
     
     def test_check_username_uniqueness(self, db_session: Session):

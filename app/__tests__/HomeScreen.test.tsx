@@ -5,6 +5,7 @@ import { configureStore } from '@reduxjs/toolkit';
 import HomeScreen from '../src/screens/home/HomeScreen';
 import chargerReducer from '../src/store/slices/chargerSlice';
 import authReducer from '../src/store/slices/authSlice';
+import siteReducer from '../src/store/slices/siteSlice';
 import { NavigationContainer } from '@react-navigation/native';
 import type { ReactNode } from 'react';
 
@@ -41,6 +42,14 @@ jest.mock('../src/components/GoogleMapView', () => {
   };
 });
 
+jest.mock('../src/components/ui/Icon', () => {
+  const { Text } = require('react-native');
+  return {
+    __esModule: true,
+    default: ({ name }: { name: string }) => <Text>{name}</Text>,
+  };
+});
+
 // Mock API client
 jest.mock('../src/api/client', () => {
   return {
@@ -63,6 +72,7 @@ describe('HomeScreen Integration Test', () => {
     reducer: {
       charger: chargerReducer,
       auth: authReducer,
+      site: siteReducer,
     },
     preloadedState: {
       charger: {
@@ -85,6 +95,28 @@ describe('HomeScreen Integration Test', () => {
         selectedCharger: null,
         lastFetch: null,
         filters: {},
+      },
+      site: {
+        sites: [
+          {
+            id: 'SITE001',
+            name: 'Test Station',
+            address: 'Test Address',
+            latitude: 37.78825,
+            longitude: -122.4324,
+            status: 'Available',
+            charger_count: 1,
+            available_connectors: 2,
+            total_connectors: 4,
+            connector_types: ['Type2'],
+            charging_options: [],
+            has_pricing: false,
+            is_favorite: false,
+          },
+        ],
+        selectedSite: null,
+        loading: false,
+        error: null,
       },
     },
   });

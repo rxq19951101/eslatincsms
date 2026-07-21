@@ -5,6 +5,7 @@
 
 from typing import List, Optional
 from uuid import UUID
+from sqlalchemy import and_
 from sqlalchemy.orm import Session
 from app.database.models import AdminUser, TenantMembership, Role, TenantMembershipRole
 from app.core.auth import get_password_hash, verify_password
@@ -129,7 +130,7 @@ class AdminUserService:
         admin_user.password_hash = get_password_hash(new_password)
         db.commit()
         
-        logger.info(f"Password changed for admin user: {user_id}")
+        logger.info("Credentials changed for admin user: %s", user_id)
         return True
     
     @staticmethod

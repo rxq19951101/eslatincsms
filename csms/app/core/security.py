@@ -6,31 +6,18 @@ from datetime import datetime, timedelta, timezone
 import os
 from typing import Optional, Dict, Any
 from jose import JWTError, jwt
-from passlib.context import CryptContext
 from fastapi import Security, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, APIKeyHeader
+from app.core.auth import get_password_hash, verify_password
 from app.core.config import get_settings
 
 settings = get_settings()
-
-# 密码加密上下文
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # HTTP Bearer认证
 security = HTTPBearer()
 
 # API Key认证（用于充电桩认证）
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
-
-
-def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """验证密码"""
-    return pwd_context.verify(plain_password, hashed_password)
-
-
-def get_password_hash(password: str) -> str:
-    """生成密码哈希"""
-    return pwd_context.hash(password)
 
 
 def create_access_token(data: Dict[str, Any], expires_delta: Optional[timedelta] = None) -> str:
@@ -117,4 +104,3 @@ def verify_ocpp_charger_id(charger_id: str, headers: Dict[str, str]) -> bool:
     if is_pre_registration_required() and not verify_charge_point_pre_registered(charger_id):
         return False
     return verify_ocpp_api_key(headers)
-

@@ -213,6 +213,81 @@ apiClient.interceptors.response.use(
 
 export default apiClient;
 
+type ErrorDetail = {
+  field?: unknown;
+  path?: unknown;
+  message?: unknown;
+  type?: unknown;
+  loc?: unknown;
+  msg?: unknown;
+};
+
+function errorField(value: unknown): string | undefined {
+  const parts = Array.isArray(value)
+    ? value
+    : typeof value === 'string'
+      ? value.split('.').filter(Boolean)
+      : [];
+  const normalized = parts
+    .filter((part): part is string | number => typeof part === 'string' || typeof part === 'number')
+    .filter((part, index) => index > 0 || !['body', 'query', 'path', 'header'].includes(String(part)))
+    .map(String)
+    .join('.');
+  return normalized || undefined;
+}
+
+function apiFieldErrors(details: unknown): Record<string, string> {
+  if (!Array.isArray(details)) return {};
+  return details.reduce<Record<string, string>>((result, issue) => {
+    if (!issue || typeof issue !== 'object') return result;
+    const entry = issue as ErrorDetail;
+    const field = errorField(entry.field) ?? errorField(entry.path) ?? errorField(entry.loc) ?? 'form';
+    const message = typeof entry.message === 'string'
+      ? entry.message
+      : typeof entry.msg === 'string'
+        ? entry.msg
+        : undefined;
+    if (message && !result[field]) result[field] = message;
+    return result;
+  }, {});
+}
+
+/** Parse the canonical backend error envelope, retaining legacy FastAPI detail support. */
+export function parseApiErrorPayload(data: unknown, status: number): ApiError {
+  const body = data && typeof data === 'object' ? data as Record<string, any> : {};
+  const envelope = body.error && typeof body.error === 'object' ? body.error : {};
+  const details = envelope.details
+    ?? body.details
+    ?? (Array.isArray(body.detail) ? body.detail : undefined)
+    ?? body.detail;
+  let message = typeof envelope.message === 'string'
+    ? envelope.message
+    : typeof body.message === 'string'
+      ? body.message
+      : typeof body.detail === 'string'
+        ? body.detail
+        : undefined;
+
+  if (!message && Array.isArray(details)) {
+    const messages = details
+      .map((entry: ErrorDetail) => entry?.message ?? entry?.msg)
+      .filter((value: unknown): value is string => typeof value === 'string' && value.length > 0);
+    if (messages.length) message = messages.join('; ');
+  }
+
+  return {
+    message: message || 'An error occurred',
+    code: typeof envelope.code === 'string'
+      ? envelope.code
+      : typeof body.code === 'string'
+        ? body.code
+        : `HTTP_${status}`,
+    status,
+    details,
+    fieldErrors: apiFieldErrors(details),
+  };
+}
+
 /**
  * 统一的错误处理
  */
@@ -221,32 +296,7 @@ export const handleApiError = (error: any): ApiError => {
     const axiosError = error as AxiosError<ApiError>;
     
     if (axiosError.response) {
-      // 服务器返回错误
-      const status = axiosError.response.status;
-      const data: any = axiosError.response.data;
-
-      // FastAPI 常见错误字段是 detail（可能是 string / object / array）
-      // 自定义异常处理器返回 { success, error: { message, code } }
-      let message: string | undefined = data?.message ?? data?.error?.message;
-      if (!message && data?.detail) {
-        if (typeof data.detail === 'string') {
-          message = data.detail;
-        } else if (Array.isArray(data.detail)) {
-          // 422 validation errors: [{loc, msg, type}, ...]
-          const msgs = data.detail
-            .map((d: any) => d?.msg || d?.message || JSON.stringify(d))
-            .filter(Boolean);
-          message = msgs.length ? msgs.join('; ') : 'Request validation failed';
-        } else {
-          message = typeof data.detail === 'object' ? JSON.stringify(data.detail) : String(data.detail);
-        }
-      }
-
-      return {
-        message: message || 'An error occurred',
-        code: data?.code || `HTTP_${status}`,
-        details: data?.details ?? data?.detail,
-      };
+      return parseApiErrorPayload(axiosError.response.data, axiosError.response.status);
     } else if (axiosError.request) {
       // 请求已发出但没有收到响应
       return {
@@ -258,7 +308,7 @@ export const handleApiError = (error: any): ApiError => {
   
   // 其他错误
   return {
-    message: error.message || 'An unexpected error occurred',
+    message: error?.message || 'An unexpected error occurred',
     code: 'UNKNOWN_ERROR',
   };
 };

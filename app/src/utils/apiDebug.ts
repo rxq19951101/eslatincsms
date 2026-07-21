@@ -19,11 +19,11 @@ export const debugAPIConnection = async () => {
         'Content-Type': 'application/json',
       },
     });
-    console.log('✅ 状态码:', response.status);
+    console.log('[OK] 状态码:', response.status);
     const data = await response.json();
-    console.log('✅ 数据:', data.slice(0, 2)); // 只显示前2条
+    console.log('[OK] 数据:', data.slice(0, 2)); // 只显示前2条
   } catch (error: any) {
-    console.error('❌ 错误:', error.message);
+    console.error('[ERROR] 错误:', error.message);
   }
   
   // 测试2: 登录API
@@ -40,11 +40,11 @@ export const debugAPIConnection = async () => {
         tenant_id: DEFAULT_TENANT_ID,
       }),
     });
-    console.log('✅ 登录响应状态:', response.status);
+    console.log('[OK] 登录响应状态:', response.status);
     const data = await response.json();
-    console.log('✅ Token获取成功:', data.access_token ? '是' : '否');
+    console.log('[OK] Token获取成功:', data.access_token ? '是' : '否');
   } catch (error: any) {
-    console.error('❌ 登录错误:', error.message);
+    console.error('[ERROR] 登录错误:', error.message);
   }
   
   console.log('\n=== 诊断完成 ===');

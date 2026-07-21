@@ -8,10 +8,12 @@ interface ScreenProps {
   edges?: Edge[];
   style?: StyleProp<ViewStyle>;
   contentStyle?: StyleProp<ViewStyle>;
+  testID?: string;
+  accessibilityLabel?: string;
 }
 
-const Screen: React.FC<ScreenProps> = ({ children, edges = ['top'], style, contentStyle }) => (
-  <SafeAreaView style={[styles.safeArea, style]} edges={edges}>
+const Screen: React.FC<ScreenProps> = ({ children, edges = ['top'], style, contentStyle, testID, accessibilityLabel }) => (
+  <SafeAreaView testID={testID} accessibilityLabel={accessibilityLabel} style={[styles.safeArea, style]} edges={edges}>
     <View style={[styles.content, contentStyle]}>{children}</View>
   </SafeAreaView>
 );
@@ -22,4 +24,3 @@ const styles = StyleSheet.create({
 });
 
 export default Screen;
-

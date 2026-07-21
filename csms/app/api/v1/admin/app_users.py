@@ -8,7 +8,7 @@ from typing import List, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 
@@ -46,9 +46,16 @@ class AppUserResponse(BaseModel):
 
 class AdjustBalanceRequest(StrictRequestModel):
     """amount > 0 入账，amount < 0 扣减；调整后余额不得为负。"""
-    amount: Decimal = Field(..., ne=0, max_digits=10, decimal_places=2, description="调整金额（可为负）")
+    amount: Decimal = Field(..., max_digits=10, decimal_places=2, description="调整金额（可为负）")
     description: str = Field(..., min_length=1, max_length=500, description="调账原因")
     idempotency_key: str = Field(..., min_length=8, max_length=255, pattern=r"^[A-Za-z0-9._:-]+$")
+
+    @field_validator("amount")
+    @classmethod
+    def amount_must_be_nonzero(cls, value: Decimal) -> Decimal:
+        if value == 0:
+            raise ValueError("amount must not be zero")
+        return value
 
 
 class AdjustBalanceResponse(BaseModel):

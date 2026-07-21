@@ -88,9 +88,7 @@ export const handlers = [
     });
   }),
 
-  http.get(`${API_BASE_URL}/api/v1/dashboard/sites`, ({ request }) => {
-    const url = new URL(request.url);
-    const days = Number(url.searchParams.get('days') || 7);
+  http.get(`${API_BASE_URL}/api/v1/dashboard/sites`, () => {
     return HttpResponse.json([
       {
         site_id: 'site_mock_1',

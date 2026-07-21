@@ -4,14 +4,14 @@
     "slug": "eslatincsms",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/eslatin-logo-dark.png",
+    "icon": "./assets/eslatin-brand-white.png",
     "userInterfaceStyle": "light",
     "newArchEnabled": true,
     "scheme": "eslatin",
     "splash": {
-      "image": "./assets/splash.png",
+      "image": "./assets/eslatin-brand-white.png",
       "resizeMode": "contain",
-      "backgroundColor": "#000000"
+      "backgroundColor": "#FFFFFF"
     },
     "ios": {
       "supportsTablet": true,
@@ -26,8 +26,8 @@
       "package": "com.eslatin.app",
       "versionCode": 1,
       "adaptiveIcon": {
-        "foregroundImage": "./assets/adaptive-icon.png",
-        "backgroundColor": "#000000"
+        "foregroundImage": "./assets/eslatin-brand-white.png",
+        "backgroundColor": "#FFFFFF"
       },
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
@@ -38,7 +38,7 @@
       ]
     },
     "web": {
-      "favicon": "./assets/eslatin-logo-dark.png"
+      "favicon": "./assets/eslatin-brand-white.png"
     },
     "plugins": [
       "expo-localization",

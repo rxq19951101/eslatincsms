@@ -60,11 +60,58 @@ describe('Admin write validation', () => {
   });
 
   it.each(['CP-01', 'CO.BOGOTA:CP_01', 'vendor.device'])('accepts OCPP identity %s', (id) => {
-    expect(chargePointSchema.safeParse({ id, connector_count: 1, connector_type: 'Type2' }).success).toBe(true);
+    expect(chargePointSchema.safeParse({ id, display_code: 'A01', connector_count: 1, connector_type: 'Type2' }).success).toBe(true);
   });
 
   it.each(['', '空格', 'CP/01', 'A'.repeat(65)])('rejects OCPP identity %s', (id) => {
-    expect(chargePointSchema.safeParse({ id, connector_count: 1, connector_type: 'Type2' }).success).toBe(false);
+    expect(chargePointSchema.safeParse({ id, display_code: 'A01', connector_count: 1, connector_type: 'Type2' }).success).toBe(false);
+  });
+
+  it('validates and trims public charger and connector labels', () => {
+    const result = chargePointSchema.parse({
+      id: 'CO.BOGOTA:CP_01',
+      display_code: '  A01  ',
+      display_name: '  North entrance  ',
+      location_hint: '  P2 / bay 42  ',
+      connector_count: 1,
+      connector_type: 'Type2',
+      evses: [{ evse_id: 1, physical_reference: ' A01-1 ', connector_type: 'Type2', max_power_kw: '7' }],
+    });
+
+    expect(result).toMatchObject({
+      display_code: 'A01',
+      display_name: 'North entrance',
+      location_hint: 'P2 / bay 42',
+      evses: [{ physical_reference: 'A01-1', max_power_kw: 7 }],
+    });
+    expect(chargePointSchema.safeParse({
+      id: 'CP-01', display_code: 'A/01', connector_count: 1, connector_type: 'Type2',
+    }).success).toBe(false);
+  });
+
+  it('matches public-label limits and supported connector types', () => {
+    const base = { id: 'CP-01', display_code: 'A01', connector_count: 1, connector_type: 'Type2' };
+
+    expect(chargePointSchema.safeParse({ ...base, display_code: 'A'.repeat(16) }).success).toBe(true);
+    expect(chargePointSchema.safeParse({ ...base, display_code: 'A-01' }).success).toBe(true);
+    expect(chargePointSchema.safeParse({ ...base, display_code: 'a01' }).success).toBe(false);
+    expect(chargePointSchema.safeParse({ ...base, display_code: '1A01' }).success).toBe(false);
+    expect(chargePointSchema.safeParse({ ...base, display_code: 'A'.repeat(17) }).success).toBe(false);
+    expect(chargePointSchema.safeParse({ ...base, display_name: 'N'.repeat(80) }).success).toBe(true);
+    expect(chargePointSchema.safeParse({ ...base, display_name: 'N'.repeat(81) }).success).toBe(false);
+    expect(chargePointSchema.safeParse({ ...base, location_hint: 'L'.repeat(160) }).success).toBe(true);
+    expect(chargePointSchema.safeParse({ ...base, location_hint: 'L'.repeat(161) }).success).toBe(false);
+
+    for (const connector_type of ['Type2', 'CCS1', 'CCS2', 'CHAdeMO', 'NACS', 'GB_T_AC', 'GB_T_DC']) {
+      expect(chargePointSchema.safeParse({
+        ...base,
+        evses: [{ evse_id: 1, physical_reference: 'A01-1', connector_type, max_power_kw: 7 }],
+      }).success).toBe(true);
+    }
+    expect(chargePointSchema.safeParse({
+      ...base,
+      evses: [{ evse_id: 1, physical_reference: 'A01-1', connector_type: 'custom', max_power_kw: 7 }],
+    }).success).toBe(false);
   });
 
   it('requires an atomic tenant provision payload with a valid first admin', () => {

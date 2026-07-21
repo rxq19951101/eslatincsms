@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import './globals.css';
 import { I18nProvider } from '@/lib/i18n';
+import { AdminSWRProvider } from '@/components/providers/AdminSWRProvider';
 
 export const metadata: Metadata = {
   title: 'EsLatin - Admin Portal',
@@ -22,7 +23,9 @@ export default function RootLayout({
         className="font-sans antialiased bg-slate-950 text-slate-100"
         suppressHydrationWarning
       >
-        <I18nProvider>{children}</I18nProvider>
+        <AdminSWRProvider>
+          <I18nProvider>{children}</I18nProvider>
+        </AdminSWRProvider>
       </body>
     </html>
   );

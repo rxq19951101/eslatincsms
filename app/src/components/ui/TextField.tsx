@@ -12,9 +12,10 @@ interface TextFieldProps extends TextInputProps {
 const TextField: React.FC<TextFieldProps> = ({ label, error, inputStyle, containerStyle, ...props }) => (
   <View style={[styles.wrapper, containerStyle]}>
     {!!label && <Text style={styles.label}>{label}</Text>}
-    <TextInput {...props} placeholderTextColor={palette.subtle}
+    <TextInput {...props} accessibilityLabel={props.accessibilityLabel ?? label ?? props.placeholder}
+      placeholderTextColor={palette.subtle}
       style={[styles.input, !!error && styles.inputError, inputStyle]} />
-    {!!error && <Text style={styles.error}>{error}</Text>}
+    {!!error && <Text testID={props.testID ? `${props.testID}-error` : undefined} style={styles.error}>{error}</Text>}
   </View>
 );
 

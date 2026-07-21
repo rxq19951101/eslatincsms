@@ -1,8 +1,7 @@
 import { describe, it, expect, beforeEach, vi, afterEach, beforeAll, afterAll } from 'vitest';
 import { apiGet, apiPost } from '../api';
 import { setTokens, clearTokens } from '../auth';
-import { API_BASE_URL } from '../constants';
-import { useAuthStore } from '@/store/authStore';
+import { setCurrentTenantId } from '../tenant';
 import { server } from '@/__mocks__/server';
 
 // Mock fetch（直接 mock，不依赖 MSW）
@@ -18,7 +17,7 @@ vi.mock('@/store/authStore', () => ({
         email: 'admin@example.com',
         is_super_admin: false,
         default_tenant_id: 'tenant-1',
-        tenant_list: [],
+        tenant_list: [{ id: 'tenant-1', name: 'Tenant 1', is_primary: true }],
       },
       logout: vi.fn(),
     })),
@@ -28,7 +27,7 @@ vi.mock('@/store/authStore', () => ({
 // 在 API 测试中，暂时禁用 MSW，使用直接的 fetch mock
 beforeAll(() => {
   server.close(); // 关闭 MSW server，使用直接的 fetch mock
-  global.fetch = mockFetch as any;
+  global.fetch = mockFetch as unknown as typeof fetch;
 });
 
 afterAll(() => {
@@ -40,8 +39,9 @@ describe('API Client', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     clearTokens();
+    setCurrentTenantId('tenant-1', '1');
     // 确保使用 mock fetch
-    global.fetch = mockFetch as any;
+    global.fetch = mockFetch as unknown as typeof fetch;
   });
 
   afterEach(() => {
@@ -67,6 +67,7 @@ describe('API Client', () => {
           method: 'GET',
           headers: expect.objectContaining({
             Authorization: 'Bearer test-access-token',
+            'X-Tenant-Id': 'tenant-1',
           }),
         })
       );
@@ -91,6 +92,9 @@ describe('API Client', () => {
         expect.objectContaining({
           method: 'POST',
           body: JSON.stringify({ key: 'value' }),
+          headers: expect.objectContaining({
+            'X-Tenant-Id': 'tenant-1',
+          }),
         })
       );
     });

@@ -24,11 +24,12 @@ import ScreenHeader from '../../components/ui/ScreenHeader';
 import TextField from '../../components/ui/TextField';
 import Button from '../../components/ui/Button';
 import Icon from '../../components/ui/Icon';
+import BrandLogo from '../../components/brand/BrandLogo';
 
 type EmailLoginScreenNavigationProp = StackNavigationProp<RootStackParamList, 'EmailLogin'>;
 
 const EmailLoginScreen = () => {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
 
   const navigation = useNavigation<EmailLoginScreenNavigationProp>();
   const dispatch = useAppDispatch();
@@ -96,10 +97,32 @@ const EmailLoginScreen = () => {
   };
 
   return (
-    <Screen>
-      <StatusBar barStyle="dark-content" />
-      <ScreenHeader title="" onBack={handleBackToWelcome} />
+    <Screen style={styles.screen}>
+      <StatusBar barStyle="dark-content" backgroundColor={COLORS.CARD_BG} />
+      <ScreenHeader
+        title=""
+        onBack={handleBackToWelcome}
+        backTestID="app-login-back"
+        style={styles.screenHeader}
+        right={
+          <TouchableOpacity
+            testID="app-login-language"
+            accessibilityRole="button"
+            accessibilityLabel={t.account.language}
+            style={styles.languageTrigger}
+            onPress={() => navigation.navigate('Language')}
+          >
+            <Icon name="globe-outline" size={18} color={COLORS.PRIMARY_DARK} />
+            <Text style={styles.languageCode}>{locale.toUpperCase()}</Text>
+            <Icon name="chevron-forward" size={14} color={COLORS.TEXT_TERTIARY} />
+          </TouchableOpacity>
+        }
+      />
       <View style={styles.content}>
+        <View style={styles.brandContainer}>
+          <BrandLogo testID="app-login-brand-logo" style={styles.brandLogo} />
+        </View>
+
         {/* 标题 */}
         <View style={styles.header}>
           <Text style={styles.title}>{t.auth.hello}</Text>
@@ -111,6 +134,8 @@ const EmailLoginScreen = () => {
           {/* 邮箱输入 */}
           <View style={styles.inputContainer}>
             <TextField
+              testID="app-login-email"
+              accessibilityLabel={t.auth.email}
               label={t.auth.email}
               placeholder="your.email@example.com"
               value={email}
@@ -127,6 +152,8 @@ const EmailLoginScreen = () => {
             <Text style={styles.inputLabel}>{t.auth.password}</Text>
             <View style={styles.passwordContainer}>
               <TextField
+                testID="app-login-password"
+                accessibilityLabel={t.auth.password}
                 inputStyle={styles.passwordInput}
                 placeholder={t.auth.password}
                 value={password}
@@ -137,6 +164,9 @@ const EmailLoginScreen = () => {
                 editable={!isLoading}
               />
               <TouchableOpacity
+                testID="app-login-password-toggle"
+                accessibilityLabel={showPassword ? 'Hide password' : 'Show password'}
+                accessibilityRole="button"
                 style={styles.eyeButton}
                 onPress={() => setShowPassword(!showPassword)}
               >
@@ -148,30 +178,42 @@ const EmailLoginScreen = () => {
           {/* 记住我 & 忘记密码 */}
           <View style={styles.optionsRow}>
             <TouchableOpacity
+              testID="app-login-remember"
+              accessibilityLabel={t.auth.rememberMe}
+              accessibilityRole="checkbox"
+              accessibilityState={{ checked: rememberMe, disabled: isLoading }}
               style={styles.rememberMeContainer}
               onPress={() => setRememberMe(!rememberMe)}
               disabled={isLoading}
             >
               <View style={[styles.checkbox, rememberMe && styles.checkboxChecked]}>
-                {rememberMe && <Text style={styles.checkmark}>✓</Text>}
+                {rememberMe && <Icon name="checkmark" size={14} color={COLORS.IOS_WHITE} />}
               </View>
               <Text style={styles.rememberMeText}>{t.auth.rememberMe}</Text>
             </TouchableOpacity>
 
-            <TouchableOpacity onPress={handleForgotPassword} disabled={isLoading}>
+            <TouchableOpacity
+              testID="app-login-forgot-password"
+              accessibilityLabel={t.auth.forgotPassword}
+              accessibilityRole="button"
+              onPress={handleForgotPassword}
+              disabled={isLoading}
+            >
               <Text style={styles.forgotPasswordText}>{t.auth.forgotPassword}</Text>
             </TouchableOpacity>
           </View>
 
           {/* 错误提示 */}
           {error && (
-            <View style={styles.errorContainer}>
+            <View testID="app-login-error" accessibilityRole="alert" style={styles.errorContainer}>
               <Text style={styles.errorText}>{error.message}</Text>
             </View>
           )}
 
           {/* 登录按钮 */}
           <Button
+            testID="app-login-submit"
+            accessibilityLabel={t.auth.signIn}
             title={t.auth.signIn}
             onPress={handleLogin}
             disabled={isLoading}
@@ -185,16 +227,48 @@ const EmailLoginScreen = () => {
 };
 
 const styles = StyleSheet.create({
+  screen: {
+    backgroundColor: COLORS.CARD_BG,
+  },
+  screenHeader: {
+    backgroundColor: COLORS.CARD_BG,
+  },
+  languageTrigger: {
+    height: 36,
+    paddingHorizontal: 10,
+    borderRadius: 18,
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: COLORS.PRIMARY_SOFT,
+  },
+  languageCode: {
+    marginHorizontal: 6,
+    fontSize: 12,
+    fontWeight: '700',
+    color: COLORS.PRIMARY_DARK,
+  },
   content: {
     flex: 1,
     paddingHorizontal: 24,
+    width: '100%',
+    maxWidth: 480,
+    alignSelf: 'center',
+  },
+  brandContainer: {
+    alignItems: 'center',
+    marginTop: -16,
+  },
+  brandLogo: {
+    width: 168,
+    height: 168,
   },
   header: {
-    marginTop: 20,
-    marginBottom: 40,
+    alignItems: 'center',
+    marginTop: -18,
+    marginBottom: 28,
   },
   title: {
-    fontSize: 28,
+    fontSize: 26,
     fontWeight: 'bold',
     color: COLORS.TEXT_PRIMARY,
     marginBottom: 8,
@@ -204,7 +278,7 @@ const styles = StyleSheet.create({
     color: COLORS.TEXT_SECONDARY,
   },
   form: {
-    flex: 1,
+    width: '100%',
   },
   inputContainer: {
     marginBottom: 20,
@@ -250,11 +324,6 @@ const styles = StyleSheet.create({
   checkboxChecked: {
     backgroundColor: COLORS.PRIMARY,
     borderColor: COLORS.PRIMARY,
-  },
-  checkmark: {
-    color: '#FFFFFF',
-    fontSize: 14,
-    fontWeight: 'bold',
   },
   rememberMeText: {
     fontSize: 14,

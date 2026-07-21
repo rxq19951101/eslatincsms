@@ -16,11 +16,12 @@ import { formatMoneyCOP, formatMoneyCOPShort } from '../../utils/formatMoney';
 import { useI18n } from '../../i18n';
 import Screen from '../../components/ui/Screen';
 import { palette, spacing, typography } from '../../theme';
+import { formatDateTime, localizeWalletTransaction } from '../../utils/localizedDisplay';
 
 const COP_TOP_UP_AMOUNTS = [10000, 20000, 50000];
 
 const MyWalletScreen = () => {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
 
   const dispatch = useAppDispatch();
   const navigation = useNavigation<any>();
@@ -46,20 +47,22 @@ const MyWalletScreen = () => {
   };
 
   const renderTx = ({ item, index }: { item: WalletTransaction; index: number }) => {
-    const isTopUp = item.type === 'top_up';
-    const color = isTopUp ? COLORS.SUCCESS : COLORS.ERROR;
+    const color = item.amount >= 0 ? COLORS.SUCCESS : COLORS.ERROR;
+    const title = localizeWalletTransaction(item, t);
     return (
       <Card
+        testID="app-wallet-transaction"
+        accessibilityLabel={`${title}, ${amountText(item.amount)}`}
         key={item.id}
         style={[styles.txRow, { marginBottom: index < transactions.length - 1 ? IOS_STYLES.SPACING.SM : 0 }]}
       >
         <View style={styles.txLeft}>
           <View style={styles.txIconContainer}>
             <Text style={styles.txTitle}>
-              {item.description || (isTopUp ? t.wallet.topUpLabel : t.wallet.chargeLabel)}
+              {title}
             </Text>
           </View>
-          <Text style={styles.txTime}>{item.created_at}</Text>
+          <Text style={styles.txTime}>{formatDateTime(item.created_at, locale)}</Text>
         </View>
         <Text style={[styles.txAmount, { color }]}>{amountText(item.amount)}</Text>
       </Card>
@@ -67,16 +70,16 @@ const MyWalletScreen = () => {
   };
 
   return (
-    <Screen>
+    <Screen testID="app-wallet-screen" accessibilityLabel={t.wallet.title}>
       <StatusBar barStyle="dark-content" />
 
       <View style={styles.header}>
         <Text style={styles.headerTitle}>{t.wallet.title}</Text>
       </View>
 
-      <Card style={styles.balanceCard}>
+      <Card testID="app-wallet-balance-card" accessibilityLabel={t.wallet.available} style={styles.balanceCard}>
         <Text style={styles.balanceLabel}>{t.wallet.available}</Text>
-        <Text style={styles.balanceAmount}>
+        <Text testID="app-wallet-balance" accessibilityLabel={t.wallet.available} style={styles.balanceAmount}>
           {loadingBalance && !balance ? '—' : formatMoneyCOPShort(balance?.balance ?? 0)}
         </Text>
 
@@ -108,7 +111,7 @@ const MyWalletScreen = () => {
           {(loadingTx || toppingUp) && <LoadingSpinner size="small" color={COLORS.IOS_BLUE} />}
         </View>
 
-        {!!error && <Text style={styles.errorText}>{error}</Text>}
+        {!!error && <Text style={styles.errorText}>{t.wallet.loadFailed}</Text>}
 
         {transactions.length === 0 && !loadingTx ? (
           <View style={styles.emptyState}>
@@ -116,6 +119,7 @@ const MyWalletScreen = () => {
           </View>
         ) : (
           <FlatList
+            testID="app-wallet-history"
             data={transactions}
             keyExtractor={(item) => item.id}
             renderItem={({ item, index }) => renderTx({ item, index })}

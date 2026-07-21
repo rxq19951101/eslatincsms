@@ -143,6 +143,10 @@ class SessionService:
         if meter_stop is not None:
             session.meter_stop = meter_stop
         session.status = "completed"
+        # Safety stop is independent of billing. An ended session that has not
+        # already been paid remains collectible as unpaid after the device stop.
+        if session.payment_status != "paid":
+            session.payment_status = "unpaid"
         session.updated_at = now
 
         order = db.query(Order).filter(Order.session_id == session.id).with_for_update().first()

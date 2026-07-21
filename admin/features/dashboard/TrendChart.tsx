@@ -2,32 +2,33 @@
 
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from 'recharts';
 import { TrendDataPoint } from '@/types';
+import { useI18n } from '@/lib/i18n';
+import { formatDate } from '@/lib/localization';
 
 interface TrendChartProps {
   data: TrendDataPoint[];
   title: string;
   color: string;
   unit?: string;
+  valueFormatter?: (value: number) => string;
   /** 图表像素高度，需与外层容器一致，避免 ResponsiveContainer 读到 width/height=-1 */
   chartHeight?: number;
 }
 
-export function TrendChart({ data, title, color, unit = '', chartHeight = 256 }: TrendChartProps) {
-  // 格式化日期显示
-  const formatDate = (dateStr: string) => {
-    const date = new Date(dateStr);
-    return `${date.getMonth() + 1}/${date.getDate()}`;
-  };
+export function TrendChart({ data, title, color, unit = '', valueFormatter, chartHeight = 256 }: TrendChartProps) {
+  const { locale, t } = useI18n();
+  const fallback = t('common.notAvailable');
+  const formatChartDate = (dateStr: string | number) => formatDate(dateStr, locale, fallback);
 
   // 格式化数值显示
-  const formatValue = (value: number) => {
-    if (unit === '¥') {
-      return `¥${value.toFixed(2)}`;
-    }
+  const formatValue = (value: unknown) => {
+    const numericValue = typeof value === 'number' ? value : Number(value);
+    if (!Number.isFinite(numericValue)) return fallback;
+    if (valueFormatter) return valueFormatter(numericValue);
     if (unit === 'kWh') {
-      return `${value.toFixed(2)} kWh`;
+      return `${numericValue.toFixed(2)} kWh`;
     }
-    return value.toFixed(0);
+    return numericValue.toFixed(0);
   };
 
   // 从 CSS variable 获取颜色
@@ -52,7 +53,7 @@ export function TrendChart({ data, title, color, unit = '', chartHeight = 256 }:
           <CartesianGrid strokeDasharray="3 3" stroke="rgba(148, 163, 184, 0.2)" />
           <XAxis
             dataKey="date"
-            tickFormatter={formatDate}
+            tickFormatter={formatChartDate}
             stroke="#94a3b8"
             style={{ fontSize: '12px' }}
           />
@@ -68,9 +69,9 @@ export function TrendChart({ data, title, color, unit = '', chartHeight = 256 }:
               borderRadius: '8px',
               color: '#e2e8f0',
             }}
-            labelFormatter={(label) => `日期: ${label}`}
-            formatter={(value: number | undefined) => {
-              if (value === undefined) return ['N/A', title];
+            labelFormatter={(label) => `${t('chart.dateLabel')}: ${formatChartDate(label)}`}
+            formatter={(value: unknown) => {
+              if (value === undefined) return [fallback, title];
               return [formatValue(value), title];
             }}
           />

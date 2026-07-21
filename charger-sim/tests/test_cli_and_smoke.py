@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import unittest
 from unittest.mock import Mock, patch
+import argparse
+import tempfile
+from pathlib import Path
 
 import cli
 import smoke_test
@@ -68,6 +71,37 @@ class CLIContractTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "field required"):
             smoke_test.require_successful_response(response, "remote-start")
+
+    def test_scenario_subcommands_are_available(self) -> None:
+        parser = cli.build_parser()
+        self.assertEqual(parser.parse_args(["scenario", "list"]).scenario_cmd, "list")
+        self.assertEqual(
+            parser.parse_args(["scenario", "validate", "scenarios/p0"]).scenario_cmd,
+            "validate",
+        )
+
+
+class ScenarioCLIExitTests(unittest.IsolatedAsyncioTestCase):
+    async def test_failed_scenario_exits_nonzero_and_still_writes_reports(self) -> None:
+        content = """\
+schema_version: "1.0"
+scenario: {id: cli-failure}
+environment: {}
+actors: {}
+steps:
+  - id: fail
+    actor: system
+    action: assert
+    with: {actual: 1, equals: 2}
+reports: {}
+"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            scenario_path = Path(temp_dir) / "failure.yml"
+            scenario_path.write_text(content, encoding="utf-8")
+            args = argparse.Namespace(path=str(scenario_path), report_dir=temp_dir)
+            with self.assertRaisesRegex(SystemExit, "1"):
+                await cli.scenario_run(args)
+            self.assertEqual(len(list(Path(temp_dir).rglob("*.junit.xml"))), 1)
 
 
 if __name__ == "__main__":

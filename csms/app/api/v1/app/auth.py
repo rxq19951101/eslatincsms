@@ -518,11 +518,11 @@ async def login_with_email(
                 detail="Invalid email or password"
             )
         
-        logger.info(f"User found: {app_user.email}, password_hash exists: {bool(app_user.password_hash)}")
+        logger.info("User found: %s, credential hash configured=%s", app_user.email, bool(app_user.password_hash))
         
         # 验证密码
         if not app_user.password_hash:
-            logger.warning("Password hash is empty")
+            logger.warning("Credential hash is empty")
             log_api_error(
                 method="POST",
                 path="/api/v1/app/auth/login-email",
@@ -536,11 +536,11 @@ async def login_with_email(
                 detail="Invalid email or password"
             )
         
-        password_valid = verify_password(request_data.password, app_user.password_hash)
-        logger.info(f"Password verification result: {password_valid}")
+        credentials_valid = verify_password(request_data.password, app_user.password_hash)
+        logger.info("Credential verification result: %s", credentials_valid)
         
-        if not password_valid:
-            logger.warning("Password verification failed")
+        if not credentials_valid:
+            logger.warning("Credential verification failed")
             log_api_error(
                 method="POST",
                 path="/api/v1/app/auth/login-email",

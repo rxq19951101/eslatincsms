@@ -28,6 +28,8 @@ import yaml
 from simulator.charge_point import connect_and_run
 from simulator.profiles import ChargePointProfile, MeteringProfile
 from simulator.qr import QR_PREREGISTRATION_HINT, QROptions, generate_connector_qr_png
+from runner import ScenarioRunner
+from scenario import ScenarioValidationError, discover_scenarios, load_scenario, load_seed_json
 
 
 def setup_logging(verbose: bool) -> None:
@@ -45,6 +47,10 @@ def load_config(path: Path) -> Dict[str, Any]:
 
 
 async def run_one(args) -> None:
+    if args.enable_payment:
+        logging.getLogger("eslatin_charger_sim").warning(
+            "Legacy automatic payment is disabled; use a scenario fake_payment actor"
+        )
     profile = ChargePointProfile(
         charge_point_id=args.ocpp_identity,
         vendor=args.vendor,
@@ -52,12 +58,7 @@ async def run_one(args) -> None:
         firmware_version=args.firmware_version,
         serial_number=args.serial_number,
         heartbeat_interval_sec=args.heartbeat_interval,
-        enable_payment_simulation=args.enable_payment,
-        payment_delay_seconds=args.payment_delay,
-        payment_amount=args.payment_amount,
-        payment_test_card=args.payment_test_card,
-        backend_api_url=args.backend_api_url,
-        backend_api_token=args.backend_api_token,
+        enable_payment_simulation=False,
     )
     connector_ids = args.connector_id
     meterings = [
@@ -86,7 +87,12 @@ async def run_one(args) -> None:
             )
             print(f"QR saved: {out}")
 
-    await connect_and_run(profile=profile, meterings=meterings, ws_base=args.ws)
+    await connect_and_run(
+        profile=profile,
+        meterings=meterings,
+        ws_base=args.ws,
+        ocpp_secret=args.ocpp_secret,
+    )
 
 
 async def run_many(args) -> None:
@@ -112,12 +118,7 @@ async def run_many(args) -> None:
             firmware_version=c.get("firmware_version", "1.0.0"),
             serial_number=c.get("serial_number"),
             heartbeat_interval_sec=int(c.get("heartbeat_interval", 30)),
-            enable_payment_simulation=args.enable_payment if hasattr(args, "enable_payment") else c.get("enable_payment_simulation", True),
-            payment_delay_seconds=args.payment_delay if hasattr(args, "payment_delay") else c.get("payment_delay_seconds", 5),
-            payment_amount=args.payment_amount if hasattr(args, "payment_amount") else c.get("payment_amount"),
-            payment_test_card=args.payment_test_card if hasattr(args, "payment_test_card") else c.get("payment_test_card", "visa_approved"),
-            backend_api_url=args.backend_api_url if hasattr(args, "backend_api_url") else c.get("backend_api_url"),
-            backend_api_token=args.backend_api_token if hasattr(args, "backend_api_token") else c.get("backend_api_token"),
+            enable_payment_simulation=False,
         )
         meterings = [
             MeteringProfile(
@@ -131,7 +132,12 @@ async def run_many(args) -> None:
             )
             for cid in connector_ids
         ]
-        tasks.append(connect_and_run(profile=profile, meterings=meterings, ws_base=ws))
+        tasks.append(connect_and_run(
+            profile=profile,
+            meterings=meterings,
+            ws_base=ws,
+            ocpp_secret=c.get("ocpp_secret"),
+        ))
 
     await asyncio.gather(*tasks)
 
@@ -173,6 +179,55 @@ def gen_qr(args) -> None:
         print(f"QR saved: {out}")
 
 
+def scenario_paths(args) -> List[Path]:
+    raw_paths = getattr(args, "paths", None) or [getattr(args, "scenario_dir", "scenarios")]
+    return discover_scenarios(Path(item) for item in raw_paths)
+
+
+def scenario_list(args) -> None:
+    paths = discover_scenarios([Path(args.scenario_dir)])
+    for path in paths:
+        try:
+            document = load_scenario(path)
+            dependencies = ",".join(document.dependencies) if document.dependencies else "none"
+            print(f"{document.id}\t{path}\tdependencies={dependencies}")
+        except ScenarioValidationError as exc:
+            print(f"INVALID\t{path}\t{exc.errors[0]}")
+
+
+def scenario_validate(args) -> None:
+    paths = scenario_paths(args)
+    if not paths:
+        raise SystemExit("No scenario YAML files found")
+    failures = 0
+    for path in paths:
+        try:
+            document = load_scenario(path)
+            print(f"PASS {document.id} {path}")
+        except (ScenarioValidationError, OSError, ValueError) as exc:
+            failures += 1
+            print(f"FAIL {path}: {exc}")
+    if failures:
+        raise SystemExit(1)
+
+
+async def scenario_run(args) -> None:
+    document = load_scenario(Path(args.path))
+    seed_path = getattr(args, "seed_json", None)
+    initial_variables = {"seed": load_seed_json(Path(seed_path))} if seed_path else None
+    runner = ScenarioRunner(
+        document,
+        report_dir=Path(args.report_dir),
+        initial_variables=initial_variables,
+    )
+    result = await runner.run()
+    print(f"{result.outcome} scenario={result.scenario_id} run_id={result.run_id}")
+    for report_type, path in sorted(result.reports.items()):
+        print(f"{report_type}: {path}")
+    if result.outcome != "PASS":
+        raise SystemExit(1)
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser()
     p.add_argument("--verbose", action="store_true")
@@ -180,6 +235,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p1 = sub.add_parser("run-one")
     p1.add_argument("--ws", required=True, help="例如 ws://localhost:9000/ocpp")
+    p1.add_argument(
+        "--ocpp-secret",
+        default=None,
+        help="Admin 预注册时一次性返回的设备独立密钥（使用 HTTP Basic 发送）",
+    )
     p1.add_argument(
         "--ocpp-identity",
         "--charge-point-id",
@@ -216,13 +276,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="服务端分配的扫码 URL；每个 connector 按顺序重复一次",
     )
     # 支付模拟参数
-    p1.add_argument("--enable-payment", action="store_true", default=True, help="启用支付模拟（默认启用）")
-    p1.add_argument("--disable-payment", action="store_false", dest="enable_payment", help="禁用支付模拟")
-    p1.add_argument("--payment-delay", type=int, default=5, help="支付延迟时间（秒，模拟用户操作）")
-    p1.add_argument("--payment-amount", type=float, default=None, help="支付金额（COP），默认 10000")
-    p1.add_argument("--payment-test-card", default="visa_approved", choices=["visa_approved", "master_approved", "pending", "rejected"], help="测试卡类型")
-    p1.add_argument("--backend-api-url", default=None, help="后端 API URL（例如 http://localhost:9000）")
-    p1.add_argument("--backend-api-token", default=None, help="后端 API 认证 token（如果需要）")
+    p1.add_argument("--enable-payment", action="store_true", default=False, help="兼容参数；请使用 scenario fake_payment actor")
+    p1.add_argument("--disable-payment", action="store_false", dest="enable_payment", help="兼容参数；自动支付默认禁用")
 
     p2 = sub.add_parser("run-many")
     p2.add_argument("--config", required=True, help="yaml/json")
@@ -249,6 +304,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="服务端分配的扫码 URL；每个 connector 按顺序重复一次",
     )
 
+    scenario_parser = sub.add_parser("scenario", help="YAML DSL 1.0 scenario tools")
+    scenario_sub = scenario_parser.add_subparsers(dest="scenario_cmd", required=True)
+
+    scenario_list_parser = scenario_sub.add_parser("list", help="list discovered scenarios")
+    scenario_list_parser.add_argument("--scenario-dir", default="scenarios")
+
+    scenario_validate_parser = scenario_sub.add_parser("validate", help="validate scenario YAML")
+    scenario_validate_parser.add_argument("paths", nargs="*")
+    scenario_validate_parser.add_argument("--scenario-dir", default="scenarios")
+
+    scenario_run_parser = scenario_sub.add_parser("run", help="run one scenario")
+    scenario_run_parser.add_argument("path")
+    scenario_run_parser.add_argument("--report-dir", default="reports")
+    scenario_run_parser.add_argument(
+        "--seed-json",
+        help="development/test seed output consumed in memory; values are never printed",
+    )
+
     return p
 
 
@@ -268,6 +341,13 @@ async def main_async() -> None:
             gen_qr(args)
         except ValueError as exc:
             parser.error(str(exc))
+    elif args.cmd == "scenario":
+        if args.scenario_cmd == "list":
+            scenario_list(args)
+        elif args.scenario_cmd == "validate":
+            scenario_validate(args)
+        elif args.scenario_cmd == "run":
+            await scenario_run(args)
 
 
 def main() -> None:

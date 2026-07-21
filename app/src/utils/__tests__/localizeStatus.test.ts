@@ -15,4 +15,13 @@ describe('localizeStatus', () => {
     expect(localizeStatus('Suspended_EVSE', zh)).toBe('已暂停');
     expect(localizeStatus('vendor_private_state', zh)).toBe('未知');
   });
+
+  it('provides critical charging and QR errors in all three languages', () => {
+    expect(zh.scan.invalidQrDetail).toContain('qr_token');
+    expect(en.scan.invalidQrDetail).toContain('qr_token');
+    expect(es.scan.invalidQrDetail).toContain('qr_token');
+    expect(zh.charging.insufficientBalance).toBe('余额不足');
+    expect(en.charging.insufficientBalance).toBe('Insufficient balance');
+    expect(es.charging.insufficientBalance).toBe('Saldo insuficiente');
+  });
 });

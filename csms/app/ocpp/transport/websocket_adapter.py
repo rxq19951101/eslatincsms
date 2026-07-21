@@ -1,129 +1,160 @@
-#
-# WebSocket 传输适配器
-# 支持 OCPP 消息通过 WebSocket 传输
-#
+"""Generation-fenced OCPP 1.6J WebSocket transport."""
 
+import asyncio
 import json
 import logging
-import asyncio
 import uuid
-from typing import Dict, Any, Optional
+from dataclasses import dataclass
+from typing import Any, Dict, Optional
+
 from fastapi import WebSocket
+
 from .base import TransportAdapter, TransportType
 
 logger = logging.getLogger("ocpp_csms")
 
 
+@dataclass(frozen=True)
+class ConnectionEntry:
+    websocket: WebSocket
+    generation: str
+
+
+@dataclass
+class PendingResponse:
+    future: asyncio.Future
+    charge_point_id: str
+    generation: str
+
+
 class WebSocketAdapter(TransportAdapter):
-    """WebSocket 传输适配器
-    
-    支持 OCPP 消息通过 WebSocket 双向传输
-    """
-    
     def __init__(self):
         super().__init__(TransportType.WEBSOCKET)
-        self._connections: Dict[str, WebSocket] = {}
-        self._pending_responses: Dict[str, asyncio.Future] = {}  # unique_id -> Future
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
-    
+        self._connections: Dict[str, ConnectionEntry] = {}
+        self._pending_responses: Dict[str, PendingResponse] = {}
+
     async def start(self) -> None:
-        """启动 WebSocket 服务（由 FastAPI 管理）"""
-        logger.info("WebSocket 传输适配器已初始化")
-    
+        logger.info("WebSocket transport initialized")
+
     async def stop(self) -> None:
-        """停止 WebSocket 服务"""
-        # 关闭所有连接
-        for charger_id, ws in list(self._connections.items()):
+        for entry in list(self._connections.values()):
             try:
-                await ws.close()
+                await entry.websocket.close()
             except Exception:
                 pass
+        for pending in self._pending_responses.values():
+            if not pending.future.done():
+                pending.future.cancel()
         self._connections.clear()
-        logger.info("WebSocket 传输适配器已停止")
-    
-    async def register_connection(self, charge_point_id: str, websocket: WebSocket) -> None:
-        """注册 WebSocket 连接"""
-        self._connections[charge_point_id] = websocket
-        logger.info(f"[{charge_point_id}] WebSocket 连接已注册")
-    
-    async def unregister_connection(self, charge_point_id: str) -> None:
-        """注销 WebSocket 连接"""
-        if charge_point_id in self._connections:
-            del self._connections[charge_point_id]
-            logger.info(f"[{charge_point_id}] WebSocket 连接已注销")
-    
+        self._pending_responses.clear()
+
+    async def register_connection(
+        self,
+        charge_point_id: str,
+        websocket: WebSocket,
+        generation: Optional[str] = None,
+    ) -> str:
+        generation = generation or uuid.uuid4().hex
+        previous = self._connections.get(charge_point_id)
+        self._connections[charge_point_id] = ConnectionEntry(websocket, generation)
+        if previous and previous.generation != generation:
+            self._cancel_pending(charge_point_id, previous.generation)
+        logger.info(
+            "[%s] WebSocket registered generation=%s", charge_point_id, generation
+        )
+        return generation
+
+    async def unregister_connection(
+        self,
+        charge_point_id: str,
+        generation: Optional[str] = None,
+        websocket: Optional[WebSocket] = None,
+    ) -> bool:
+        entry = self._connections.get(charge_point_id)
+        if not entry:
+            return False
+        if generation is not None and entry.generation != generation:
+            return False
+        if websocket is not None and entry.websocket is not websocket:
+            return False
+        del self._connections[charge_point_id]
+        self._cancel_pending(charge_point_id, entry.generation)
+        logger.info(
+            "[%s] WebSocket unregistered generation=%s",
+            charge_point_id,
+            entry.generation,
+        )
+        return True
+
+    def _cancel_pending(self, charge_point_id: str, generation: str) -> None:
+        keys = [
+            key
+            for key, pending in self._pending_responses.items()
+            if pending.charge_point_id == charge_point_id
+            and pending.generation == generation
+        ]
+        for key in keys:
+            pending = self._pending_responses.pop(key)
+            if not pending.future.done():
+                pending.future.cancel()
+
     async def send_message(
         self,
         charge_point_id: str,
         action: str,
         payload: Dict[str, Any],
-        timeout: float = 5.0
+        timeout: float = 5.0,
     ) -> Dict[str, Any]:
-        """发送消息到充电桩（使用 OCPP 1.6 标准格式）"""
-        ws = self._connections.get(charge_point_id)
-        if not ws:
-            raise ConnectionError(f"Charger {charge_point_id} is not connected via WebSocket")
-        
-        # 创建 Future 用于等待响应
-        if self._loop is None:
-            self._loop = asyncio.get_event_loop()
-        
+        entry = self._connections.get(charge_point_id)
+        if not entry:
+            raise ConnectionError(
+                f"Charger {charge_point_id} is not connected via WebSocket"
+            )
+
         unique_id = f"csms_{uuid.uuid4().hex[:16]}"
-        future = self._loop.create_future()
-        self._pending_responses[unique_id] = future
-        
+        future = asyncio.get_running_loop().create_future()
+        self._pending_responses[unique_id] = PendingResponse(
+            future=future,
+            charge_point_id=charge_point_id,
+            generation=entry.generation,
+        )
         try:
-            # 使用 OCPP 1.6 标准格式: [2, UniqueId, Action, Payload]
-            message = [2, unique_id, action, payload]
-            
-            await ws.send_text(json.dumps(message))
-            logger.info(f"[{charge_point_id}] -> WebSocket OCPP {action} (标准格式, UniqueId={unique_id})")
-            
-            # 等待响应（通过消息匹配机制）
-            try:
-                response_data = await asyncio.wait_for(future, timeout=timeout)
-                logger.info(f"[{charge_point_id}] <- WebSocket OCPP {action} 响应 (UniqueId: {unique_id}): {response_data}")
-                # 返回 data 字段（与 MQTT 适配器保持一致）
-                if isinstance(response_data, dict) and "data" in response_data:
-                    return response_data["data"]
-                return response_data
-            except asyncio.TimeoutError:
-                self._pending_responses.pop(unique_id, None)
-                logger.warning(f"[{charge_point_id}] WebSocket OCPP {action} 响应超时 (UniqueId: {unique_id}, 超时: {timeout}秒)")
-                raise ConnectionError(f"等待 {action} 响应超时 ({timeout}秒)")
-            except Exception as e:
-                self._pending_responses.pop(unique_id, None)
-                logger.error(f"[{charge_point_id}] WebSocket OCPP {action} 响应错误 (UniqueId: {unique_id}): {e}")
-                raise
-                
-        except Exception as e:
+            await entry.websocket.send_text(json.dumps([2, unique_id, action, payload]))
+            response = await asyncio.wait_for(future, timeout=timeout)
+            if isinstance(response, dict) and response.get("success") is False:
+                raise ConnectionError(
+                    f"Charge point returned CALLERROR: {response.get('error', 'UnknownError')}"
+                )
+            return response.get("data", response) if isinstance(response, dict) else response
+        except asyncio.TimeoutError as exc:
+            raise ConnectionError(f"Waiting for {action} response timed out") from exc
+        finally:
             self._pending_responses.pop(unique_id, None)
-            logger.error(f"[{charge_point_id}] WebSocket 发送错误: {e}", exc_info=True)
-            raise
-    
-    def handle_response(self, unique_id: str, response_data: Dict[str, Any]):
-        """处理来自充电桩的响应消息（由 WebSocket 端点调用）"""
-        if unique_id in self._pending_responses:
-            future = self._pending_responses.pop(unique_id)
-            if not future.done():
-                future.set_result(response_data)
-            logger.debug(f"[WebSocketAdapter] 处理响应 (UniqueId: {unique_id})")
-        else:
-            logger.warning(f"[WebSocketAdapter] 收到未预期的响应 (UniqueId: {unique_id})")
-    
-    async def unregister_connection(self, charge_point_id: str) -> None:
-        """注销 WebSocket 连接（清理待处理的响应）"""
-        if charge_point_id in self._connections:
-            del self._connections[charge_point_id]
-            # 清理该充电桩的所有待处理响应
-            keys_to_remove = [key for key in self._pending_responses.keys() if key.startswith(f"{charge_point_id}_")]
-            for key in keys_to_remove:
-                future = self._pending_responses.pop(key, None)
-                if future and not future.done():
-                    future.cancel()
-            logger.info(f"[{charge_point_id}] WebSocket 连接已注销")
-    
+
+    def handle_response(
+        self,
+        unique_id: str,
+        response_data: Dict[str, Any],
+        *,
+        charge_point_id: Optional[str] = None,
+        generation: Optional[str] = None,
+    ) -> bool:
+        pending = self._pending_responses.get(unique_id)
+        if not pending:
+            logger.warning("Unexpected OCPP response UniqueId=%s", unique_id)
+            return False
+        if charge_point_id is not None and pending.charge_point_id != charge_point_id:
+            return False
+        if generation is not None and pending.generation != generation:
+            return False
+        self._pending_responses.pop(unique_id, None)
+        if not pending.future.done():
+            pending.future.set_result(response_data)
+        return True
+
     def is_connected(self, charge_point_id: str) -> bool:
-        """检查充电桩是否已连接"""
         return charge_point_id in self._connections
 
+    def get_generation(self, charge_point_id: str) -> Optional[str]:
+        entry = self._connections.get(charge_point_id)
+        return entry.generation if entry else None

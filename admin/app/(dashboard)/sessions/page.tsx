@@ -8,11 +8,13 @@ import { Button } from '@/components/ui/button';
 import { apiGet } from '@/lib/api';
 import { API_ENDPOINTS, ACTIVE_SESSION_REFRESH_INTERVAL } from '@/lib/constants';
 import { useI18n } from '@/lib/i18n';
+import { formatDateTime, formatMeasurement, getStatusBadgeClass, getStatusMessageKey } from '@/lib/localization';
 
 interface ActiveSession {
-  id: number;
+  id: string;
   transaction_id: number;
-  charge_point_id: string;
+  charge_point_id: string; // Internal UUID used only for relations.
+  ocpp_identity?: string;
   user_id?: string;
   start_time?: string;
   energy_kwh?: number;
@@ -22,21 +24,21 @@ interface ActiveSession {
 }
 
 export default function ActiveSessionsPage() {
-  const { t } = useI18n();
-  const { data: sessions, mutate, isLoading } = useSWR<ActiveSession[]>(
+  const { locale, t } = useI18n();
+  const { data: sessions, error, mutate, isLoading } = useSWR<ActiveSession[]>(
     `${API_ENDPOINTS.TRANSACTIONS}/active`,
     (url: string) => apiGet<ActiveSession[]>(url),
     { refreshInterval: ACTIVE_SESSION_REFRESH_INTERVAL }
   );
 
   return (
-    <div className="space-y-6">
+    <div data-testid="admin-sessions-page" className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-3xl font-bold text-white">{t('活跃会话')}</h1>
           <p className="text-slate-400 mt-1">{t('实时监控进行中的充电会话（5 秒刷新）')}</p>
         </div>
-        <Button variant="outline" className="border-slate-600" onClick={() => mutate()}>
+        <Button data-testid="admin-sessions-refresh" variant="outline" className="border-slate-600" onClick={() => mutate()}>
           <RefreshCw className="h-4 w-4 mr-2" />
           {t('刷新')}
         </Button>
@@ -46,21 +48,24 @@ export default function ActiveSessionsPage() {
         <CardHeader>
           <CardTitle className="text-white flex items-center gap-2">
             <Zap className="h-5 w-5 text-yellow-400" />
-            {t('进行中')} ({sessions?.length ?? 0})
+            {t('status.ongoing')} ({sessions?.length ?? 0})
           </CardTitle>
         </CardHeader>
         <CardContent>
           {isLoading ? (
             <p className="text-slate-400 text-center py-8">{t('加载中...')}</p>
+          ) : error ? (
+            <p className="text-red-400 text-center py-8">{t('加载失败，请刷新页面重试')}</p>
           ) : !sessions?.length ? (
             <p className="text-slate-400 text-center py-12">{t('当前无进行中的充电会话')}</p>
           ) : (
             <div className="overflow-x-auto">
-              <table className="w-full text-sm text-slate-300">
+              <table data-testid="admin-sessions-table" className="w-full text-sm text-slate-300">
                 <thead>
                   <tr className="border-b border-slate-700 text-slate-400">
                     <th className="text-left py-2 px-2">{t('OCPP 交易号')}</th>
                     <th className="text-left py-2 px-2">{t('OCPP 身份')}</th>
+                    <th className="text-left py-2 px-2">{t('开始时间')}</th>
                     <th className="text-left py-2 px-2">{t('已充电量')}</th>
                     <th className="text-left py-2 px-2">{t('功率')}</th>
                     <th className="text-left py-2 px-2">{t('时长(分)')}</th>
@@ -68,18 +73,24 @@ export default function ActiveSessionsPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {sessions.map((s) => (
-                    <tr key={s.id} className="border-b border-slate-700/50">
-                      <td className="py-2 px-2">{s.transaction_id}</td>
-                      <td className="py-2 px-2 font-mono text-xs">{s.charge_point_id}</td>
-                      <td className="py-2 px-2">{s.energy_kwh?.toFixed(2) ?? '—'} kWh</td>
-                      <td className="py-2 px-2">{s.power_kw?.toFixed(1) ?? '—'} kW</td>
-                      <td className="py-2 px-2">{s.duration_minutes?.toFixed(0) ?? '—'}</td>
-                      <td className="py-2 px-2">
-                        <Badge className="bg-green-600">{s.status}</Badge>
-                      </td>
-                    </tr>
-                  ))}
+                  {sessions.map((s) => {
+                    const fallback = t('common.notAvailable');
+                    return (
+                      <tr key={s.id} data-testid="admin-session-row" data-transaction-id={s.transaction_id} className="border-b border-slate-700/50">
+                        <td className="py-2 px-2">{s.transaction_id ?? fallback}</td>
+                        <td className="py-2 px-2 font-mono text-xs" data-testid="session-ocpp-identity">
+                          {s.ocpp_identity?.trim() || fallback}
+                        </td>
+                        <td className="py-2 px-2">{formatDateTime(s.start_time, locale, fallback)}</td>
+                        <td className="py-2 px-2">{formatMeasurement(s.energy_kwh, 2, 'kWh', fallback)}</td>
+                        <td className="py-2 px-2">{formatMeasurement(s.power_kw, 1, 'kW', fallback)}</td>
+                        <td className="py-2 px-2">{formatMeasurement(s.duration_minutes, 0, '', fallback)}</td>
+                        <td className="py-2 px-2">
+                          <Badge className={getStatusBadgeClass(s.status)}>{t(getStatusMessageKey(s.status))}</Badge>
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>

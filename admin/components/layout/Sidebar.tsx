@@ -89,6 +89,7 @@ export function Sidebar() {
               return (
                 <Link
                   key={item.key}
+                  data-testid={`admin-nav-${item.key}`}
                   href={item.href}
                   onClick={() => setIsMobileMenuOpen(false)}
                   className={cn(

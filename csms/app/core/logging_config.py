@@ -9,6 +9,7 @@ import json
 from datetime import datetime
 from typing import Dict, Any
 from app.core.config import get_settings
+from app.core.log_sanitization import SensitiveDataFilter, redact_sensitive_data
 
 settings = get_settings()
 
@@ -21,7 +22,7 @@ class JSONFormatter(logging.Formatter):
             "timestamp": datetime.utcnow().isoformat() + "Z",
             "level": record.levelname,
             "logger": record.name,
-            "message": record.getMessage(),
+            "message": redact_sensitive_data(record.getMessage()),
             "module": record.module,
             "function": record.funcName,
             "line": record.lineno,
@@ -54,6 +55,8 @@ def setup_logging():
     # 创建控制台处理器
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(log_level)
+    redacting_filter = SensitiveDataFilter()
+    console_handler.addFilter(redacting_filter)
     
     # 设置格式
     if settings.log_format == "json":
@@ -70,6 +73,7 @@ def setup_logging():
     if settings.log_file:
         file_handler = logging.FileHandler(settings.log_file)
         file_handler.setLevel(log_level)
+        file_handler.addFilter(redacting_filter)
         file_handler.setFormatter(formatter)
         root_logger.addHandler(file_handler)
     
@@ -81,8 +85,20 @@ def setup_logging():
     logging.getLogger("sqlalchemy").setLevel(logging.WARNING)
     logging.getLogger("websockets").setLevel(logging.WARNING)
 
+    # Named logger filters run before every handler, including test capture handlers.
+    for logger_name in (
+        "ocpp_csms",
+        "ocpp_validator",
+        "httpx",
+        "httpcore",
+        "uvicorn.access",
+        "uvicorn.error",
+    ):
+        named_logger = logging.getLogger(logger_name)
+        if not any(isinstance(item, SensitiveDataFilter) for item in named_logger.filters):
+            named_logger.addFilter(SensitiveDataFilter())
+
 
 def get_logger(name: str) -> logging.Logger:
     """获取日志记录器"""
     return logging.getLogger(name)
-

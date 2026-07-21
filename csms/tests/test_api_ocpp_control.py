@@ -25,6 +25,58 @@ class TestOCPPControlAPI:
         if response.status_code == 200:
             data = response.json()
             assert "success" in data
+
+    def test_remote_start_accepts_body_idempotency_key_and_replays_once(
+        self, admin_client: TestClient, db_session, sample_charge_point, sample_evse
+    ):
+        from app.api.v1 import ocpp_control
+
+        payload = {
+            "charge_point_id": sample_charge_point.ocpp_identity,
+            "id_tag": "BODY-IDEMPOTENT",
+            "connector_id": sample_evse.evse_id,
+            "idempotency_key": "scenario-remote-start-001",
+        }
+        with patch.dict(ocpp_control._remote_start_inflight, {}, clear=True), patch(
+            "app.api.v1.ocpp_control.check_charger_connection", return_value=True
+        ), patch(
+            "app.api.v1.ocpp_control.message_handler.send_call",
+            new=AsyncMock(return_value={"success": True, "status": "Accepted"}),
+        ) as sender:
+            first = admin_client.post("/api/v1/ocpp/remote-start-transaction", json=payload)
+            replay = admin_client.post("/api/v1/ocpp/remote-start-transaction", json=payload)
+
+        assert first.status_code == replay.status_code == 200
+        assert first.json()["success"] is True
+        assert replay.json()["success"] is True
+        assert replay.json()["details"]["idempotent_replay"] is True
+        sender.assert_awaited_once()
+        event = db_session.query(OutboxEvent).filter_by(
+            idempotency_key="remote-command:scenario-remote-start-001"
+        ).one()
+        assert event.payload["id_tag"] == "BODY-IDEMPOTENT"
+
+    def test_remote_start_rejects_conflicting_header_and_body_idempotency_keys(
+        self, admin_client: TestClient, db_session, sample_charge_point, sample_evse
+    ):
+        response = admin_client.post(
+            "/api/v1/ocpp/remote-start-transaction",
+            headers={"Idempotency-Key": "header-command-key"},
+            json={
+                "charge_point_id": sample_charge_point.ocpp_identity,
+                "id_tag": "CONFLICT",
+                "connector_id": sample_evse.evse_id,
+                "idempotency_key": "body-command-key",
+            },
+        )
+
+        assert response.status_code == 422
+        assert db_session.query(OutboxEvent).filter(
+            OutboxEvent.idempotency_key.in_([
+                "remote-command:header-command-key",
+                "remote-command:body-command-key",
+            ])
+        ).count() == 0
     
     def test_remote_stop_transaction(self, admin_client: TestClient, db_session, sample_charge_point, sample_evse):
         """测试远程停止交易"""

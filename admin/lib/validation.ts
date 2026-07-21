@@ -10,6 +10,7 @@ export type ValidationMessageKey =
   | 'validation.zeroCoordinates'
   | 'validation.operatingHoursLength'
   | 'validation.ocppIdentity'
+  | 'validation.displayCode'
   | 'validation.textTooLong'
   | 'validation.connectorCount'
   | 'validation.positiveAmount'
@@ -61,10 +62,19 @@ export const siteSchema = z
 
 export const chargePointSchema = z.object({
   id: z.string().trim().regex(/^[A-Za-z0-9._:-]{1,64}$/, 'validation.ocppIdentity'),
+  display_code: z.string().trim().regex(/^[A-Z][A-Z0-9-]{0,15}$/, 'validation.displayCode'),
+  display_name: optionalTrimmedString(80),
+  location_hint: optionalTrimmedString(160),
   vendor: optionalTrimmedString(120),
   model: optionalTrimmedString(120),
   connector_count: z.coerce.number().int('validation.connectorCount').min(1, 'validation.connectorCount').max(16, 'validation.connectorCount'),
-  connector_type: trimmedString(1, 64, 'validation.textTooLong'),
+  connector_type: z.enum(['Type2', 'CCS1', 'CCS2', 'CHAdeMO', 'NACS', 'GB_T_AC', 'GB_T_DC']),
+  evses: z.array(z.object({
+    evse_id: z.coerce.number().int().min(1).max(16),
+    physical_reference: z.string().trim().regex(/^[A-Za-z0-9._:-]{1,64}$/, 'validation.ocppIdentity'),
+    connector_type: z.enum(['Type2', 'CCS1', 'CCS2', 'CHAdeMO', 'NACS', 'GB_T_AC', 'GB_T_DC']),
+    max_power_kw: z.coerce.number().positive().max(1000),
+  })).min(1).max(16).optional(),
 });
 
 const optionalDomain = z

@@ -1,0 +1,90 @@
+schema_version: "1.0"
+scenario:
+  id: p0-real-device-acceptance
+  name: Authenticated OCPP device commissioning evidence
+  dependencies: [sim-e2e-seed, admin-control-permission]
+environment:
+  api_base: ${SIM_API_BASE}
+  ws_url: ${SIM_OCPP_WS}
+  admin_password: ${SIM_E2E_ADMIN_PASSWORD}
+actors:
+  admin:
+    type: admin
+    base_url: ${api_base}
+    username: ${seed.admin.username}
+    password: ${admin_password}
+    tenant_id: ${seed.tenant_id}
+  charger:
+    type: charger
+    ws: ${ws_url}
+    ocpp_identity: ${seed.charge_point.ocpp_identity}
+    serial_number: SIM-ACCEPTANCE-001
+    connector_ids: [1]
+    meter_interval: 30
+steps:
+  - {id: admin-login, actor: admin, action: login, expect: {status: 200}}
+  - id: rotate-device-secret
+    actor: admin
+    action: query
+    with:
+      method: POST
+      path: "/api/v1/chargers/${seed.charge_point.id}/credentials/rotate"
+    expect: {status: 200, body.secret: {matches: "^[A-Za-z0-9_-]{32,}$"}}
+    save: {device_secret: body.secret}
+  - id: authenticated-connect
+    actor: charger
+    action: connect
+    with: {ocpp_secret: "${device_secret}"}
+    expect: {status: connected}
+  - {id: boot, actor: charger, action: boot, expect: {body.accepted: true}}
+  - {id: heartbeat, actor: charger, action: heartbeat, expect: {status: Accepted}}
+  - id: remote-start
+    actor: admin
+    action: remote_start
+    with:
+      charge_point_id: ${seed.charge_point.ocpp_identity}
+      id_tag: ACCEPTANCE-TAG
+      connector_id: 1
+      idempotency_key: "${run_id}:acceptance-start"
+    expect: {status: 200, body.success: true}
+  - {id: start-propagation, actor: system, action: await, with: {seconds: 1}}
+  - {id: meter-values, actor: charger, action: meter_values, with: {connector_id: 1}, expect: {status: Accepted}}
+  - id: active-transaction
+    actor: admin
+    action: query
+    with:
+      path: /api/v1/transactions
+      query: {charge_point_id: "${seed.charge_point.ocpp_identity}", status: ongoing}
+    retry: 5
+    expect: {status: 200, body: {min_count: 1}}
+    save: {transaction_id: body.0.transaction_id}
+  - id: remote-stop
+    actor: admin
+    action: remote_stop
+    with:
+      charge_point_id: ${seed.charge_point.ocpp_identity}
+      transaction_id: ${transaction_id}
+    expect: {status: 200, body.success: true}
+  - {id: stop-propagation, actor: system, action: await, with: {seconds: 1}}
+  - {id: reconnect, actor: charger, action: reconnect, with: {delay: 0.2}, expect: {status: connected}}
+  - {id: boot-after-reconnect, actor: charger, action: boot, expect: {body.accepted: true}}
+  - id: acceptance-report
+    actor: admin
+    action: query
+    with:
+      method: POST
+      path: "/api/v1/chargers/${seed.charge_point.id}/acceptance-report"
+    expect:
+      status: 200
+      body.passed: true
+      body.checks.device_credential: true
+      body.checks.evse_configuration: true
+      body.checks.disconnect_recovery: true
+  - id: commission
+    actor: admin
+    action: query
+    with:
+      method: POST
+      path: "/api/v1/chargers/${seed.charge_point.id}/commission"
+    expect: {status: 200, body.commissioning_status: commissioned}
+reports: {formats: [json, junit, timeline]}

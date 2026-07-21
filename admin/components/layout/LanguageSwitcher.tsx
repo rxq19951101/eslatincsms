@@ -8,6 +8,7 @@ export function LanguageSwitcher() {
     <label className="flex items-center gap-2 text-xs text-slate-400" title={t('language')}>
       <span className="sr-only">{t('language')}</span>
       <select
+        data-testid="admin-language-select"
         value={locale}
         onChange={(event) => setLocale(event.target.value as Locale)}
         className="rounded-md border border-slate-700 bg-slate-800 px-2 py-1 text-slate-200 outline-none"

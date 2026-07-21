@@ -20,6 +20,7 @@ import Card from '../../components/ui/Card';
 import Button from '../../components/ui/Button';
 import Badge from '../../components/ui/Badge';
 import { radius, spacing, typography } from '../../theme';
+import { publicChargerIdentity } from '../../utils/localizedDisplay';
 
 type R = RouteProp<RootStackParamList, 'ChargingComplete'>;
 type Nav = StackNavigationProp<RootStackParamList, 'ChargingComplete'>;
@@ -32,11 +33,11 @@ const ChargingCompleteScreen = () => {
 
   const dispatch = useAppDispatch();
   const { lastStoppedSession, lastRemoteResult } = useAppSelector((s) => s.charging);
-  const chargePointId = route.params.chargePointId || lastStoppedSession?.charge_point_id || '—';
+  const ocppIdentity = route.params.ocppIdentity || publicChargerIdentity(lastStoppedSession);
 
   const [settling, setSettling] = useState(false);
   const [settleResult, setSettleResult] = useState<SettleResult | null>(null);
-  const [settleError, setSettleError] = useState<string | null>(null);
+  const [settleError, setSettleError] = useState(false);
 
   useEffect(() => {
     if (!lastStoppedSession) return;
@@ -44,20 +45,15 @@ const ChargingCompleteScreen = () => {
     (async () => {
       try {
         setSettling(true);
-        setSettleError(null);
+        setSettleError(false);
         const res = await settleCharging(lastStoppedSession.id);
         if (cancelled) return;
         setSettleResult(res);
         dispatch(fetchWalletBalance());
         dispatch(fetchWalletTransactions({ limit: 50, offset: 0 }));
-      } catch (e: any) {
+      } catch {
         if (cancelled) return;
-        const msg =
-          e?.response?.data?.detail ||
-          e?.response?.data?.message ||
-          e?.message ||
-          t.charging.settleFail;
-        setSettleError(msg);
+        setSettleError(true);
       } finally {
         if (!cancelled) setSettling(false);
       }
@@ -68,26 +64,16 @@ const ChargingCompleteScreen = () => {
   }, [dispatch, lastStoppedSession]);
 
   return (
-    <Screen edges={['top', 'bottom']} contentStyle={styles.container}>
+    <Screen testID="app-charging-complete" accessibilityLabel={t.charging.completeTitle} edges={['top', 'bottom']} contentStyle={styles.container}>
       <Card style={styles.card}>
         <Badge label={t.common.success} variant="success" style={styles.statusBadge} />
         <Text style={styles.title}>{t.charging.completeTitle}</Text>
-        <Text style={styles.subTitle}>{t.charging.charger.replace('{id}', String(chargePointId))}</Text>
-
-        {lastStoppedSession && (
-          <View style={styles.block}>
-            <Text style={styles.kv}>
-              {t.charging.sessionId.replace('{id}', String(lastStoppedSession.id))}
-            </Text>
-            <Text style={styles.kv}>TransactionId: {lastStoppedSession.transaction_id}</Text>
-          </View>
-        )}
+        <Text style={styles.subTitle}>{t.charging.charger.replace('{id}', ocppIdentity)}</Text>
 
         {lastRemoteResult && (
           <View style={styles.notice}>
             <Text style={styles.noticeText}>
-              {lastRemoteResult.success ? t.charging.stopOk : t.charging.stopFail}
-              {lastRemoteResult.message}
+              {lastRemoteResult.success ? t.charging.stopped : t.charging.stopFailedGeneric}
             </Text>
           </View>
         )}
@@ -95,14 +81,14 @@ const ChargingCompleteScreen = () => {
         <View style={styles.block}>
           <Text style={styles.kvTitle}>{t.charging.settle}</Text>
           {settling && (
-            <View style={styles.settleRow}>
+            <View testID="app-charging-settling" style={styles.settleRow}>
               <ActivityIndicator size="small" color={COLORS.PRIMARY} />
               <Text style={styles.settleText}>{t.charging.settling}</Text>
             </View>
           )}
-          {!!settleError && <Text style={styles.errorText}>{settleError}</Text>}
+          {settleError && <Text testID="app-charging-settle-error" accessibilityRole="alert" style={styles.errorText}>{t.charging.settleFail}</Text>}
           {!!settleResult && (
-            <View style={{ marginTop: 8 }}>
+            <View testID="app-charging-settled" style={{ marginTop: 8 }}>
               <Text style={styles.kv}>
                 {settleResult.already_settled ? t.charging.alreadySettled : t.charging.chargedNow}:{' '}
                 {formatMoneyCOP(settleResult.charged_amount)}

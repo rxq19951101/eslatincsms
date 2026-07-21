@@ -166,7 +166,11 @@ async def refresh_token_pair(
         )
     
     # 4. 检查是否过期
-    if token_record.expires_at < datetime.now(timezone.utc):
+    expires_at = token_record.expires_at
+    if expires_at.tzinfo is None:
+        # SQLite drops timezone information even for timezone-aware columns.
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if expires_at < datetime.now(timezone.utc):
         raise HTTPException(status_code=401, detail="Refresh token expired")
     
     # 5. 验证 token 哈希
@@ -261,7 +265,7 @@ async def revoke_refresh_token(
             refresh_token,
             settings.secret_key,
             algorithms=[settings.algorithm],
-            options={"verify_signature": False}
+            options={"verify_signature": False, "verify_aud": False}
         )
         token_audience = unverified_payload.get("aud")
         payload = verify_token(refresh_token, audience=token_audience)

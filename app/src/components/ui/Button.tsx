@@ -14,6 +14,7 @@ import {
   Animated,
   ActivityIndicator,
   View,
+  TouchableOpacityProps,
 } from 'react-native';
 import { COLORS, IOS_STYLES } from '../../constants/config';
 import Icon, { IconProps } from './Icon';
@@ -21,7 +22,7 @@ import Icon, { IconProps } from './Icon';
 export type ButtonVariant = 'primary' | 'secondary' | 'text' | 'outline' | 'danger';
 export type ButtonSize = 'small' | 'medium' | 'large';
 
-export interface ButtonProps {
+export interface ButtonProps extends Omit<TouchableOpacityProps, 'children' | 'disabled' | 'onPress' | 'style'> {
   title: string;
   onPress: () => void;
   variant?: ButtonVariant;
@@ -45,6 +46,9 @@ const Button: React.FC<ButtonProps> = ({
   iconPosition = 'left',
   style,
   textStyle,
+  accessibilityLabel = title,
+  accessibilityRole = 'button',
+  ...touchableProps
 }) => {
   const scaleValue = useRef(new Animated.Value(1)).current;
 
@@ -248,11 +252,15 @@ const Button: React.FC<ButtonProps> = ({
 
   return (
     <TouchableOpacity
+      {...touchableProps}
       onPress={onPress}
       onPressIn={handlePressIn}
       onPressOut={handlePressOut}
       disabled={isDisabled}
       activeOpacity={0.8}
+      accessibilityLabel={accessibilityLabel}
+      accessibilityRole={accessibilityRole}
+      accessibilityState={{ disabled: isDisabled, busy: loading }}
       style={[
         variantStyles.container,
         sizeStyles.container,

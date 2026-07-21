@@ -1,29 +1,26 @@
 import { create } from 'zustand';
 import { Tenant } from '@/types';
-import { setCurrentTenantId, getTenantId, clearCurrentTenantId } from '@/lib/tenant';
-import { useAuthStore } from './authStore';
+import { setCurrentTenantId, clearCurrentTenantId } from '@/lib/tenant';
 
 interface TenantState {
   currentTenant: Tenant | null;
-  setCurrentTenant: (tenant: Tenant | null) => void;
+  setCurrentTenant: (tenant: Tenant | null, userId: string | null) => void;
   getCurrentTenantId: () => string | null;
   clearTenant: () => void;
 }
 
 export const useTenantStore = create<TenantState>((set, get) => ({
   currentTenant: null,
-  setCurrentTenant: (tenant) => {
-    if (tenant) {
-      setCurrentTenantId(tenant.id);
+  setCurrentTenant: (tenant, userId) => {
+    if (tenant && userId) {
+      setCurrentTenantId(tenant.id, userId);
+      set({ currentTenant: tenant });
     } else {
       clearCurrentTenantId();
+      set({ currentTenant: null });
     }
-    set({ currentTenant: tenant });
   },
-  getCurrentTenantId: () => {
-    const userInfo = useAuthStore.getState().user;
-    return getTenantId(userInfo);
-  },
+  getCurrentTenantId: () => get().currentTenant?.id || null,
   clearTenant: () => {
     clearCurrentTenantId();
     set({ currentTenant: null });

@@ -16,7 +16,7 @@ services:
       - "5432:5432"
     environment:
       - POSTGRES_USER=ocpp_user
-      - POSTGRES_PASSWORD=ocpp_password
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
       - POSTGRES_DB=ocpp
     volumes:
       - postgres_data:/var/lib/postgresql/data
@@ -54,12 +54,14 @@ services:
     environment:
       - ENVIRONMENT=development
       - DEBUG=true
-      - DATABASE_URL=postgresql://ocpp_user:ocpp_password@db:5432/ocpp
+      - DATABASE_URL=postgresql://ocpp_user:${POSTGRES_PASSWORD}@db:5432/ocpp
       - REDIS_URL=redis://redis:6379/0
-      - ENCRYPTION_KEY=${ENCRYPTION_KEY:-ocpp-local-encryption-key-change-in-production}
-      - SECRET_KEY=${SECRET_KEY:-ocpp-local-secret-key-change-in-production-please}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY}
+      - SECRET_KEY=${SECRET_KEY}
+      - CSMS_BOOTSTRAP_SUPER_ADMIN_PASSWORD=${CSMS_BOOTSTRAP_SUPER_ADMIN_PASSWORD:-}
+      - CSMS_BOOTSTRAP_TENANT_ADMIN_PASSWORD=${CSMS_BOOTSTRAP_TENANT_ADMIN_PASSWORD:-}
       - ENCRYPTION_SALT=ocpp_local_development_salt
-      - OCPP_WS_REQUIRE_PRE_REGISTERED=false
+      - OCPP_WS_REQUIRE_PRE_REGISTERED=true
       - LOG_LEVEL=INFO
       - LOG_FORMAT=json
       # Expo Web（localhost:8081）→ CSMS :9000 跨域；未设置时 main.py 默认已含 8081，此处可覆盖扩展
@@ -70,11 +72,12 @@ services:
       - ENABLE_HTTP_TRANSPORT=false
       # TEST 凭证与 MP 官方测试卡配套使用
       - MERCADOPAGO_ENVIRONMENT=sandbox
-      - MERCADOPAGO_ACCESS_TOKEN=${MERCADOPAGO_ACCESS_TOKEN}
-      - MERCADOPAGO_PUBLIC_KEY=${MERCADOPAGO_PUBLIC_KEY}
-      - MERCADOPAGO_APP_ID=${MERCADOPAGO_APP_ID}
-      - MERCADOPAGO_CLIENT_SECRET=${MERCADOPAGO_CLIENT_SECRET}
-      - MERCADOPAGO_WEBHOOK_SECRET=${MERCADOPAGO_WEBHOOK_SECRET}
+      - MERCADOPAGO_ACCESS_TOKEN=${MERCADOPAGO_ACCESS_TOKEN:-}
+      - MERCADOPAGO_PUBLIC_KEY=${MERCADOPAGO_PUBLIC_KEY:-}
+      - MERCADOPAGO_APP_ID=${MERCADOPAGO_APP_ID:-}
+      - MERCADOPAGO_CLIENT_SECRET=${MERCADOPAGO_CLIENT_SECRET:-}
+      - MERCADOPAGO_WEBHOOK_SECRET=${MERCADOPAGO_WEBHOOK_SECRET:-}
+      - SIM_E2E_WEBHOOK_SECRET=${SIM_E2E_WEBHOOK_SECRET}
     depends_on:
       db:
         condition: service_healthy
@@ -111,6 +114,7 @@ services:
     restart: unless-stopped
 
   charger-sim:
+    profiles: ["simulator"]
     build: ./charger-sim
     container_name: ocpp-charger-sim
     depends_on:
@@ -125,11 +129,86 @@ services:
         "--ws",
         "ws://csms:9000/ocpp",
         "--charge-point-id",
-        "CP-DOCKER-1",
+        "${SIM_OCPP_IDENTITY:-SIM-E2E-CP-001}",
         "--connector-id",
         "1",
       ]
     restart: unless-stopped
+
+  manual-charger-sim:
+    profiles: ["manual-simulator"]
+    build: ./charger-sim
+    container_name: ocpp-manual-charger-sim
+    depends_on:
+      csms:
+        condition: service_healthy
+    networks:
+      - ocppnet
+    command:
+      [
+        "python",
+        "cli.py",
+        "run-one",
+        "--ws",
+        "ws://csms:9000/ocpp",
+        "--ocpp-identity",
+        "${MANUAL_SIM_OCPP_IDENTITY:-CO.BOGOTA:MANUAL-CP-001}",
+        "--ocpp-secret",
+        "${MANUAL_SIM_OCPP_SECRET:-}",
+        "--connector-id",
+        "1",
+        "--vendor",
+        "EsLatin",
+        "--model",
+        "Manual-AC-7kW",
+        "--serial-number",
+        "ESL-MANUAL-SIM-001",
+        "--firmware-version",
+        "1.0.0",
+        "--heartbeat-interval",
+        "30",
+        "--meter-interval",
+        "5",
+        "--power-kw",
+        "7",
+        "--voltage-v",
+        "220",
+        "--current-a",
+        "32",
+      ]
+    restart: "no"
+
+  charger-scenario:
+    profiles: ["e2e"]
+    build: ./charger-sim
+    container_name: ocpp-charger-scenario
+    depends_on:
+      - csms
+    networks:
+      - ocppnet
+    environment:
+      - SIM_API_BASE=${SIM_API_BASE:-http://csms:9000}
+      - SIM_OCPP_WS=${SIM_OCPP_WS:-ws://csms:9000/ocpp}
+      - SIM_E2E_ADMIN_PASSWORD=${SIM_E2E_ADMIN_PASSWORD}
+      - SIM_E2E_APP_PASSWORD=${SIM_E2E_APP_PASSWORD}
+      - SIM_E2E_READONLY_PASSWORD=${SIM_E2E_READONLY_PASSWORD}
+      - SIM_E2E_WEBHOOK_SECRET=${SIM_E2E_WEBHOOK_SECRET}
+    command:
+      [
+        "python",
+        "cli.py",
+        "scenario",
+        "run",
+        "${SIM_SCENARIO:-scenarios/p0/reconnect.yml}",
+        "--report-dir",
+        "reports",
+        "--seed-json",
+        "/run/sim-e2e-seed.json",
+      ]
+    volumes:
+      - ./charger-sim/reports:/app/reports
+      - ${SIM_SEED_JSON_HOST:-./charger-sim/seed.sim-e2e.json}:/run/sim-e2e-seed.json:ro
+    restart: "no"
 
 volumes:
   postgres_data:

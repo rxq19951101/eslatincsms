@@ -4,22 +4,32 @@ import { useRouter, useParams } from 'next/navigation';
 import useSWR from 'swr';
 import { apiGet, apiPost } from '@/lib/api';
 import { API_ENDPOINTS } from '@/lib/constants';
-import { ChargePointDetail, Transaction } from '@/types';
+import { AcceptanceReport, ChargePointDetail, Transaction } from '@/types';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { ArrowLeft, RotateCcw, Settings, Unlock, Play, Square, QrCode, Download, RefreshCw } from 'lucide-react';
+import { ArrowLeft, RotateCcw, Settings, Unlock, Play, Square, QrCode, Download, RefreshCw, ShieldCheck } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { API_BASE_URL } from '@/lib/constants';
 import { useRef, useState } from 'react';
 import { useI18n } from '@/lib/i18n';
 import { activeTransactionFor, remoteCommandConfig, remoteStartPayload, remoteStopPayload, resetPayload } from '@/lib/ocpp';
 import { IdempotencyIntentStore, requestIntent } from '@/lib/idempotency';
+import QrPayloadCopy from '@/components/chargers/QrPayloadCopy';
+import { formatDateTime } from '@/lib/localization';
+
+interface ChargerQrCode {
+  connector_id: number;
+  qr_token?: string | null;
+  qr_url: string;
+  filename: string;
+  exists: boolean;
+}
 
 const fetcher = (url: string) => apiGet<ChargePointDetail>(url);
 
 export default function ChargerDetailPage() {
-  const { t } = useI18n();
+  const { locale, t } = useI18n();
   const router = useRouter();
   const params = useParams();
   const chargerId = params?.id as string;
@@ -41,12 +51,46 @@ export default function ChargerDetailPage() {
   const remoteIntents = useRef(new IdempotencyIntentStore()).current;
 
   // 获取二维码列表
-  const { data: qrData, mutate: mutateQr } = useSWR<{ qr_codes: Array<{ connector_id: number; qr_url: string; filename: string; exists: boolean }> }>(
+  const { data: qrData, mutate: mutateQr } = useSWR<{ qr_codes: ChargerQrCode[] }>(
     chargerId ? `${API_BASE_URL}/api/v1/chargers/${chargerId}/qr` : null,
-    (url: string) => apiGet<{ qr_codes: Array<{ connector_id: number; qr_url: string; filename: string; exists: boolean }> }>(url)
+    (url: string) => apiGet<{ qr_codes: ChargerQrCode[] }>(url)
   );
 
   const [generating, setGenerating] = useState<string | null>(null); // connector_id or 'all'
+  const [acceptanceReport, setAcceptanceReport] = useState<AcceptanceReport | null>(null);
+  const [commissioning, setCommissioning] = useState(false);
+  const [rotatedCredential, setRotatedCredential] = useState<string | null>(null);
+
+  const handleAcceptanceReport = async () => {
+    setCommissioning(true);
+    try {
+      const report = await apiPost<AcceptanceReport>(API_ENDPOINTS.CHARGER_ACCEPTANCE_REPORT(chargerId), {});
+      setAcceptanceReport(report);
+      mutate();
+    } finally {
+      setCommissioning(false);
+    }
+  };
+
+  const handleCommission = async () => {
+    setCommissioning(true);
+    try {
+      await apiPost(API_ENDPOINTS.CHARGER_COMMISSION(chargerId), {});
+      await mutate();
+      alert(t('充电桩已正式投运'));
+    } catch {
+      alert(t('验收未通过，不能正式投运'));
+    } finally {
+      setCommissioning(false);
+    }
+  };
+
+  const handleRotateCredential = async () => {
+    if (!confirm(t('轮换密钥后，设备必须立即更新凭据才能重新连接。是否继续？'))) return;
+    const result = await apiPost<{ secret: string }>(API_ENDPOINTS.CHARGER_ROTATE_CREDENTIALS(chargerId), {});
+    setRotatedCredential(result.secret);
+    mutate();
+  };
 
   const handleGenerateQr = async (connectorId?: number) => {
     if (!chargerId) return;
@@ -134,8 +178,8 @@ export default function ChargerDetailPage() {
     }
   };
 
-  const getStatusColor = (status: string) => {
-    switch (status.toLowerCase()) {
+  const getStatusColor = (status: string | null | undefined) => {
+    switch (status?.toLowerCase()) {
       case 'available':
         return 'bg-green-500/20 text-green-400 border-green-500/50';
       case 'charging':
@@ -205,8 +249,11 @@ export default function ChargerDetailPage() {
           <TabsTrigger value="history" className="data-[state=active]:bg-slate-700">
             {t('历史记录')}
           </TabsTrigger>
-          <TabsTrigger value="control" className="data-[state=active]:bg-slate-700">
+          <TabsTrigger data-testid="admin-charger-control-tab" value="control" className="data-[state=active]:bg-slate-700">
             {t('远程控制')}
+          </TabsTrigger>
+          <TabsTrigger value="commissioning" className="data-[state=active]:bg-slate-700">
+            {t('调试与投运')}
           </TabsTrigger>
         </TabsList>
 
@@ -275,6 +322,7 @@ export default function ChargerDetailPage() {
                 </CardTitle>
                 {qrData && qrData.qr_codes && qrData.qr_codes.length > 0 && (
                   <Button
+                    data-testid="admin-qr-generate-all"
                     variant="outline"
                     size="sm"
                     onClick={() => handleGenerateQr()}
@@ -296,12 +344,14 @@ export default function ChargerDetailPage() {
                   {qrData.qr_codes.map((qr) => (
                     <div
                       key={qr.connector_id}
+                      data-testid={`admin-qr-card-${qr.connector_id}`}
                       className="p-4 rounded-lg bg-slate-700/30 border border-slate-600"
                     >
                       <div className="flex items-center justify-between mb-2">
                         <div className="text-sm text-slate-400">Connector {qr.connector_id}</div>
                         {!qr.exists && (
                           <Button
+                            data-testid={`admin-qr-generate-${qr.connector_id}`}
                             variant="outline"
                             size="sm"
                             onClick={() => handleGenerateQr(qr.connector_id)}
@@ -325,13 +375,17 @@ export default function ChargerDetailPage() {
                       {qr.exists ? (
                         <div className="space-y-2">
                           <div className="relative w-full aspect-square bg-white rounded-lg p-2 flex items-center justify-center">
+                            {/* eslint-disable-next-line @next/next/no-img-element -- QR URL is a generated API asset and must remain directly downloadable. */}
                             <img
                               src={`${API_BASE_URL}${qr.qr_url}`}
                               alt={`QR Code for Connector ${qr.connector_id}`}
                               className="w-full h-full object-contain"
+                              data-testid={`admin-qr-image-${qr.connector_id}`}
                             />
                           </div>
+                          <QrPayloadCopy qrToken={qr.qr_token} connectorId={qr.connector_id} />
                           <Button
+                            data-testid={`admin-qr-download-${qr.connector_id}`}
                             variant="outline"
                             size="sm"
                             className="w-full bg-slate-700/50 border-slate-600 text-slate-200 hover:bg-slate-600"
@@ -359,6 +413,7 @@ export default function ChargerDetailPage() {
                   <div className="text-slate-400 mb-4">{t('暂无connector信息')}</div>
                   {charger?.evses && charger.evses.length > 0 && (
                     <Button
+                      data-testid="admin-qr-generate-all"
                       onClick={() => handleGenerateQr()}
                       disabled={generating === 'all'}
                       className="bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-700 hover:to-blue-700"
@@ -389,7 +444,9 @@ export default function ChargerDetailPage() {
               {charger.last_seen && (
                 <div>
                   <label className="text-sm text-slate-400">{t('最后在线时间')}</label>
-                  <p className="text-white mt-1">{new Date(charger.last_seen).toLocaleString('zh-CN')}</p>
+                  <p className="text-white mt-1">
+                    {formatDateTime(charger.last_seen, locale, t('common.notAvailable'))}
+                  </p>
                 </div>
               )}
               {charger.evses && charger.evses.length > 0 && (
@@ -431,6 +488,48 @@ export default function ChargerDetailPage() {
           </Card>
         </TabsContent>
 
+        <TabsContent value="commissioning">
+          <Card className="bg-slate-800/80 backdrop-blur-sm border-slate-700">
+            <CardHeader><CardTitle className="text-white">{t('设备调试与正式投运')}</CardTitle></CardHeader>
+            <CardContent className="space-y-5">
+              <div className="flex items-center justify-between rounded-lg border border-slate-700 p-4">
+                <div>
+                  <p className="text-sm text-slate-400">{t('当前投运状态')}</p>
+                  <p className="mt-1 text-lg font-semibold text-white">{t(charger.commissioning_status || 'draft')}</p>
+                </div>
+                <ShieldCheck className="h-7 w-7 text-cyan-400" />
+              </div>
+              <div className="flex flex-wrap gap-3">
+                <Button type="button" variant="outline" onClick={handleAcceptanceReport} disabled={commissioning}>
+                  {t('生成自动验收报告')}
+                </Button>
+                <Button type="button" onClick={handleCommission} disabled={commissioning || !(acceptanceReport || charger.acceptance_report)?.passed}>
+                  {t('确认正式投运')}
+                </Button>
+                <Button type="button" variant="destructive" onClick={handleRotateCredential}>{t('轮换设备密钥')}</Button>
+              </div>
+              {rotatedCredential && (
+                <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-4 text-amber-100">
+                  <p className="font-semibold">{t('新密钥只显示这一次')}</p>
+                  <code className="mt-2 block break-all">{rotatedCredential}</code>
+                </div>
+              )}
+              {(acceptanceReport || charger.acceptance_report) && (
+                <div className="space-y-2">
+                  {Object.entries((acceptanceReport || charger.acceptance_report)!.checks).map(([name, passed]) => (
+                    <div key={name} className="flex items-center justify-between border-b border-slate-700 py-2">
+                      <span className="text-slate-300">{t(name)}</span>
+                      <Badge className={passed ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'}>
+                        {passed ? t('通过') : t('未通过')}
+                      </Badge>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
+
         {/* Remote Control */}
         <TabsContent value="control">
           <Card className="bg-slate-800/80 backdrop-blur-sm border-slate-700">
@@ -440,6 +539,7 @@ export default function ChargerDetailPage() {
             <CardContent className="space-y-4">
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <Button
+                  data-testid="admin-remote-start"
                   onClick={handleRemoteStart}
                   className="bg-gradient-to-r from-green-600 to-green-700 hover:from-green-700 hover:to-green-800"
                 >
@@ -447,6 +547,7 @@ export default function ChargerDetailPage() {
                   {t('启动充电')}
                 </Button>
                 <Button
+                  data-testid="admin-remote-stop"
                   onClick={handleRemoteStop}
                   disabled={!activeSession}
                   title={!activeSession ? t('没有可停止的活动会话') : undefined}
@@ -456,6 +557,7 @@ export default function ChargerDetailPage() {
                   {t('停止充电')}
                 </Button>
                 <Button
+                  data-testid="admin-remote-reset"
                   onClick={handleReset}
                   variant="outline"
                   className="bg-slate-700/50 border-slate-600 text-slate-200 hover:bg-slate-600"

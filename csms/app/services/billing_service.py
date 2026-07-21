@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Dict, Optional
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.core.id_generator import generate_invoice_id, generate_payment_id
@@ -152,7 +153,11 @@ class BillingService:
     ) -> Optional[SettlementResult]:
         invoice = (
             db.query(Invoice)
-            .filter(Invoice.session_id == session.id, Invoice.status == "paid")
+            .filter(
+                Invoice.tenant_id == session.tenant_id,
+                Invoice.session_id == session.id,
+                Invoice.status == "paid",
+            )
             .first()
         )
         if invoice:
@@ -174,7 +179,14 @@ class BillingService:
         transaction_number = f"charge_{session.id}"
         existing_tx = (
             db.query(AppWalletTransaction)
-            .filter(AppWalletTransaction.transaction_number == transaction_number)
+            .filter(
+                AppWalletTransaction.app_user_id == app_user.id,
+                AppWalletTransaction.operator_tenant_id == session.tenant_id,
+                or_(
+                    AppWalletTransaction.idempotency_key == f"charge:{session.id}",
+                    AppWalletTransaction.transaction_number == transaction_number,
+                ),
+            )
             .first()
         )
         if existing_tx:
@@ -199,7 +211,8 @@ class BillingService:
         """
         # 同一会话的并发 Stop/结算请求串行化，保证钱包只扣一次。
         session = db.query(ChargingSession).filter(
-            ChargingSession.id == session.id
+            ChargingSession.id == session.id,
+            ChargingSession.tenant_id == session.tenant_id,
         ).with_for_update().one()
         app_user = db.query(AppUser).filter(AppUser.id == app_user.id).with_for_update().one()
         if session.end_time is None and session.meter_stop is None:
@@ -225,7 +238,10 @@ class BillingService:
         costs = BillingService.calculate_cost(session, tariff)
         total = costs["total_amount"]
 
-        order = db.query(Order).filter(Order.session_id == session.id).first()
+        order = db.query(Order).filter(
+            Order.tenant_id == tenant_id,
+            Order.session_id == session.id,
+        ).first()
         order_id = order.id if order else None
 
         snapshot = PricingSnapshot(
@@ -269,7 +285,7 @@ class BillingService:
             new_bal = Decimal("0")
         app_user.balance = new_bal
 
-        transaction_number = f"charge_{session.id}"
+        transaction_number = f"wallet_{invoice_number}"
         wallet_tx = AppWalletTransaction(
             transaction_number=transaction_number,
             app_user_id=app_user.id,
@@ -277,7 +293,8 @@ class BillingService:
             charge_point_id=session.charge_point_id,
             type="charge",
             amount=Decimal("0") - total,
-            description=f"充电扣费（session {session.id}，invoice {invoice_number}）",
+            description="Charging settlement",
+            idempotency_key=f"charge:{session.id}",
         )
         db.add(wallet_tx)
 

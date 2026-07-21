@@ -7,6 +7,7 @@ import React, { useRef, useEffect } from 'react';
 import { View, StyleSheet, Platform, Text } from 'react-native';
 import { MAP_CONFIG } from '../constants/config';
 import { useI18n } from '../i18n';
+import Icon from './ui/Icon';
 
 // 仅在非Web平台导入Mapbox GL
 let MapboxGL: any = null;
@@ -49,7 +50,7 @@ const CustomMapView: React.FC<MapViewProps> = ({
     return (
       <View style={[styles.webFallback, style]}>
         <View style={styles.webPlaceholder}>
-          <Text style={styles.webText}>🗺️</Text>
+          <Icon name="map-outline" size={64} color="#708596" style={styles.webIcon} />
           <Text style={styles.webSubtext}>{t.home.mapWebLimited}</Text>
         </View>
         {children}
@@ -112,8 +113,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     zIndex: 10,
   },
-  webText: {
-    fontSize: 80,
+  webIcon: {
     marginBottom: 16,
   },
   webSubtext: {

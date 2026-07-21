@@ -24,7 +24,7 @@ export function activeTransactionFor(
   return sessions?.find(
     (session) =>
       session.charge_point_id === internalChargePointId &&
-      session.status.toLowerCase() === 'ongoing'
+      session.status?.toLowerCase() === 'ongoing'
   );
 }
 

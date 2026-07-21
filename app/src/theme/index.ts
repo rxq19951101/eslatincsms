@@ -1,8 +1,8 @@
 /** Presentation-only design tokens. Business config must not live here. */
 export const palette = {
-  ink: '#17211B', muted: '#68736C', subtle: '#919A94', canvas: '#F7F8F6',
-  surface: '#FFFFFF', border: '#E3E7E3', brand: '#087F5B',
-  brandStrong: '#066B4D', brandSoft: '#E8F5EF', info: '#4263EB',
+  ink: '#102A43', muted: '#5B7083', subtle: '#8799A8', canvas: '#F5FAFD',
+  surface: '#FFFFFF', border: '#D8E7F0', brand: '#0876BE',
+  brandStrong: '#07598F', brandSoft: '#E7F7FC', info: '#22AFC4',
   warning: '#B86500', danger: '#C92A2A',
 } as const;
 
@@ -20,4 +20,3 @@ export const shadow = {
   },
 } as const;
 export const theme = { palette, spacing, radius, typography, shadow } as const;
-

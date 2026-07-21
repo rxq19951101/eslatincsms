@@ -162,7 +162,7 @@ export async function createMercadoPagoPayment(
   cardData: CardData,
   email: string,
   type: 'top_up' | 'charging',
-  metadata?: { session_id?: number; charge_point_id?: string; site_id?: string }
+  metadata?: { session_id?: string; charge_point_id?: string; site_id?: string }
 ): Promise<MercadoPagoPaymentResponse> {
   try {
     // 1. 获取 Card Token（含 MP 返回的 payment_method_id，非 Visa/Master 时避免乱猜）
@@ -222,7 +222,7 @@ export async function createPaymentByProvider(
   params: {
     amount: number;
     type: 'top_up' | 'charging';
-    metadata?: { session_id?: number; charge_point_id?: string; site_id?: string };
+    metadata?: { session_id?: string; charge_point_id?: string; site_id?: string };
     cardData?: CardData;
     email?: string;
   }
@@ -257,6 +257,6 @@ export async function getUnpaidCharges(): Promise<UnpaidCharge[]> {
   return res.data;
 }
 
-export async function payUnpaidCharge(sessionId: number): Promise<void> {
+export async function payUnpaidCharge(sessionId: string): Promise<void> {
   await apiClient.post(API_ENDPOINTS.WALLET.PAY_UNPAID_CHARGE, { session_id: sessionId });
 }

@@ -31,6 +31,22 @@ if [ $retry_count -eq $max_retries ]; then
     exit 1
 fi
 
+# app_super 是集群级角色，不属于 Alembic schema。仅在本地/测试启动链中幂等配置；
+# 生产环境由 DBA 显式管理，此脚本不会自动变更生产角色。
+case "${ENVIRONMENT:-development}" in
+    development|test|local)
+        echo ""
+        echo "确保 app_super 角色和本地权限..."
+        psql "${DATABASE_URL:?DATABASE_URL must be set}" \
+            --set=ON_ERROR_STOP=1 \
+            --file=/app/scripts/ensure_app_super_role.sql
+        echo "✓ app_super 角色已配置"
+        ;;
+    *)
+        echo "跳过 app_super 自动配置（非本地/测试环境）"
+        ;;
+esac
+
 # Alembic 是唯一 schema 入口；每次启动都升级到 head。
 echo ""
 echo "执行 Alembic upgrade head..."
@@ -59,6 +75,19 @@ if [ "$ADMIN_COUNT" -gt "0" ]; then
     echo "✓ 已存在 $ADMIN_COUNT 个管理员用户，跳过初始数据创建"
 else
     echo "管理员用户数量: $ADMIN_COUNT，开始创建初始数据..."
+
+    # 空数据库 bootstrap 必须显式注入密码；禁止固定或生成默认密码。
+    missing_bootstrap_passwords=""
+    if [ -z "${CSMS_BOOTSTRAP_SUPER_ADMIN_PASSWORD:-}" ]; then
+        missing_bootstrap_passwords="CSMS_BOOTSTRAP_SUPER_ADMIN_PASSWORD"
+    fi
+    if [ -z "${CSMS_BOOTSTRAP_TENANT_ADMIN_PASSWORD:-}" ]; then
+        missing_bootstrap_passwords="${missing_bootstrap_passwords:+$missing_bootstrap_passwords, }CSMS_BOOTSTRAP_TENANT_ADMIN_PASSWORD"
+    fi
+    if [ -n "$missing_bootstrap_passwords" ]; then
+        echo "❌ 空数据库 bootstrap 缺少必需环境变量: $missing_bootstrap_passwords"
+        exit 1
+    fi
     
     # 执行初始数据创建脚本
     if [ -f "/app/scripts/create_initial_data.py" ]; then
@@ -80,13 +109,4 @@ echo ""
 echo "=================================="
 echo "✓ 数据库初始化完成"
 echo "=================================="
-echo ""
-echo "默认管理员账号信息："
-echo "  用户名: admin"
-echo "  密码: admin123"
-echo "  邮箱: admin@example.com"
-echo ""
-echo "⚠️  重要提示："
-echo "  1. 请立即修改默认密码！"
-echo "  2. 建议在生产环境中禁用或删除测试账号"
 echo ""

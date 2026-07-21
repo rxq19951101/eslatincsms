@@ -149,16 +149,16 @@ async def login(
                 exp = payload_dict.get("exp")
                 refresh_expires_at = datetime.fromtimestamp(exp, tz=timezone.utc) if exp else datetime.now(timezone.utc) + timedelta(days=7)
                 
-                logger.info(f"从refresh token提取信息成功: jti={refresh_jti}, exp={exp}")
+                logger.info("Refresh credential metadata extracted")
             else:
                 raise ValueError("Invalid JWT format")
         except Exception as e:
-            logger.error(f"解析refresh token失败: {e}", exc_info=True)
+            logger.error("Refresh credential parsing failed: %s", type(e).__name__)
             # 如果解析失败，使用默认值（不应该发生，但为了容错）
             import secrets
             refresh_jti = secrets.token_urlsafe(32)
             refresh_expires_at = datetime.now(timezone.utc) + timedelta(days=7)
-            logger.warning(f"使用默认值保存refresh token: jti={refresh_jti}")
+            logger.warning("Generated fallback refresh credential metadata")
         
         await save_refresh_token(
             jti=refresh_jti,
@@ -170,7 +170,7 @@ async def login(
             request=request
         )
         
-        logger.info(f"Refresh token已保存: jti={refresh_jti}, user_id={admin_user.id}")
+        logger.info("Refresh credential stored: user_id=%s", admin_user.id)
         
         # 获取用户的默认租户信息（用于登录响应）
         from app.services.membership_service import MembershipService

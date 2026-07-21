@@ -2,7 +2,12 @@
 充电桩API单元测试
 """
 import pytest
+import uuid
+from decimal import Decimal
 from fastapi.testclient import TestClient
+
+from app.core.auth import create_access_token, get_password_hash
+from app.database.models import AppUser, ChargePoint, Site, Tenant
 
 
 class TestChargersAPI:
@@ -48,6 +53,100 @@ class TestChargersAPI:
         data = response.json()
         # 应该包含已配置的充电桩
         assert isinstance(data, list)
+
+    def test_app_user_lists_configured_chargers_without_tenant_header(
+        self,
+        client: TestClient,
+        db_session,
+        sample_charge_point,
+    ):
+        app_user = AppUser(
+            id=uuid.uuid4(),
+            email="app-charger-discovery@example.test",
+            password_hash=get_password_hash("test-password"),
+            email_verified=True,
+            balance=Decimal("0.00"),
+            status="active",
+        )
+        db_session.add(app_user)
+        db_session.commit()
+
+        token = create_access_token({
+            "user_id": str(app_user.id),
+            "user_type": "app_user",
+            "aud": "app",
+        })
+        response = client.get(
+            "/api/v1/app/chargers?filter_type=configured",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+        assert response.status_code == 200
+        assert "X-Tenant-Id" not in response.request.headers
+        assert any(
+            charger["id"] == str(sample_charge_point.id)
+            for charger in response.json()
+        )
+
+        invalid_response = client.get(
+            "/api/v1/app/chargers?filter_type=configured",
+            headers={"Authorization": "Bearer invalid-app-token"},
+        )
+        assert invalid_response.status_code == 401
+
+    def test_app_public_chargers_cross_tenants_and_ignore_tenant_header(
+        self,
+        client: TestClient,
+        db_session,
+        sample_charge_point,
+        sample_tenant,
+    ):
+        other_tenant = Tenant(name="App public other tenant", status="active")
+        db_session.add(other_tenant)
+        db_session.flush()
+        other_site = Site(
+            tenant_id=other_tenant.id,
+            name="Other public site",
+            address="Other address",
+            latitude=4.61,
+            longitude=-74.08,
+            is_active=True,
+        )
+        db_session.add(other_site)
+        db_session.flush()
+        other_charge_point = ChargePoint(
+            tenant_id=other_tenant.id,
+            site_id=other_site.id,
+            ocpp_identity="CP-APP-PUBLIC-OTHER",
+            is_active=True,
+        )
+        app_user = AppUser(
+            email="app-cross-tenant@example.test",
+            password_hash=get_password_hash("test-password"),
+            email_verified=True,
+            balance=Decimal("0.00"),
+            status="active",
+        )
+        db_session.add_all([other_charge_point, app_user])
+        db_session.commit()
+
+        token = create_access_token({
+            "user_id": str(app_user.id),
+            "user_type": "app_user",
+            "aud": "app",
+        })
+        response = client.get(
+            "/api/v1/app/chargers",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "X-Tenant-Id": str(sample_tenant.id),
+            },
+        )
+
+        assert response.status_code == 200
+        identities = {item["ocpp_identity"] for item in response.json()}
+        assert sample_charge_point.ocpp_identity in identities
+        assert other_charge_point.ocpp_identity in identities
     
     def test_get_charger_by_id(self, admin_client: TestClient, sample_charge_point):
         """测试根据ID获取充电桩"""
@@ -71,7 +170,7 @@ class TestChargersAPI:
             "site_id": str(sample_site.id)
         }
         response = admin_client.post("/api/v1/chargers", json=payload)
-        assert response.status_code in [200, 201]
+        assert response.status_code == 201
         data = response.json()
         assert data["ocpp_identity"] == "CP-CREATE-001"
     
@@ -89,7 +188,7 @@ class TestChargersAPI:
     def test_delete_charger(self, admin_client: TestClient, sample_charge_point):
         """测试删除充电桩"""
         response = admin_client.delete(f"/api/v1/chargers/{sample_charge_point.id}")
-        assert response.status_code in [200, 204]
+        assert response.status_code == 200
         
         # 验证已删除
         response = admin_client.get(f"/api/v1/chargers/{sample_charge_point.id}")

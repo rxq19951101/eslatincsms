@@ -5,8 +5,9 @@
 
 from typing import List, Optional
 from uuid import UUID
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import and_, or_
+from sqlalchemy.exc import IntegrityError
 from datetime import datetime, timezone
 from app.database.models import Alert, AlertRule, ChargePoint, EVSE
 from app.core.logging_config import get_logger
@@ -66,6 +67,102 @@ class AlertService:
         except Exception as e:
             logger.warning("Alert notification failed: %s", e)
         return alert
+
+    @staticmethod
+    def ensure_automatic_alert(
+        db: Session,
+        *,
+        tenant_id: UUID,
+        alert_type: str,
+        severity: str,
+        title: str,
+        description: str,
+        charge_point_id: UUID,
+        evse_id: Optional[UUID] = None,
+        metadata: Optional[dict] = None,
+    ) -> Alert:
+        """Create or reopen one tenant-scoped automatic alert.
+
+        A stable dedupe key prevents repeated StatusNotification, disconnect and
+        monitoring sweeps from creating alert storms. A later fault can reopen
+        the same resolved alert while preserving its identity and history.
+        """
+        evse_part = str(evse_id) if evse_id else "charge-point"
+        dedupe_key = f"{alert_type}:{charge_point_id}:{evse_part}"
+        alert = db.query(Alert).filter(
+            Alert.tenant_id == tenant_id,
+            Alert.dedupe_key == dedupe_key,
+        ).with_for_update().first()
+        now = datetime.now(timezone.utc)
+        if alert:
+            alert.severity = severity
+            alert.title = title
+            alert.description = description
+            alert.alert_metadata = metadata or {}
+            if alert.status == "resolved":
+                alert.status = "pending"
+                alert.acknowledged_by = None
+                alert.acknowledged_at = None
+                alert.resolved_at = None
+            alert.updated_at = now
+            db.commit()
+            db.refresh(alert)
+            return alert
+
+        alert = Alert(
+            tenant_id=tenant_id,
+            charge_point_id=charge_point_id,
+            evse_id=evse_id,
+            alert_type=alert_type,
+            dedupe_key=dedupe_key,
+            severity=severity,
+            status="pending",
+            title=title,
+            description=description,
+            alert_metadata=metadata or {},
+        )
+        db.add(alert)
+        try:
+            db.commit()
+        except IntegrityError:
+            # Disconnect and monitoring workers may observe the same transition
+            # concurrently. The database constraint is authoritative.
+            db.rollback()
+            alert = db.query(Alert).filter(
+                Alert.tenant_id == tenant_id,
+                Alert.dedupe_key == dedupe_key,
+            ).one()
+        db.refresh(alert)
+        logger.info("Created automatic alert %s (%s)", alert.id, dedupe_key)
+        return alert
+
+    @staticmethod
+    def resolve_automatic_alerts(
+        db: Session,
+        *,
+        tenant_id: UUID,
+        charge_point_id: UUID,
+        alert_types: List[str],
+        evse_id: Optional[UUID] = None,
+    ) -> int:
+        query = db.query(Alert).filter(
+            Alert.tenant_id == tenant_id,
+            Alert.charge_point_id == charge_point_id,
+            Alert.alert_type.in_(alert_types),
+            Alert.dedupe_key.is_not(None),
+            Alert.status.in_(["pending", "acknowledged"]),
+        )
+        if evse_id is not None:
+            query = query.filter((Alert.evse_id == evse_id) | (Alert.evse_id.is_(None)))
+        alerts = query.with_for_update().all()
+        if not alerts:
+            return 0
+        now = datetime.now(timezone.utc)
+        for alert in alerts:
+            alert.status = "resolved"
+            alert.resolved_at = now
+        db.commit()
+        return len(alerts)
     
     @staticmethod
     def get_alert_by_id(db: Session, alert_id: UUID, tenant_id: Optional[UUID] = None) -> Optional[Alert]:
@@ -87,7 +184,12 @@ class AlertService:
         charge_point_id: Optional[UUID] = None
     ) -> List[Alert]:
         """获取告警列表"""
-        query = db.query(Alert).filter(Alert.tenant_id == tenant_id)
+        query = db.query(Alert).options(
+            joinedload(Alert.charge_point).joinedload(ChargePoint.site),
+            joinedload(Alert.evse)
+            .joinedload(EVSE.charge_point)
+            .joinedload(ChargePoint.site),
+        ).filter(Alert.tenant_id == tenant_id)
         
         if status:
             query = query.filter(Alert.status == status)

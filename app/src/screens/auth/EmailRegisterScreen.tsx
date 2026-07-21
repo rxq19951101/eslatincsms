@@ -265,7 +265,7 @@ const EmailRegisterScreen = () => {
             disabled={isLoading}
           >
             <View style={[styles.checkbox, agreeToTerms && styles.checkboxChecked]}>
-              {agreeToTerms && <Text style={styles.checkmark}>✓</Text>}
+              {agreeToTerms && <Icon name="checkmark" size={14} color={COLORS.IOS_WHITE} />}
             </View>
             <Text style={styles.termsText}>
               I agree to the{' '}

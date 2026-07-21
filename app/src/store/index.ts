@@ -8,6 +8,7 @@ import chargerReducer from './slices/chargerSlice';
 import chargingReducer from './slices/chargingSlice';
 import walletReducer from './slices/walletSlice';
 import transactionsReducer from './slices/transactionsSlice';
+import siteReducer from './slices/siteSlice';
 
 export const store = configureStore({
   reducer: {
@@ -16,6 +17,7 @@ export const store = configureStore({
     charging: chargingReducer,
     wallet: walletReducer,
     transactions: transactionsReducer,
+    site: siteReducer,
   },
   middleware: (getDefaultMiddleware) =>
     getDefaultMiddleware({

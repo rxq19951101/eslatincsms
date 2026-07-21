@@ -42,11 +42,12 @@ export function Header() {
       </div>
 
       <div className="flex items-center gap-4">
-        <span className="hidden sm:inline-flex rounded-md border border-slate-700 px-3 py-1 text-xs text-slate-300">
+        <span data-testid="admin-tenant-context" className="hidden sm:inline-flex rounded-md border border-slate-700 px-3 py-1 text-xs text-slate-300">
           {currentTenant ? `${t('tenant')}: ${currentTenant.name}` : t('allPlatform')}
         </span>
         <Link href="/alerts">
           <Button
+            data-testid="admin-alerts-open"
             variant="ghost"
             size="icon"
             className="relative text-slate-400 hover:text-slate-200 hover:bg-slate-800"

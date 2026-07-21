@@ -19,21 +19,22 @@ import json
 # 直接创建引擎，不通过 ORM
 from sqlalchemy import create_engine as create_engine_direct
 
-# 导入密码哈希函数
-from passlib.context import CryptContext
-try:
-    pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-except:
-    pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
+from app.core.auth import get_password_hash
 
-def get_password_hash(password: str) -> str:
-    """生成密码哈希"""
-    return pwd_context.hash(password)
+
+def get_required_bootstrap_password(name: str) -> str:
+    """Read a bootstrap password without generating or logging a fallback."""
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        raise RuntimeError(f"{name} must be set when bootstrapping an empty database")
+    return value
 
 def create_initial_data():
     """创建初始租户和管理员用户"""
     # 使用数据库 URL 创建直接连接（不使用 ORM session，避免 RLS 检查）
-    database_url = os.getenv("DATABASE_URL", "postgresql://ocpp_user:ocpp_password@db:5432/ocpp")
+    database_url = os.getenv("DATABASE_URL")
+    if not database_url:
+        raise RuntimeError("DATABASE_URL must be set for database bootstrap")
     
     # 创建引擎（使用 autocommit 模式，避免事务事件）
     # 关键：不导入 app.database.base，避免事件监听器
@@ -57,6 +58,14 @@ def create_initial_data():
                     print(f"   - 管理员用户数量: {admin_count}")
                 print(f"\n跳过初始数据创建（如需重新创建，请先清理数据库）")
                 return
+
+            # 空数据库才需要 bootstrap 凭据。禁止固定默认值，也不记录明文。
+            super_admin_password = get_required_bootstrap_password(
+                "CSMS_BOOTSTRAP_SUPER_ADMIN_PASSWORD"
+            )
+            tenant_admin_password = get_required_bootstrap_password(
+                "CSMS_BOOTSTRAP_TENANT_ADMIN_PASSWORD"
+            )
             
             # 先设置角色为 postgres superuser（ocpp_user 应该是数据库所有者，有权限）
             # 或者直接使用 ocpp_user，它在创建表时应该有权限
@@ -84,7 +93,7 @@ def create_initial_data():
             # 创建超级管理员用户
             print("\n2. 创建超级管理员用户...")
             super_admin_id = str(uuid.uuid4())
-            super_admin_password_hash = get_password_hash("admin123")
+            super_admin_password_hash = get_password_hash(super_admin_password)
             connection.execute(text("""
                 INSERT INTO admin_users (id, username, email, password_hash, full_name, is_active, is_super_admin, created_at, updated_at)
                 VALUES (:id, :username, :email, :password_hash, :full_name, :is_active, :is_super_admin, NOW(), NOW())
@@ -100,8 +109,6 @@ def create_initial_data():
             connection.commit()
             print(f"✓ 超级管理员创建成功: admin (ID: {super_admin_id})")
             print(f"  邮箱: admin@example.com")
-            print(f"  默认密码: admin123")
-            print(f"  ⚠️  请在生产环境中立即修改默认密码！")
             
             # 为超级管理员创建租户成员关系（关联到默认租户）
             print("\n2.1 创建超级管理员的租户关联...")
@@ -122,7 +129,7 @@ def create_initial_data():
             # 创建租户管理员用户
             print("\n3. 创建租户管理员用户...")
             tenant_admin_id = str(uuid.uuid4())
-            tenant_admin_password_hash = get_password_hash("admin123")
+            tenant_admin_password_hash = get_password_hash(tenant_admin_password)
             connection.execute(text("""
                 INSERT INTO admin_users (id, username, email, password_hash, full_name, is_active, is_super_admin, created_at, updated_at)
                 VALUES (:id, :username, :email, :password_hash, :full_name, :is_active, :is_super_admin, NOW(), NOW())
@@ -179,7 +186,6 @@ def create_initial_data():
             connection.commit()
             print(f"✓ 租户管理员创建成功: tenant_admin (ID: {tenant_admin_id})")
             print(f"  邮箱: tenant_admin@example.com")
-            print(f"  默认密码: admin123")
             print(f"  关联租户: 默认租户")
             
             print("\n" + "="*50)
@@ -189,22 +195,17 @@ def create_initial_data():
             print("-" * 50)
             print("超级管理员:")
             print(f"  用户名: admin")
-            print(f"  密码: admin123")
             print(f"  邮箱: admin@example.com")
             print(f"  权限: 超级管理员（可访问所有租户）")
             print(f"  主租户: 默认租户")
             print("-" * 50)
             print("租户管理员:")
             print(f"  用户名: tenant_admin")
-            print(f"  密码: admin123")
             print(f"  邮箱: tenant_admin@example.com")
             print(f"  权限: 租户管理员（仅可访问默认租户）")
             print(f"  租户: 默认租户")
             print("-" * 50)
-            print("\n⚠️  重要提示：")
-            print("  1. 请在生产环境中立即修改所有默认密码！")
-            print("  2. 建议删除或禁用测试账号")
-            print("  3. 确保使用强密码策略")
+            print("\nBootstrap 密码已从环境变量读取，明文不会写入日志。")
             
     except Exception as e:
         print(f"\n❌ 创建初始数据失败: {e}")

@@ -2,7 +2,11 @@
 # OCPP 连接安全校验
 #
 
+import base64
+import hashlib
+import hmac
 import os
+import secrets
 import logging
 from app.core.asset_identifiers import OCPP_IDENTITY_PATTERN
 from typing import Optional
@@ -19,10 +23,12 @@ def verify_charge_point_pre_registered(charge_point_id: str) -> bool:
     if not charge_point_id or not OCPP_IDENTITY_PATTERN.fullmatch(charge_point_id):
         return False
     try:
-        from app.database.base import SessionLocal
+        from app.database.base import SuperSessionLocal
         from app.database.models import ChargePoint
 
-        db = SessionLocal()
+        # Pre-registration is a system lookup by transport identity, before a
+        # tenant can be derived from the registered asset.
+        db = SuperSessionLocal()
         try:
             return (
                 db.query(ChargePoint.id).filter(ChargePoint.ocpp_identity == charge_point_id).first()
@@ -30,15 +36,78 @@ def verify_charge_point_pre_registered(charge_point_id: str) -> bool:
             )
         finally:
             db.close()
-    except Exception as e:
-        logger.error("预注册校验失败 charge_point_id=%s: %s", charge_point_id, e)
+    except Exception as exc:
+        logger.error("预注册校验失败 charge_point_id=%s: %s", charge_point_id, exc)
         return False
 
 
-def verify_ocpp_api_key(headers: dict) -> bool:
+def generate_ocpp_secret() -> str:
+    """Return a high-entropy credential that is shown exactly once."""
+    return secrets.token_urlsafe(32)
+
+
+def hash_ocpp_secret(secret: str) -> str:
+    return hashlib.sha256(secret.encode("utf-8")).hexdigest()
+
+
+def _presented_secret(headers: dict, charge_point_id: str) -> Optional[str]:
+    api_key = headers.get("x-api-key") or headers.get("X-API-Key")
+    if api_key:
+        return str(api_key).strip()
+    authorization = str(headers.get("authorization") or headers.get("Authorization") or "").strip()
+    if authorization.lower().startswith("basic "):
+        try:
+            decoded = base64.b64decode(authorization.split(None, 1)[1], validate=True).decode("utf-8")
+            username, password = decoded.split(":", 1)
+            return password if username == charge_point_id else None
+        except (ValueError, UnicodeDecodeError):
+            return None
+    if authorization.lower().startswith("bearer "):
+        return authorization.split(None, 1)[1].strip()
+    return None
+
+
+def verify_ocpp_device_credential(charge_point_id: str, headers: dict) -> bool:
+    """Verify the credential assigned to one pre-registered charge point."""
+    presented = _presented_secret(headers, charge_point_id)
+    if not presented:
+        return False
+    try:
+        from app.database.base import SuperSessionLocal
+        from app.database.models import ChargePoint
+
+        db = SuperSessionLocal()
+        try:
+            charge_point = db.query(ChargePoint).filter(
+                ChargePoint.ocpp_identity == charge_point_id,
+                ChargePoint.is_active == True,  # noqa: E712
+            ).first()
+            if not charge_point or not charge_point.ocpp_auth_secret_hash:
+                return False
+            return hmac.compare_digest(
+                charge_point.ocpp_auth_secret_hash,
+                hash_ocpp_secret(presented),
+            )
+        finally:
+            db.close()
+    except Exception as exc:
+        logger.error("OCPP device credential lookup failed identity=%s: %s", charge_point_id, exc)
+        return False
+
+
+def is_secure_ocpp_websocket(headers: dict, scheme: str) -> bool:
+    forwarded = str(headers.get("x-forwarded-proto") or headers.get("X-Forwarded-Proto") or "")
+    effective_scheme = forwarded.split(",", 1)[0].strip().lower() or scheme.lower()
+    return effective_scheme == "wss" or effective_scheme == "https"
+
+
+def verify_ocpp_api_key(headers: dict, charge_point_id: Optional[str] = None) -> bool:
     """
     API Key 校验。生产环境必须配置并匹配 OCPP_API_KEYS。
     """
+    if charge_point_id and verify_ocpp_device_credential(charge_point_id, headers):
+        return True
+
     keys_env = os.getenv("OCPP_API_KEYS", "").strip()
     if not keys_env:
         return os.getenv("ENVIRONMENT", "development").lower() != "production"
@@ -50,4 +119,7 @@ def verify_ocpp_api_key(headers: dict) -> bool:
         or headers.get("X-API-Key")
         or headers.get("authorization", "").replace("Bearer ", "").strip()
     )
+    # Global keys are migration-only and are never accepted in production.
+    if os.getenv("ENVIRONMENT", "development").lower() == "production":
+        return False
     return api_key in valid_keys

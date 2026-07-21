@@ -6,7 +6,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from uuid import UUID
 from app.database.base import get_db, tenant_id_context
 from app.database.models import Alert, EVSE
@@ -33,6 +33,23 @@ class CreateAlertRequest(BaseModel):
     metadata: Optional[dict] = None
 
 
+class AlertSiteContext(BaseModel):
+    site_code: str
+    name: str
+    address: str
+
+
+class AlertChargePointContext(BaseModel):
+    ocpp_identity: str
+    model: Optional[str]
+    serial_number: Optional[str]
+
+
+class AlertEVSEContext(BaseModel):
+    evse_id: int
+    physical_reference: Optional[str]
+
+
 class AlertResponse(BaseModel):
     id: str
     tenant_id: str
@@ -44,11 +61,138 @@ class AlertResponse(BaseModel):
     title: str
     description: Optional[str]
     metadata: dict
+    alert_code: str
+    message_params: dict
+    raw_message: Optional[str]
+    site: Optional[AlertSiteContext]
+    charge_point: Optional[AlertChargePointContext]
+    evse: Optional[AlertEVSEContext]
     acknowledged_by: Optional[str]
     acknowledged_at: Optional[str]
     resolved_at: Optional[str]
     created_at: str
     updated_at: str
+
+
+def _alert_code(alert: Alert, metadata: Dict[str, Any]) -> str:
+    """Derive the stable display contract without changing alert storage."""
+    explicit_code = metadata.get("alert_code")
+    if isinstance(explicit_code, str) and explicit_code:
+        return explicit_code
+
+    source = metadata.get("source")
+    if alert.alert_type == "offline" and source == "heartbeat_timeout":
+        return "charger.offline.heartbeat_timeout"
+    if alert.alert_type == "offline" and source in {
+        "websocket_disconnect",
+        "websocket_disconnected",
+    }:
+        return "charger.offline.websocket_disconnected"
+    if alert.alert_type == "faulted":
+        return "charger.faulted"
+    if source == "device_event" or "event_id" in metadata:
+        return "device.event"
+    if alert.dedupe_key is None:
+        return "manual"
+    return alert.alert_type
+
+
+def serialize_alert(alert: Alert) -> AlertResponse:
+    """Serialize every alert endpoint with tenant-safe asset context."""
+    metadata = (
+        alert.alert_metadata
+        if isinstance(getattr(alert, "alert_metadata", None), dict)
+        else {}
+    )
+    message_params = {
+        key: value
+        for key, value in metadata.items()
+        if key not in {"alert_code", "raw_message", "source"}
+    }
+
+    tenant_id = alert.tenant_id
+    charge_point = alert.charge_point
+    if charge_point is not None and charge_point.tenant_id != tenant_id:
+        charge_point = None
+
+    evse = alert.evse
+    if evse is not None and evse.tenant_id != tenant_id:
+        evse = None
+
+    if charge_point is not None and evse is not None:
+        if evse.charge_point_id != charge_point.id:
+            evse = None
+    elif charge_point is None and evse is not None:
+        # A valid EVSE may supply its parent only when the alert has no explicit
+        # charge-point relation. An inconsistent relation is treated as unsafe.
+        if alert.charge_point_id is not None:
+            evse = None
+        else:
+            evse_charge_point = evse.charge_point
+            if (
+                evse_charge_point is not None
+                and evse_charge_point.tenant_id == tenant_id
+            ):
+                charge_point = evse_charge_point
+            else:
+                evse = None
+
+    site = charge_point.site if charge_point is not None else None
+    if site is not None and (
+        site.tenant_id != tenant_id or site.id != charge_point.site_id
+    ):
+        site = None
+
+    raw_message = metadata.get("raw_message")
+    if not isinstance(raw_message, str):
+        raw_message = alert.description
+
+    return AlertResponse(
+        id=str(alert.id),
+        tenant_id=str(alert.tenant_id),
+        charge_point_id=str(alert.charge_point_id) if alert.charge_point_id else None,
+        evse_id=str(alert.evse_id) if alert.evse_id else None,
+        alert_type=alert.alert_type,
+        severity=alert.severity,
+        status=alert.status,
+        title=alert.title,
+        description=alert.description,
+        metadata=metadata,
+        alert_code=_alert_code(alert, metadata),
+        message_params=message_params,
+        raw_message=raw_message,
+        site=(
+            AlertSiteContext(
+                site_code=site.site_code,
+                name=site.name,
+                address=site.address,
+            )
+            if site is not None
+            else None
+        ),
+        charge_point=(
+            AlertChargePointContext(
+                ocpp_identity=charge_point.ocpp_identity,
+                model=charge_point.model,
+                serial_number=charge_point.serial_number,
+            )
+            if charge_point is not None
+            else None
+        ),
+        evse=(
+            AlertEVSEContext(
+                evse_id=evse.evse_id,
+                physical_reference=evse.physical_reference,
+            )
+            if evse is not None
+            else None
+        ),
+        acknowledged_by=str(alert.acknowledged_by) if alert.acknowledged_by else None,
+        acknowledged_at=alert.acknowledged_at.isoformat() if alert.acknowledged_at else None,
+        resolved_at=alert.resolved_at.isoformat() if alert.resolved_at else None,
+        created_at=alert.created_at.isoformat() if alert.created_at else "",
+        updated_at=alert.updated_at.isoformat() if alert.updated_at else "",
+    )
 
 
 class CreateAlertRuleRequest(BaseModel):
@@ -113,27 +257,7 @@ async def list_alerts(
         charge_point_id=resolved_charge_point_id
     )
     
-    return [
-        AlertResponse(
-            id=str(a.id),
-            tenant_id=str(a.tenant_id),
-            charge_point_id=str(a.charge_point_id) if a.charge_point_id else None,
-            evse_id=str(a.evse_id) if a.evse_id else None,
-            alert_type=a.alert_type,
-            severity=a.severity,
-            status=a.status,
-            title=a.title,
-            description=a.description,
-            # models.Alert 使用 alert_metadata（避免与 SQLAlchemy Base.metadata 冲突）
-            metadata=a.alert_metadata if isinstance(getattr(a, "alert_metadata", None), dict) else {},
-            acknowledged_by=str(a.acknowledged_by) if a.acknowledged_by else None,
-            acknowledged_at=a.acknowledged_at.isoformat() if a.acknowledged_at else None,
-            resolved_at=a.resolved_at.isoformat() if a.resolved_at else None,
-            created_at=a.created_at.isoformat() if a.created_at else "",
-            updated_at=a.updated_at.isoformat() if a.updated_at else ""
-        )
-        for a in alerts
-    ]
+    return [serialize_alert(alert) for alert in alerts]
 
 
 @router.post("", response_model=AlertResponse, summary="创建告警（手动）")
@@ -182,23 +306,7 @@ async def create_alert(
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
     
-    return AlertResponse(
-        id=str(alert.id),
-        tenant_id=str(alert.tenant_id),
-        charge_point_id=str(alert.charge_point_id) if alert.charge_point_id else None,
-        evse_id=str(alert.evse_id) if alert.evse_id else None,
-        alert_type=alert.alert_type,
-        severity=alert.severity,
-        status=alert.status,
-        title=alert.title,
-        description=alert.description,
-        metadata=alert.alert_metadata if isinstance(getattr(alert, "alert_metadata", None), dict) else {},
-        acknowledged_by=str(alert.acknowledged_by) if alert.acknowledged_by else None,
-        acknowledged_at=alert.acknowledged_at.isoformat() if alert.acknowledged_at else None,
-        resolved_at=alert.resolved_at.isoformat() if alert.resolved_at else None,
-        created_at=alert.created_at.isoformat() if alert.created_at else "",
-        updated_at=alert.updated_at.isoformat() if alert.updated_at else ""
-    )
+    return serialize_alert(alert)
 
 
 @router.get("/{alert_id:uuid}", response_model=AlertResponse, summary="获取告警详情")
@@ -215,23 +323,7 @@ async def get_alert(
     if not alert:
         raise HTTPException(status_code=404, detail="Alert not found")
     
-    return AlertResponse(
-        id=str(alert.id),
-        tenant_id=str(alert.tenant_id),
-        charge_point_id=str(alert.charge_point_id) if alert.charge_point_id else None,
-        evse_id=str(alert.evse_id) if alert.evse_id else None,
-        alert_type=alert.alert_type,
-        severity=alert.severity,
-        status=alert.status,
-        title=alert.title,
-        description=alert.description,
-        metadata=alert.alert_metadata if isinstance(getattr(alert, "alert_metadata", None), dict) else {},
-        acknowledged_by=str(alert.acknowledged_by) if alert.acknowledged_by else None,
-        acknowledged_at=alert.acknowledged_at.isoformat() if alert.acknowledged_at else None,
-        resolved_at=alert.resolved_at.isoformat() if alert.resolved_at else None,
-        created_at=alert.created_at.isoformat() if alert.created_at else "",
-        updated_at=alert.updated_at.isoformat() if alert.updated_at else ""
-    )
+    return serialize_alert(alert)
 
 
 @router.put("/{alert_id}/acknowledge", response_model=AlertResponse, summary="确认告警")
@@ -254,23 +346,7 @@ async def acknowledge_alert(
     if not alert:
         raise HTTPException(status_code=404, detail="Alert not found")
     
-    return AlertResponse(
-        id=str(alert.id),
-        tenant_id=str(alert.tenant_id),
-        charge_point_id=str(alert.charge_point_id) if alert.charge_point_id else None,
-        evse_id=str(alert.evse_id) if alert.evse_id else None,
-        alert_type=alert.alert_type,
-        severity=alert.severity,
-        status=alert.status,
-        title=alert.title,
-        description=alert.description,
-        metadata=alert.alert_metadata if isinstance(getattr(alert, "alert_metadata", None), dict) else {},
-        acknowledged_by=str(alert.acknowledged_by) if alert.acknowledged_by else None,
-        acknowledged_at=alert.acknowledged_at.isoformat() if alert.acknowledged_at else None,
-        resolved_at=alert.resolved_at.isoformat() if alert.resolved_at else None,
-        created_at=alert.created_at.isoformat() if alert.created_at else "",
-        updated_at=alert.updated_at.isoformat() if alert.updated_at else ""
-    )
+    return serialize_alert(alert)
 
 
 @router.put("/{alert_id}/resolve", response_model=AlertResponse, summary="解决告警")
@@ -288,23 +364,7 @@ async def resolve_alert(
     if not alert:
         raise HTTPException(status_code=404, detail="Alert not found")
     
-    return AlertResponse(
-        id=str(alert.id),
-        tenant_id=str(alert.tenant_id),
-        charge_point_id=str(alert.charge_point_id) if alert.charge_point_id else None,
-        evse_id=str(alert.evse_id) if alert.evse_id else None,
-        alert_type=alert.alert_type,
-        severity=alert.severity,
-        status=alert.status,
-        title=alert.title,
-        description=alert.description,
-        metadata=alert.alert_metadata if isinstance(getattr(alert, "alert_metadata", None), dict) else {},
-        acknowledged_by=str(alert.acknowledged_by) if alert.acknowledged_by else None,
-        acknowledged_at=alert.acknowledged_at.isoformat() if alert.acknowledged_at else None,
-        resolved_at=alert.resolved_at.isoformat() if alert.resolved_at else None,
-        created_at=alert.created_at.isoformat() if alert.created_at else "",
-        updated_at=alert.updated_at.isoformat() if alert.updated_at else ""
-    )
+    return serialize_alert(alert)
 
 
 @router.get("/statistics", summary="获取告警统计")

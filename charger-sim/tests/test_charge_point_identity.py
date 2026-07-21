@@ -7,7 +7,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from ocpp.v16.enums import RegistrationStatus
 
-from simulator.charge_point import SimChargePoint, build_websocket_url
+from simulator.charge_point import SimChargePoint, build_auth_headers, build_websocket_url
 from simulator.profiles import ChargePointProfile, MeteringProfile
 
 
@@ -29,6 +29,15 @@ class ChargePointIdentityTests(unittest.TestCase):
     def test_boot_serial_defaults_to_websocket_identity(self) -> None:
         profile = ChargePointProfile(charge_point_id="CP-DEFAULT-001")
         self.assertEqual(profile.boot_serial_number, "CP-DEFAULT-001")
+
+    def test_path_identity_url_is_supported(self) -> None:
+        url = build_websocket_url("wss://csms.example.com/ocpp/{identity}", "CP:BOGOTA-001")
+        self.assertEqual(url, "wss://csms.example.com/ocpp/CP:BOGOTA-001")
+
+    def test_device_secret_uses_basic_auth(self) -> None:
+        headers = build_auth_headers("CP-1", "device-secret")
+        self.assertTrue(headers["Authorization"].startswith("Basic "))
+        self.assertNotIn("device-secret", headers["Authorization"])
 
     def test_invalid_ocpp_identity_is_rejected_before_connect(self) -> None:
         with self.assertRaisesRegex(ValueError, "OCPP identity"):

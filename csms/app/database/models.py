@@ -128,12 +128,26 @@ class ChargePoint(Base):
     ocpp_identity = Column(String(64), nullable=False, unique=True, index=True)
     tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
     site_id = Column(UUID(as_uuid=True), ForeignKey("sites.id"), nullable=False, index=True)
+
+    # Driver-facing labels are independent from the internal UUID and OCPP
+    # identity. The Python default keeps legacy ORM creation paths working;
+    # provisioning APIs should always accept an explicit site label.
+    display_code = Column(
+        String(16),
+        nullable=False,
+        default=lambda: f"CP-{uuid.uuid4().hex[:8].upper()}",
+    )
+    display_name = Column(String(80), nullable=True)
+    location_hint = Column(String(160), nullable=True)
     
     # 资产信息
     vendor = Column(String(100), nullable=True)
     model = Column(String(100), nullable=True)
     serial_number = Column(String(100), nullable=True, unique=True, index=True)
     firmware_version = Column(String(50), nullable=True)
+    # Per-device OCPP credential. Only the SHA-256 digest of the high-entropy
+    # secret is persisted; the raw secret is returned once during provisioning.
+    ocpp_auth_secret_hash = Column(String(64), nullable=True)
     
     # 技术规格
     max_power_kw = Column(Float, nullable=True)  # 最大功率
@@ -144,6 +158,10 @@ class ChargePoint(Base):
     
     # 运营状态
     is_active = Column(Boolean, default=True)
+    commissioning_status = Column(String(20), nullable=False, default="draft")
+    acceptance_report = Column(PortableJSON, nullable=True)
+    last_acceptance_at = Column(DateTime(timezone=True), nullable=True)
+    commissioned_at = Column(DateTime(timezone=True), nullable=True)
     
     # 元数据
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
@@ -160,11 +178,21 @@ class ChargePoint(Base):
         Index('idx_charge_points_site', 'site_id'),
         Index('idx_charge_points_device', 'device_serial_number'),
         Index('idx_charge_points_tenant_id', 'tenant_id'),
+        UniqueConstraint('site_id', 'display_code', name='uq_charge_points_site_display_code'),
         CheckConstraint("length(ocpp_identity) BETWEEN 1 AND 64", name="ck_charge_points_ocpp_identity_length"),
+        CheckConstraint("length(display_code) BETWEEN 1 AND 16", name="ck_charge_points_display_code_length"),
+        CheckConstraint(
+            "display_code ~ '^[A-Z][A-Z0-9-]{0,15}$'",
+            name="ck_charge_points_display_code_format",
+        ).ddl_if(dialect="postgresql"),
         CheckConstraint(
             "ocpp_identity ~ '^[A-Za-z0-9._:-]{1,64}$'",
             name="ck_charge_points_ocpp_identity_format",
         ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "commissioning_status IN ('draft', 'testing', 'ready', 'commissioned', 'suspended')",
+            name="ck_charge_points_commissioning_status",
+        ),
     )
 
 
@@ -182,6 +210,7 @@ class EVSE(Base):
     # EVSE信息
     connector_type = Column(String(50), default="Type2")  # 连接器类型（从 charge_points 下放）
     max_power_kw = Column(Float, nullable=True)  # 该EVSE的最大功率
+    physical_reference = Column(String(64), nullable=True)  # 现场可见的枪口/车位编号
     
     # 元数据
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
@@ -196,7 +225,9 @@ class EVSE(Base):
     __table_args__ = (
         Index('idx_evses_charge_point', 'charge_point_id'),
         Index('idx_evses_charge_point_evse', 'charge_point_id', 'evse_id', unique=True),
+        UniqueConstraint('charge_point_id', 'physical_reference', name='uq_evses_charge_point_physical_reference'),
         Index('idx_evses_tenant_id', 'tenant_id'),
+        CheckConstraint("max_power_kw IS NULL OR max_power_kw > 0", name="ck_evses_max_power_positive"),
     )
 
 
@@ -385,8 +416,16 @@ class OCPPMessageEvent(Base):
     tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
     charge_point_id = Column(UUID(as_uuid=True), ForeignKey("charge_points.id"), nullable=False, index=True)
     action = Column(String(100), nullable=False)
+    # OCPP CALL UniqueId is the authoritative replay key. ``message_key`` is
+    # retained for direct service calls/tests which do not enter via WebSocket.
+    unique_id = Column(String(255), nullable=True)
     message_key = Column(String(255), nullable=False)
     payload = Column(PortableJSON, nullable=False)
+    response_payload = Column(PortableJSON, nullable=True)
+    response_message_type = Column(Integer, nullable=True)  # 3=CALLRESULT, 4=CALLERROR
+    processing_status = Column(String(20), nullable=False, default="processing")
+    outcome = Column(String(50), nullable=True)
+    processed_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False, index=True)
 
     tenant = relationship("Tenant")
@@ -394,7 +433,9 @@ class OCPPMessageEvent(Base):
 
     __table_args__ = (
         UniqueConstraint('tenant_id', 'charge_point_id', 'action', 'message_key', name='uq_ocpp_message_event_key'),
+        UniqueConstraint('tenant_id', 'charge_point_id', 'unique_id', name='uq_ocpp_message_event_unique_id'),
         Index('idx_ocpp_message_events_cp_action', 'charge_point_id', 'action'),
+        Index('idx_ocpp_message_events_unique_id', 'unique_id'),
     )
 
 
@@ -1086,6 +1127,43 @@ class AppUser(Base):
     )
 
 
+class AppUserFavoriteSite(Base):
+    """Platform App user's saved public charging site."""
+
+    __tablename__ = "app_user_favorite_sites"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    app_user_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("app_users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    site_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("sites.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    created_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+    app_user = relationship("AppUser")
+    site = relationship("Site")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "app_user_id",
+            "site_id",
+            name="uq_app_user_favorite_site",
+        ),
+        Index("idx_app_user_favorite_sites_user_created", "app_user_id", "created_at"),
+    )
+
+
 class AppUserPaymentMethod(Base):
     """终端用户保存的支付方式（Mercado Pago Customers/Cards 等回填；当前可为空表）"""
 
@@ -1188,6 +1266,9 @@ class Alert(Base):
     charge_point_id = Column(UUID(as_uuid=True), ForeignKey("charge_points.id", ondelete="SET NULL"), nullable=True, index=True)
     evse_id = Column(UUID(as_uuid=True), ForeignKey("evses.id", ondelete="SET NULL"), nullable=True, index=True)
     alert_type = Column(String(50), nullable=False)  # offline, faulted, overcurrent, overvoltage, temperature, etc.
+    # Stable key for tenant-scoped automatic alert deduplication. Manual alerts
+    # leave it NULL, so their existing behavior is unchanged.
+    dedupe_key = Column(String(255), nullable=True)
     severity = Column(String(50), nullable=False)  # critical, warning, info
     status = Column(String(50), nullable=False, default="pending")  # pending, acknowledged, resolved
     title = Column(String(200), nullable=False)
@@ -1206,6 +1287,7 @@ class Alert(Base):
     acknowledged_by_user = relationship("AdminUser", foreign_keys=[acknowledged_by])
     
     __table_args__ = (
+        UniqueConstraint('tenant_id', 'dedupe_key', name='uq_alerts_tenant_dedupe_key'),
         Index('idx_alerts_tenant_id', 'tenant_id'),
         Index('idx_alerts_charge_point_id', 'charge_point_id'),
         Index('idx_alerts_status', 'status'),

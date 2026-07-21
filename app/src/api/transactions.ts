@@ -6,10 +6,12 @@ import apiClient from './client';
 import { API_ENDPOINTS } from '../constants/config';
 
 export interface ChargingRecord {
-  id: number;
+  id: string;
   transaction_id: number;
   charge_point_id: string;
-  evse_id: number;
+  ocpp_identity?: string | null;
+  evse_id: string;
+  connector_id?: number | null;
   start_time: string | null;
   end_time: string | null;
   status: string;
@@ -33,8 +35,7 @@ export async function getChargingRecords(params?: {
   return res.data;
 }
 
-export async function getChargingRecordDetail(id: number): Promise<ChargingRecordDetail> {
+export async function getChargingRecordDetail(id: string): Promise<ChargingRecordDetail> {
   const res = await apiClient.get<ChargingRecordDetail>(API_ENDPOINTS.TRANSACTIONS.DETAIL(id));
   return res.data;
 }
-

@@ -1,0 +1,12 @@
+# This file documents variable names only. Never place credential values here.
+# Copy variable names into your shell/CI secret store; scenario YAML references ${ENV_NAME}.
+required_environment:
+  - SIM_E2E_ADMIN_PASSWORD
+  - SIM_E2E_APP_PASSWORD
+  - SIM_E2E_READONLY_PASSWORD
+  - SIM_E2E_WEBHOOK_SECRET
+optional_environment:
+  - SIM_API_BASE
+  - SIM_OCPP_WS
+runtime_files:
+  - SIM_SEED_JSON_HOST

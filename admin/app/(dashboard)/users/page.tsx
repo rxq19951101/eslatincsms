@@ -20,6 +20,8 @@ import {
   type FieldErrors,
 } from '@/lib/validation';
 import { IdempotencyIntentStore, requestIntent } from '@/lib/idempotency';
+import { useAuthStore } from '@/store/authStore';
+import { hasPermission, usePermissions } from '@/hooks/usePermissions';
 
 interface AdminUser {
   id: string;
@@ -45,7 +47,11 @@ interface AppUser {
 }
 
 export default function UsersPage() {
-  const [tab, setTab] = useState('appuser');
+  const user = useAuthStore((state) => state.user);
+  const isSuperAdmin = !!user?.is_super_admin;
+  const { permissions, isLoading: permissionsLoading } = usePermissions();
+  const canReadAdminUsers = isSuperAdmin || hasPermission(permissions, 'admin_users.read');
+  const [tab, setTab] = useState('admin');
   const [adjustUserId, setAdjustUserId] = useState<string | null>(null);
   const [adjustAmount, setAdjustAmount] = useState('10000');
   const [adjustNote, setAdjustNote] = useState('');
@@ -56,12 +62,12 @@ export default function UsersPage() {
   const { t } = useI18n();
 
   const { data: adminUsers, mutate: refreshAdmin, isLoading: loadingAdmin } = useSWR<AdminUser[]>(
-    tab === 'admin' ? API_ENDPOINTS.ADMIN_USERS : null,
+    canReadAdminUsers && tab === 'admin' ? API_ENDPOINTS.ADMIN_USERS : null,
     (url: string) => apiGet<AdminUser[]>(url)
   );
 
   const { data: appUsers, mutate: refreshApp, isLoading: loadingApp } = useSWR<AppUser[]>(
-    tab === 'appuser' ? API_ENDPOINTS.APP_USERS : null,
+    isSuperAdmin && tab === 'appuser' ? API_ENDPOINTS.APP_USERS : null,
     (url: string) => apiGet<AppUser[]>(url)
   );
 
@@ -104,8 +110,24 @@ export default function UsersPage() {
     else refreshApp();
   };
 
+  if (permissionsLoading) {
+    return (
+      <div className="flex items-center justify-center h-full">
+        <div className="text-slate-400">{t('加载中...')}</div>
+      </div>
+    );
+  }
+
+  if (!canReadAdminUsers && !isSuperAdmin) {
+    return (
+      <div className="flex items-center justify-center h-full">
+        <div className="text-slate-400">{t('当前账号无权查看用户管理')}</div>
+      </div>
+    );
+  }
+
   return (
-    <div className="space-y-6">
+    <div data-testid="admin-wallet-page" className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-3xl font-bold text-white">{t('users')}</h1>
@@ -121,15 +143,17 @@ export default function UsersPage() {
 
       <Tabs value={tab} onValueChange={setTab} className="space-y-6">
         <TabsList className="bg-slate-800/50 border-slate-700">
-          <TabsTrigger value="appuser" className="data-[state=active]:bg-slate-700">
-            {t('appUsers')}
-          </TabsTrigger>
+          {isSuperAdmin && (
+            <TabsTrigger value="appuser" className="data-[state=active]:bg-slate-700">
+              {t('appUsers')}
+            </TabsTrigger>
+          )}
           <TabsTrigger value="admin" className="data-[state=active]:bg-slate-700">
             {t('adminUsers')}
           </TabsTrigger>
         </TabsList>
 
-        <TabsContent value="appuser">
+        {isSuperAdmin && <TabsContent value="appuser">
           <Card className="bg-slate-800/80 backdrop-blur-sm border-slate-700">
             <CardHeader>
               <CardTitle className="text-white">{t(`App 用户 (${appUsers?.length ?? 0})`)}</CardTitle>
@@ -156,7 +180,7 @@ export default function UsersPage() {
                     </thead>
                     <tbody>
                       {appUsers.map((u) => (
-                        <tr key={u.id} className="border-b border-slate-700/50">
+                        <tr key={u.id} data-testid="admin-wallet-user-row" data-user-email={u.email} className="border-b border-slate-700/50">
                           <td className="py-2 px-2">{u.email}</td>
                           <td className="py-2 px-2">{u.full_name || '—'}</td>
                           <td className="py-2 px-2 font-mono">
@@ -169,6 +193,7 @@ export default function UsersPage() {
                           </td>
                           <td className="py-2 px-2">
                             <Button
+                              data-testid="admin-wallet-adjust-open"
                               size="sm"
                               variant="outline"
                               className="border-slate-600"
@@ -192,10 +217,11 @@ export default function UsersPage() {
               )}
 
               {adjustUserId && (
-                <div className="mt-6 p-4 rounded-lg border border-slate-600 bg-slate-900/60 space-y-3">
+                <div data-testid="admin-wallet-adjust-form" className="mt-6 p-4 rounded-lg border border-slate-600 bg-slate-900/60 space-y-3">
                   <p className="text-white text-sm font-medium">{t('调整余额')}</p>
                   <p className="text-slate-400 text-sm">{appUsers?.find((user) => user.id === adjustUserId)?.email}</p>
                   <Input
+                    data-testid="admin-wallet-adjust-amount"
                     type="number"
                     step="0.01"
                     value={adjustAmount}
@@ -206,6 +232,7 @@ export default function UsersPage() {
                   />
                   {adjustErrors.amount && <p className="text-red-400 text-sm">{t(adjustErrors.amount)}</p>}
                   <Input
+                    data-testid="admin-wallet-adjust-reason"
                     value={adjustNote}
                     onChange={(e) => setAdjustNote(e.target.value)}
                     placeholder={t('调整原因（必填）')}
@@ -215,7 +242,7 @@ export default function UsersPage() {
                   {adjustErrors.description && <p className="text-red-400 text-sm">{t(adjustErrors.description)}</p>}
                   {adjustError && <p className="text-red-400 text-sm">{adjustError}</p>}
                   <div className="flex gap-2">
-                    <Button onClick={handleAdjust} disabled={adjusting}>
+                    <Button data-testid="admin-wallet-adjust-submit" onClick={handleAdjust} disabled={adjusting}>
                       {adjusting ? t('提交中…') : t('确认')}
                     </Button>
                     <Button
@@ -233,7 +260,7 @@ export default function UsersPage() {
               )}
             </CardContent>
           </Card>
-        </TabsContent>
+        </TabsContent>}
 
         <TabsContent value="admin">
           <Card className="bg-slate-800/80 backdrop-blur-sm border-slate-700">

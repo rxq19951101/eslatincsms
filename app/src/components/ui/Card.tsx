@@ -17,6 +17,9 @@ export interface CardProps {
   style?: StyleProp<ViewStyle>;
   variant?: 'default' | 'elevated' | 'outlined';
   interactive?: boolean;
+  testID?: string;
+  accessibilityLabel?: string;
+  accessibilityHint?: string;
 }
 
 const Card: React.FC<CardProps> = ({
@@ -25,6 +28,9 @@ const Card: React.FC<CardProps> = ({
   style,
   variant = 'default',
   interactive = false,
+  testID,
+  accessibilityLabel,
+  accessibilityHint,
 }) => {
   const scaleValue = useRef(new Animated.Value(1)).current;
 
@@ -78,6 +84,9 @@ const Card: React.FC<CardProps> = ({
 
   const cardContent = (
     <Animated.View
+      testID={!onPress && !interactive ? testID : undefined}
+      accessibilityLabel={!onPress && !interactive ? accessibilityLabel : undefined}
+      accessibilityHint={!onPress && !interactive ? accessibilityHint : undefined}
       style={[
         getVariantStyles(),
         {
@@ -93,6 +102,10 @@ const Card: React.FC<CardProps> = ({
   if (onPress || interactive) {
     return (
       <TouchableOpacity
+        testID={testID}
+        accessibilityLabel={accessibilityLabel}
+        accessibilityHint={accessibilityHint}
+        accessibilityRole="button"
         onPress={onPress}
         onPressIn={handlePressIn}
         onPressOut={handlePressOut}

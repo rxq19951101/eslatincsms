@@ -10,10 +10,14 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy import or_, func
 from app.database.base import get_db, tenant_id_context
-from app.database.models import ChargePoint, Site, EVSE, EVSEStatus, Tariff, QrToken
+from app.database.models import ChargePoint, Site, EVSE, EVSEStatus, OCPPMessageEvent, Tariff, QrToken
 from app.core.logging_config import get_logger
 from app.core.permissions import get_current_admin_user
-from app.core.asset_identifiers import get_charge_point_by_reference, get_site_by_reference
+from app.core.asset_identifiers import (
+    get_charge_point_by_reference,
+    get_site_by_reference,
+    get_tenant_charge_point_by_reference,
+)
 from app.api.validation import StrictRequestModel
 from app.core.permissions import has_permission
 from app.services.role_service import MembershipRoleService
@@ -56,6 +60,20 @@ def _get_scoped_charge_point(db: Session, reference: str, current_user_obj) -> C
         raise HTTPException(status_code=403, detail="Charge point belongs to another tenant")
     if not tenant_id and not current_user_obj.is_super_admin:
         raise HTTPException(status_code=403, detail="Tenant ID required")
+    return charge_point
+
+
+def _get_visible_charge_point(db: Session, reference: str, current_user_obj) -> ChargePoint:
+    """Resolve a read target without disclosing cross-tenant asset existence."""
+    tenant_id = tenant_id_context.get()
+    if tenant_id:
+        charge_point = get_tenant_charge_point_by_reference(db, reference, tenant_id)
+    elif current_user_obj.is_super_admin:
+        charge_point = get_charge_point_by_reference(db, reference)
+    else:
+        raise HTTPException(status_code=403, detail="Tenant ID required")
+    if not charge_point:
+        raise HTTPException(status_code=404, detail=f"充电桩 {reference} 未找到")
     return charge_point
 
 
@@ -193,7 +211,7 @@ def get_charger(
     """获取单个充电桩的详细信息（使用新表结构）"""
     logger.info(f"[API] GET /api/v1/chargers/{charge_point_id} | 请求充电桩详情")
     
-    charge_point = _get_scoped_charge_point(db, charge_point_id, current_user_obj)
+    charge_point = _get_visible_charge_point(db, charge_point_id, current_user_obj)
     
     # 获取站点信息
     site = charge_point.site if charge_point.site_id else None
@@ -253,6 +271,7 @@ def get_charger(
         evse_status_item = db.query(EVSEStatus).filter(EVSEStatus.evse_id == evse.id).first()
         evse_list.append({
             "evse_id": evse.evse_id,
+            "physical_reference": evse.physical_reference,
             "connector_type": evse.connector_type,  # 从 EVSE 获取 connector_type
             "max_power_kw": evse.max_power_kw,
             "status": evse_status_item.status if evse_status_item else "Unknown",
@@ -279,6 +298,10 @@ def get_charger(
         },
         "price_per_kwh": float(tariff.base_price_per_kwh) if tariff else None,
         "evses": evse_list,  # 每个 EVSE 都有自己的 connector_type
+        "commissioning_status": charge_point.commissioning_status,
+        "acceptance_report": charge_point.acceptance_report,
+        "last_acceptance_at": charge_point.last_acceptance_at.isoformat() if charge_point.last_acceptance_at else None,
+        "commissioned_at": charge_point.commissioned_at.isoformat() if charge_point.commissioned_at else None,
         "created_at": charge_point.created_at.isoformat() if charge_point.created_at else None,
         "updated_at": charge_point.updated_at.isoformat() if charge_point.updated_at else None,
     }
@@ -312,12 +335,16 @@ def create_charger(
         raise HTTPException(status_code=403, detail="Site belongs to another tenant")
     
     # 创建新充电桩
+    from app.core.ocpp_auth import generate_ocpp_secret, hash_ocpp_secret
+    ocpp_secret = generate_ocpp_secret()
     charge_point = ChargePoint(
         ocpp_identity=req.id,
         tenant_id=tenant_id,
         vendor=req.vendor,
         model=req.model,
         site_id=site.id,
+        ocpp_auth_secret_hash=hash_ocpp_secret(ocpp_secret),
+        commissioning_status="draft",
         is_active=True
     )
     db.add(charge_point)
@@ -366,8 +393,131 @@ def create_charger(
         "model": charge_point.model,
         "site_id": str(charge_point.site_id),
         "is_active": charge_point.is_active,
+        "commissioning_status": charge_point.commissioning_status,
+        "ocpp_credentials": {
+            "username": charge_point.ocpp_identity,
+            "secret": ocpp_secret,
+            "query_url": f"/ocpp?id={charge_point.ocpp_identity}",
+            "path_url": f"/ocpp/{charge_point.ocpp_identity}",
+        },
         "qr_codes": qr_urls,  # 二维码URL列表（如果有EVSE）
     }
+
+
+def _build_acceptance_report(db: Session, charge_point: ChargePoint) -> dict:
+    """Build an evidence-based report; missing evidence always fails closed."""
+    actions = {
+        action: db.query(func.count(OCPPMessageEvent.id)).filter(
+            OCPPMessageEvent.charge_point_id == charge_point.id,
+            OCPPMessageEvent.action == action,
+            OCPPMessageEvent.processing_status == "completed",
+        ).scalar() or 0
+        for action in (
+            "BootNotification",
+            "Heartbeat",
+            "StartTransaction",
+            "MeterValues",
+            "StopTransaction",
+        )
+    }
+    try:
+        from app.api.v1.charger_management import check_charger_connection
+        connected = check_charger_connection(charge_point.ocpp_identity)
+    except Exception:
+        connected = False
+    evses = db.query(EVSE).filter(EVSE.charge_point_id == charge_point.id).order_by(EVSE.evse_id).all()
+    checks = {
+        "device_credential": bool(charge_point.ocpp_auth_secret_hash),
+        "evse_configuration": bool(evses) and all(
+            item.connector_type and item.max_power_kw and item.physical_reference for item in evses
+        ),
+        "boot_notification": actions["BootNotification"] >= 1,
+        "heartbeat": actions["Heartbeat"] >= 1,
+        "remote_start_transaction": actions["StartTransaction"] >= 1,
+        "meter_values": actions["MeterValues"] >= 1,
+        "remote_stop_transaction": actions["StopTransaction"] >= 1,
+        # A second accepted boot is deterministic evidence that the simulator or
+        # physical charger disconnected, reconnected and booted again.
+        "disconnect_recovery": actions["BootNotification"] >= 2,
+        "currently_connected": connected,
+    }
+    required = [key for key in checks if key != "currently_connected"]
+    return {
+        "version": 1,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "ocpp_identity": charge_point.ocpp_identity,
+        "protocol": "OCPP 1.6J",
+        "passed": all(checks[key] for key in required),
+        "checks": checks,
+        "evidence_counts": actions,
+        "evses": [
+            {
+                "evse_id": item.evse_id,
+                "physical_reference": item.physical_reference,
+                "connector_type": item.connector_type,
+                "max_power_kw": item.max_power_kw,
+            }
+            for item in evses
+        ],
+    }
+
+
+@router.post("/{charge_point_id}/credentials/rotate", summary="轮换充电桩独立 OCPP 密钥")
+def rotate_ocpp_credentials(
+    charge_point_id: str,
+    current_user_obj=Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    charge_point = _get_scoped_charge_point(db, charge_point_id, current_user_obj)
+    from app.core.ocpp_auth import generate_ocpp_secret, hash_ocpp_secret
+    secret = generate_ocpp_secret()
+    charge_point.ocpp_auth_secret_hash = hash_ocpp_secret(secret)
+    charge_point.commissioning_status = "draft"
+    charge_point.acceptance_report = None
+    db.commit()
+    return {
+        "ocpp_identity": charge_point.ocpp_identity,
+        "secret": secret,
+        "query_url": f"/ocpp?id={charge_point.ocpp_identity}",
+        "path_url": f"/ocpp/{charge_point.ocpp_identity}",
+    }
+
+
+@router.post("/{charge_point_id}/acceptance-report", summary="生成充电桩投运验收报告")
+def generate_acceptance_report(
+    charge_point_id: str,
+    current_user_obj=Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    charge_point = _get_scoped_charge_point(db, charge_point_id, current_user_obj)
+    report = _build_acceptance_report(db, charge_point)
+    charge_point.acceptance_report = report
+    charge_point.last_acceptance_at = datetime.now(timezone.utc)
+    charge_point.commissioning_status = "ready" if report["passed"] else "testing"
+    db.commit()
+    return report
+
+
+@router.post("/{charge_point_id}/commission", summary="正式投运已通过验收的充电桩")
+def commission_charge_point(
+    charge_point_id: str,
+    current_user_obj=Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    charge_point = _get_scoped_charge_point(db, charge_point_id, current_user_obj)
+    report = _build_acceptance_report(db, charge_point)
+    if not report["passed"]:
+        charge_point.acceptance_report = report
+        charge_point.last_acceptance_at = datetime.now(timezone.utc)
+        charge_point.commissioning_status = "testing"
+        db.commit()
+        raise HTTPException(status_code=409, detail={"message": "Acceptance checks failed", "report": report})
+    charge_point.acceptance_report = report
+    charge_point.last_acceptance_at = datetime.now(timezone.utc)
+    charge_point.commissioning_status = "commissioned"
+    charge_point.commissioned_at = datetime.now(timezone.utc)
+    db.commit()
+    return {"commissioning_status": "commissioned", "report": report}
 
 
 class UpdateChargerRequest(StrictRequestModel):
@@ -494,7 +644,7 @@ def get_charger_qr_codes(
     db: Session = Depends(get_db)
 ) -> dict:
     """获取充电桩所有connector的二维码URL列表"""
-    charge_point = _get_scoped_charge_point(db, charge_point_id, current_user_obj)
+    charge_point = _get_visible_charge_point(db, charge_point_id, current_user_obj)
     
     # 查询所有EVSE
     evses = db.query(EVSE).filter(EVSE.charge_point_id == charge_point.id).order_by(EVSE.evse_id).all()
@@ -543,7 +693,7 @@ def get_charger_qr_code(
     db: Session = Depends(get_db)
 ) -> dict:
     """获取指定connector的二维码信息"""
-    charge_point = _get_scoped_charge_point(db, charge_point_id, current_user_obj)
+    charge_point = _get_visible_charge_point(db, charge_point_id, current_user_obj)
     
     # 验证connector是否存在
     evse = db.query(EVSE).filter(

@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import uuid
 from typing import Dict, Any, Optional, Tuple
 from datetime import datetime, timezone
 from sqlalchemy.orm import Session
@@ -60,6 +61,91 @@ class OCPPMessageHandler:
     def __init__(self):
         self.charge_point_service = ChargePointService()
         self.session_service = SessionService()
+
+    @classmethod
+    def _begin_inbound_message(
+        cls,
+        db: Session,
+        charge_point_id: str,
+        action: str,
+        payload: Dict[str, Any],
+        unique_id: Optional[str],
+    ):
+        """Claim one inbound CALL and return its first result on replay."""
+        from app.database.models import OCPPMessageEvent
+
+        cp = get_charge_point_by_reference(db, charge_point_id)
+        if not cp or not cp.tenant_id:
+            raise ValueError(f"Charge point tenant not found: {charge_point_id}")
+        message_key = unique_id or cls._message_key(action, payload)
+        query = db.query(OCPPMessageEvent).filter(
+            OCPPMessageEvent.tenant_id == cp.tenant_id,
+            OCPPMessageEvent.charge_point_id == cp.id,
+        )
+        if unique_id:
+            existing = query.filter(OCPPMessageEvent.unique_id == unique_id).first()
+        else:
+            existing = query.filter(
+                OCPPMessageEvent.action == action,
+                OCPPMessageEvent.message_key == message_key,
+            ).first()
+        if existing:
+            if existing.action != action or existing.payload != payload:
+                return existing, {
+                    "_ocpp_error": {
+                        "code": "ProtocolError",
+                        "description": "OCPP UniqueId was reused with a different action or payload",
+                        "details": {},
+                    }
+                }
+            if existing.processing_status == "completed" and existing.response_payload is not None:
+                return existing, dict(existing.response_payload)
+            return existing, {
+                "_ocpp_error": {
+                    "code": "InternalError",
+                    "description": "Original OCPP request is still processing",
+                    "details": {},
+                }
+            }
+
+        event = OCPPMessageEvent(
+            tenant_id=cp.tenant_id,
+            charge_point_id=cp.id,
+            action=action,
+            unique_id=unique_id,
+            message_key=message_key,
+            payload=payload,
+            processing_status="processing",
+        )
+        db.add(event)
+        db.flush()
+        return event, None
+
+    @staticmethod
+    def _complete_inbound_message(db: Session, event, response: Dict[str, Any]) -> None:
+        event.response_payload = response
+        event.response_message_type = 4 if response.get("_ocpp_error") else 3
+        event.processing_status = "completed"
+        event.outcome = response.get("_outcome") or (
+            "call_error" if response.get("_ocpp_error") else "processed"
+        )
+        event.processed_at = datetime.now(timezone.utc)
+        db.commit()
+
+    @staticmethod
+    def _allocate_transaction_id(db: Session, charge_point_id) -> int:
+        """Allocate a positive OCPP integer without wall-clock collisions."""
+        from app.database.models import ChargingSession
+
+        for _ in range(32):
+            candidate = (uuid.uuid4().int % 2_147_483_647) + 1
+            exists = db.query(ChargingSession.id).filter(
+                ChargingSession.charge_point_id == charge_point_id,
+                ChargingSession.transaction_id == candidate,
+            ).first()
+            if not exists:
+                return candidate
+        raise RuntimeError("Unable to allocate a unique OCPP transaction ID")
     
     def _verify_device_authentication(
         self,
@@ -313,7 +399,8 @@ class OCPPMessageHandler:
         else:
             should_close = False
         try:
-            from app.database.models import ChargingSession, ChargePoint
+            from app.database.models import ChargingSession, ChargePoint, EVSE
+            from app.services.alert_service import AlertService
             
             # 首先检查ChargePoint是否存在
             charge_point = get_charge_point_by_reference(db, charge_point_id)
@@ -346,6 +433,35 @@ class OCPPMessageHandler:
                 status=new_status,
                 previous_status=previous_status
             )
+
+            evse = db.query(EVSE).filter(
+                EVSE.charge_point_id == charge_point.id,
+                EVSE.evse_id == evse_id,
+            ).first()
+            if new_status == "Faulted":
+                AlertService.ensure_automatic_alert(
+                    db,
+                    tenant_id=charge_point.tenant_id,
+                    alert_type="faulted",
+                    severity="critical",
+                    title=f"充电桩 {charge_point.ocpp_identity} 故障",
+                    description=str(payload.get("info") or payload.get("errorCode") or "Faulted"),
+                    charge_point_id=charge_point.id,
+                    evse_id=evse.id if evse else None,
+                    metadata={
+                        "source": "StatusNotification",
+                        "error_code": payload.get("errorCode"),
+                        "vendor_error_code": payload.get("vendorErrorCode"),
+                    },
+                )
+            elif new_status in {"Available", "Preparing", "Charging", "SuspendedEV", "SuspendedEVSE"}:
+                AlertService.resolve_automatic_alerts(
+                    db,
+                    tenant_id=charge_point.tenant_id,
+                    charge_point_id=charge_point.id,
+                    alert_types=["faulted", "offline"],
+                    evse_id=evse.id if evse else None,
+                )
             
             # 如果状态变为Available，清理当前会话
             if new_status == "Available" and evse_status and evse_status.current_session_id:
@@ -386,14 +502,24 @@ class OCPPMessageHandler:
         else:
             should_close = False
         try:
-            from app.database.models import ChargingSession, ChargePoint, OCPPMessageEvent
+            from app.database.models import ChargePoint
 
-            if self._claim_inbound_message(db, charge_point_id, "StartTransaction", payload):
-                return {"transactionId": payload.get("transactionId", 0), "idTagInfo": {"status": "Accepted"}}
-            
-            transaction_id = payload.get("transactionId") or int(datetime.now().timestamp())
+            charge_point = get_charge_point_by_reference(db, charge_point_id)
+            if not charge_point:
+                raise ValueError(f"Charge point not found: {charge_point_id}")
+            transaction_id = self._allocate_transaction_id(db, charge_point.id)
             id_tag = str(payload.get("idTag", ""))
             meter_start = payload.get("meterStart", 0)
+            authorization = await self.handle_authorize(charge_point_id, {"idTag": id_tag})
+            auth_status = authorization["idTagInfo"]["status"]
+            if auth_status != "Accepted":
+                from app.api.v1.ocpp_control import mark_remote_start_finished
+                mark_remote_start_finished(charge_point.ocpp_identity, evse_id)
+                return {
+                    "transactionId": transaction_id,
+                    "idTagInfo": {"status": auth_status},
+                    "_outcome": "authorization_rejected",
+                }
             user_id = None
             # 爆改测试版：RemoteStart 使用 APP + UUID前17字符 作为 idTag (共20字符)
             # OCPP 1.6J 规定 idTag 最大长度为 20 个字符
@@ -428,26 +554,28 @@ class OCPPMessageHandler:
                 user_id=user_id,
                 meter_start=meter_start
             )
+            from app.api.v1.ocpp_control import mark_remote_start_finished
+            mark_remote_start_finished(charge_point.ocpp_identity, evse_id)
             
             logger.info(f"[{charge_point_id}] StartTransaction: transaction_id={transaction_id}, session_id={session.id}")
             
             return {
                 "transactionId": transaction_id,
-                "idTagInfo": {"status": "Accepted"}
+                "idTagInfo": {"status": "Accepted"},
+                "_outcome": "session_started",
             }
         except Exception as e:
             logger.error(f"[{charge_point_id}] StartTransaction处理错误: {e}", exc_info=True)
             if should_close:
                 db.rollback()
-            transaction_id = payload.get("transactionId", 0)
-            # 返回符合 OCPP 规范的错误格式
             return {
-                "transactionId": transaction_id,
+                "transactionId": self._allocate_transaction_id(
+                    db, get_charge_point_by_reference(db, charge_point_id).id
+                ) if get_charge_point_by_reference(db, charge_point_id) else 1,
                 "idTagInfo": {
                     "status": "Rejected"
                 },
-                "errorCode": "InternalError",
-                "errorDescription": str(e)
+                "_outcome": "session_rejected",
             }
         finally:
             if should_close:
@@ -466,9 +594,6 @@ class OCPPMessageHandler:
         else:
             should_close = False
         try:
-            if self._claim_inbound_message(db, charge_point_id, "StopTransaction", payload):
-                return {"idTagInfo": {"status": "Accepted"}}
-            
             transaction_id = payload.get("transactionId")
             meter_stop = payload.get("meterStop")
             
@@ -483,18 +608,20 @@ class OCPPMessageHandler:
             if session:
                 logger.info(f"[{charge_point_id}] StopTransaction: transaction_id={transaction_id}, session_id={session.id}")
                 return {
-                    "idTagInfo": {"status": "Accepted"}
+                    "idTagInfo": {"status": "Accepted"},
+                    "_outcome": "session_stopped",
                 }
             else:
                 logger.warning(f"[{charge_point_id}] StopTransaction: 未找到会话 transaction_id={transaction_id}")
                 return {
-                    "idTagInfo": {"status": "Accepted"}  # 即使没找到也返回Accepted
+                    "idTagInfo": {"status": "Invalid"},
+                    "_outcome": "orphan_ignored",
                 }
         except Exception as e:
             logger.error(f"[{charge_point_id}] StopTransaction处理错误: {e}", exc_info=True)
             if should_close:
                 db.rollback()
-            return {"idTagInfo": {"status": "Accepted"}}
+            return {"idTagInfo": {"status": "Invalid"}, "_outcome": "stop_rejected"}
         finally:
             if should_close:
                 db.close()
@@ -503,7 +630,8 @@ class OCPPMessageHandler:
         self,
         charge_point_id: str,
         payload: Dict[str, Any],
-        db: Optional[Session] = None
+        db: Optional[Session] = None,
+        message_unique_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """处理MeterValues消息"""
         if db is None:
@@ -513,9 +641,6 @@ class OCPPMessageHandler:
             should_close = False
         try:
             from app.database.models import ChargingSession
-            if self._claim_inbound_message(db, charge_point_id, "MeterValues", payload):
-                return {}
-            
             transaction_id = payload.get("transactionId")
             meter_value = payload.get("meterValue", [])
             
@@ -557,12 +682,16 @@ class OCPPMessageHandler:
                             value=value,
                             connector_id=connector_id,
                             sampled_value=sampled_values if sampled_values else None,
-                            idempotency_key=self._meter_idempotency_key(
-                                charge_point_id, transaction_id, mv, index
+                            idempotency_key=(
+                                f"ocpp:{message_unique_id}:{index}"
+                                if message_unique_id
+                                else self._meter_idempotency_key(
+                                    charge_point_id, transaction_id, mv, index
+                                )
                             ),
                         )
-            
-            return {}
+                    return {"_outcome": "meter_recorded"}
+            return {"_outcome": "orphan_ignored"}
         except Exception as e:
             logger.error(f"[{charge_point_id}] MeterValues处理错误: {e}", exc_info=True)
             if should_close:
@@ -588,37 +717,11 @@ class OCPPMessageHandler:
         }, sort_keys=True, separators=(",", ":"), default=str)
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
-    @classmethod
-    def _claim_inbound_message(cls, db: Session, charge_point_id: str, action: str, payload: Dict[str, Any]) -> bool:
-        """在当前领域事务中登记一条入站消息；返回 True 表示此前已处理。"""
-        from app.database.models import ChargePoint, OCPPMessageEvent
-
-        cp = get_charge_point_by_reference(db, charge_point_id)
-        if not cp or not cp.tenant_id:
-            raise ValueError(f"Charge point tenant not found: {charge_point_id}")
-        key = cls._message_key(action, payload)
-        existing = db.query(OCPPMessageEvent).filter(
-            OCPPMessageEvent.tenant_id == cp.tenant_id,
-            OCPPMessageEvent.charge_point_id == cp.id,
-            OCPPMessageEvent.action == action,
-            OCPPMessageEvent.message_key == key,
-        ).first()
-        if existing:
-            return True
-        db.add(OCPPMessageEvent(
-            tenant_id=cp.tenant_id,
-            charge_point_id=cp.id,
-            action=action,
-            message_key=key,
-            payload=payload,
-        ))
-        db.flush()
-        return False
-    
     async def handle_authorize(
         self,
         charge_point_id: str,
-        payload: Dict[str, Any]
+        payload: Dict[str, Any],
+        db: Optional[Session] = None,
     ) -> Dict[str, Any]:
         """处理Authorize消息"""
         id_tag = str(payload.get("idTag", ""))
@@ -631,7 +734,8 @@ class OCPPMessageHandler:
         action: str,
         payload: Dict[str, Any],
         device_serial_number: Optional[str] = None,
-        evse_id: int = 1
+        evse_id: int = 1,
+        message_unique_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """处理OCPP消息路由
         
@@ -648,22 +752,39 @@ class OCPPMessageHandler:
             "MeterValues": self.handle_meter_values,
         }
         
-        handler = handler_map.get(action)
-        if handler:
-            if action in ["BootNotification", "Heartbeat"]:
-                result = await handler(charge_point_id, payload, device_serial_number)
-            elif action == "StatusNotification":
-                result = await handler(charge_point_id, payload, evse_id)
-            elif action == "StartTransaction":
-                # StartTransaction 需要 evse_id 来关联正确的 EVSE
-                result = await handler(charge_point_id, payload, evse_id)
+        db = SessionLocal()
+        try:
+            event, replay = self._begin_inbound_message(
+                db, charge_point_id, action, payload, message_unique_id
+            )
+            if replay is not None:
+                return replay
+            handler = handler_map.get(action)
+            if not handler:
+                result = {
+                    "_ocpp_error": {
+                        "code": "NotSupported",
+                        "description": f"Unsupported OCPP action: {action}",
+                        "details": {},
+                    }
+                }
+            elif action in ["BootNotification", "Heartbeat"]:
+                result = await handler(charge_point_id, payload, device_serial_number, db)
+            elif action in ["StatusNotification", "StartTransaction"]:
+                result = await handler(charge_point_id, payload, evse_id, db)
+            elif action == "MeterValues":
+                result = await handler(
+                    charge_point_id, payload, db, message_unique_id=message_unique_id
+                )
             else:
-                result = await handler(charge_point_id, payload)
-            
+                result = await handler(charge_point_id, payload, db)
+            self._complete_inbound_message(db, event, result)
             return result
-        else:
-            logger.warning(f"[{charge_point_id}] 未知的OCPP动作: {action}")
-            return {}
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
 
 
 # 全局消息处理器实例

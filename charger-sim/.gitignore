@@ -1,0 +1,7 @@
+test_accounts.yml
+seed.sim-e2e.json
+reports/
+/out/
+*.local.yml
+__pycache__/
+*.py[cod]

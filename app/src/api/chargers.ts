@@ -7,6 +7,7 @@ import { API_ENDPOINTS } from '../constants/config';
 
 export interface Charger {
   id: string;
+  ocpp_identity?: string;
   vendor?: string;
   model?: string;
   site_name?: string;
@@ -32,7 +33,7 @@ export interface ChargerDetail extends Charger {
   rating?: number;
   description?: string;
   connectors?: Array<{
-    id: number;
+    id: string;
     connector_id: number;
     status: string;
     power_kw?: number | null;
@@ -120,7 +121,7 @@ export const chargersToGeoJSON = (chargers: Charger[]) => {
         },
         properties: {
           id: charger.id,
-          name: charger.site_name || `Charger ${charger.id}`,
+          name: charger.site_name || charger.ocpp_identity || 'Charger',
           address: charger.site_address || '',
           status: charger.status,
           price: charger.price_per_kwh || 0,

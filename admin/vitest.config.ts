@@ -7,6 +7,9 @@ export default defineConfig({
   test: {
     globals: true,
     environment: 'jsdom',
+    // Node 25 exposes a process-global localStorage that conflicts with Vitest's jsdom bridge.
+    // Disable only Node's server-side implementation so workers use origin-scoped jsdom storage.
+    execArgv: ['--no-experimental-webstorage'],
     setupFiles: ['./vitest.setup.ts'],
     coverage: {
       provider: 'v8',
@@ -25,6 +28,7 @@ export default defineConfig({
     // 解决 jsdom localStorage 问题
     environmentOptions: {
       jsdom: {
+        url: 'http://localhost:3000',
         resources: 'usable',
       },
     },

@@ -134,6 +134,14 @@ export const API_ENDPOINTS = {
     DETAIL: (id: string) => `/api/v1/app/chargers/${id}`,
     NEARBY: '/api/v1/app/chargers', // 使用相同的端点，通过参数传递位置
   },
+  SITES: {
+    LIST: '/api/v1/app/sites',
+    DETAIL: (id: string) => `/api/v1/app/sites/${id}`,
+  },
+  FAVORITES: {
+    LIST: '/api/v1/app/favorites',
+    DETAIL: (siteId: string) => `/api/v1/app/favorites/${siteId}`,
+  },
   // 订单相关
   ORDERS: {
     LIST: '/api/v1/orders',
@@ -168,7 +176,7 @@ export const API_ENDPOINTS = {
   // 充电记录（订单记录）
   TRANSACTIONS: {
     LIST: '/api/v1/app/transactions',
-    DETAIL: (id: number) => `/api/v1/app/transactions/${id}`,
+    DETAIL: (id: string) => `/api/v1/app/transactions/${id}`,
   },
 } as const;
 
@@ -239,27 +247,27 @@ function resolveMercadoPagoPublicKey(): string {
 
 // 应用主题色
 export const COLORS = {
-  PRIMARY: '#087F5B',
-  PRIMARY_DARK: '#066B4D',
-  PRIMARY_SOFT: '#E8F5EF',
-  SECONDARY: '#4263EB',
-  SUCCESS: '#087F5B',
+  PRIMARY: '#0876BE',
+  PRIMARY_DARK: '#07598F',
+  PRIMARY_SOFT: '#E7F7FC',
+  SECONDARY: '#22C7D4',
+  SUCCESS: '#0F956B',
   WARNING: '#B86500',
   ERROR: '#C92A2A',
-  BACKGROUND: '#F7F8F6',
+  BACKGROUND: '#F5FAFD',
   CARD_BG: '#FFFFFF',
-  TEXT_PRIMARY: '#17211B',
-  TEXT_SECONDARY: '#68736C',
-  TEXT_TERTIARY: '#919A94',
-  BORDER: '#E3E7E3',
-  DISABLED: '#CDD3CE',
+  TEXT_PRIMARY: '#102A43',
+  TEXT_SECONDARY: '#5B7083',
+  TEXT_TERTIARY: '#8799A8',
+  BORDER: '#D8E7F0',
+  DISABLED: '#B8C8D3',
   // iOS 风格颜色
   // 注意：IOS_BLUE 曾是 iOS 系统蓝，历史上与品牌绿色 PRIMARY 混用导致全局配色不一致。
   // 统一为品牌主色，使 Button/TabBar 等系统级交互色与各页面自绘按钮保持一致。
-  IOS_BLUE: '#087F5B',
-  IOS_GRAY: '#7B857E',
-  IOS_LIGHT_GRAY: '#F1F3F1',
-  IOS_SEPARATOR: '#E3E7E3',
+  IOS_BLUE: '#0876BE',
+  IOS_GRAY: '#6F8292',
+  IOS_LIGHT_GRAY: '#EEF6FA',
+  IOS_SEPARATOR: '#D8E7F0',
   IOS_WHITE: '#FFFFFF',
   IOS_BLACK: '#000000',
 } as const;

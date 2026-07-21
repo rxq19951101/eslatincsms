@@ -18,17 +18,21 @@ interface GoogleMapViewProps {
 const DEFAULT_MAP_ID = 'DEMO_MAP_ID';
 
 type MarkerPoint = { lat: number; lng: number; title?: string };
+const DEFAULT_CENTER = { lat: 4.6097, lng: -74.0817 };
+const EMPTY_MARKERS: MarkerPoint[] = [];
 
 export default function GoogleMapView(props: GoogleMapViewProps) {
   const {
-    center = { lat: 4.6097, lng: -74.0817 },
-    markers = [],
+    center = DEFAULT_CENTER,
+    markers = EMPTY_MARKERS,
     onClick,
     height = '400px',
     zoom = 13,
     disableInteraction = false
   } = props;
   const { locale, t } = useI18n();
+  const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
+  const configurationError = apiKey ? null : t('Google Maps API 密钥未配置');
 
   const mapRef = useRef<HTMLDivElement>(null);
   const googleMapRef = useRef<google.maps.Map | null>(null);
@@ -90,14 +94,7 @@ export default function GoogleMapView(props: GoogleMapViewProps) {
   useEffect(() => {
     if (googleMapRef.current) return;
     if (mapInitStartedRef.current) return;
-    if (!center) return;
-
-    const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
-    if (!apiKey) {
-      setError(t('Google Maps API 密钥未配置'));
-      setLoading(false);
-      return;
-    }
+    if (!apiKey) return;
 
     mapInitStartedRef.current = true;
 
@@ -150,14 +147,13 @@ export default function GoogleMapView(props: GoogleMapViewProps) {
         setError(t('地图加载失败，请检查网络连接、项目结算账号以及 Maps JavaScript API 是否启用'));
         setLoading(false);
       });
-    // markers / zoom 变更由下方 effect 处理，勿写入依赖以免重复初始化地图
-  }, [center?.lat, center?.lng, onClick, disableInteraction, clearAndAddMarkers, mapId, locale]);
+  }, [apiKey, center, markers, zoom, onClick, disableInteraction, clearAndAddMarkers, mapId, locale, t]);
 
   useEffect(() => {
     if (googleMapRef.current && center) {
       googleMapRef.current.setCenter(center);
     }
-  }, [center?.lat, center?.lng]);
+  }, [center]);
 
   useEffect(() => {
     if (googleMapRef.current) {
@@ -185,14 +181,16 @@ export default function GoogleMapView(props: GoogleMapViewProps) {
     void clearAndAddMarkers(map, markers);
   }, [markers, clearAndAddMarkers]);
 
-  if (error) {
+  const displayError = configurationError || error;
+
+  if (displayError) {
     return (
       <div
         className="flex items-center justify-center bg-slate-800/50 border border-slate-700 rounded-md"
         style={{ height }}
       >
         <div className="text-center">
-          <p className="text-red-400 text-sm">{error}</p>
+          <p className="text-red-400 text-sm">{displayError}</p>
         </div>
       </div>
     );

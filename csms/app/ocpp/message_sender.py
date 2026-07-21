@@ -1,5 +1,6 @@
 """WebSocket-only OCPP message sender."""
 
+import asyncio
 from typing import Dict, Any
 from fastapi import HTTPException
 from app.core.logging_config import get_logger
@@ -20,9 +21,19 @@ class OCPPMessageSender:
                 timeout=timeout,
             )
             return {"success": True, "data": result, "transport": "WebSocket"}
+        except ConnectionError as exc:
+            logger.error("WebSocket OCPP send failed: charger=%s action=%s error=%s", charger_id, action, exc)
+            if isinstance(exc.__cause__, asyncio.TimeoutError) or "timed out" in str(exc).lower():
+                timeout_error = HTTPException(
+                    status_code=504,
+                    detail=f"Timed out waiting for {action} response",
+                )
+                timeout_error.error_code = "OCPP_RESPONSE_TIMEOUT"
+                raise timeout_error from exc
+            raise HTTPException(status_code=502, detail="WebSocket OCPP request failed") from exc
         except Exception as exc:
             logger.error("WebSocket OCPP send failed: charger=%s action=%s error=%s", charger_id, action, exc)
-            raise HTTPException(status_code=502, detail="WebSocket OCPP request failed")
+            raise HTTPException(status_code=502, detail="WebSocket OCPP request failed") from exc
 
 
 message_sender = OCPPMessageSender()

@@ -12,11 +12,14 @@ interface GooglePlacesAutocompleteProps {
   placeholder?: string;
   disabled?: boolean;
   className?: string;
+  inputTestId?: string;
 }
 
 export default function GooglePlacesAutocomplete(props: GooglePlacesAutocompleteProps) {
-  const { value, onChange, onSelect, placeholder, disabled, className } = props;
+  const { value, onChange, onSelect, placeholder, disabled, className, inputTestId } = props;
   const { t, locale } = useI18n();
+  const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
+  const configurationError = apiKey ? null : t('Google Maps API 密钥未配置');
 
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -33,11 +36,7 @@ export default function GooglePlacesAutocomplete(props: GooglePlacesAutocomplete
 
   // 初始化 Google Maps API
   useEffect(() => {
-    const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
-    if (!apiKey) {
-      setError(t('Google Maps API 密钥未配置'));
-      return;
-    }
+    if (!apiKey) return;
 
     const loader = new Loader({
       apiKey,
@@ -61,7 +60,7 @@ export default function GooglePlacesAutocomplete(props: GooglePlacesAutocomplete
         console.error('Google Maps API 加载失败:', err);
         setError(t('地图服务加载失败'));
       });
-  }, [locale, t]);
+  }, [apiKey, locale, t]);
 
   // 点击外部关闭下拉框
   useEffect(() => {
@@ -76,19 +75,13 @@ export default function GooglePlacesAutocomplete(props: GooglePlacesAutocomplete
 
   // Debounce + Session Token 实现
   useEffect(() => {
-    setError(null);
-
     // 清除上一个定时器
     if (debounceTimer.current) {
       clearTimeout(debounceTimer.current);
     }
 
     const trimmed = value.trim();
-    if (trimmed.length < 3) {
-      setItems([]);
-      setOpen(false);
-      return;
-    }
+    if (trimmed.length < 3) return;
 
     // 防抖：300ms 延迟
     debounceTimer.current = setTimeout(() => {
@@ -135,7 +128,7 @@ export default function GooglePlacesAutocomplete(props: GooglePlacesAutocomplete
         clearTimeout(debounceTimer.current);
       }
     };
-  }, [value]);
+  }, [value, t]);
 
   // 用户选中某个建议
   const handleSelect = (prediction: google.maps.places.AutocompletePrediction) => {
@@ -177,8 +170,13 @@ export default function GooglePlacesAutocomplete(props: GooglePlacesAutocomplete
   return (
     <div ref={rootRef} className="relative">
       <Input
+        data-testid={inputTestId}
         value={value}
-        onChange={(e) => onChange(e.target.value)}
+        onChange={(e) => {
+          setError(null);
+          setOpen(false);
+          onChange(e.target.value);
+        }}
         onFocus={() => items.length > 0 && setOpen(true)}
         placeholder={placeholder}
         disabled={disabled}
@@ -191,7 +189,9 @@ export default function GooglePlacesAutocomplete(props: GooglePlacesAutocomplete
         </div>
       )}
 
-      {error && <div className="mt-2 text-xs text-red-300">{error}</div>}
+      {(configurationError || error) && (
+        <div className="mt-2 text-xs text-red-300">{configurationError || error}</div>
+      )}
 
       {open && items.length > 0 && (
         <div className="absolute z-50 mt-2 w-full rounded-md border border-slate-700 bg-slate-900 shadow-lg max-h-[280px] overflow-auto">

@@ -17,11 +17,32 @@ export class ApiRequestError extends Error {
   constructor(
     message: string,
     public readonly status: number,
-    public readonly fieldErrors: Record<string, string> = {}
+    public readonly fieldErrors: Record<string, string> = {},
+    public readonly retryAfterMs?: number
   ) {
     super(message);
     this.name = 'ApiRequestError';
   }
+}
+
+const rateLimitedUntilByBucket = new Map<string, number>();
+
+function requestBucket(endpoint: string): string {
+  const path = endpoint.startsWith('http') ? new URL(endpoint).pathname : endpoint.split('?')[0];
+  const prefixes = [
+    '/api/v1/dashboard',
+    '/api/v1/admin',
+    '/api/v1/sites',
+  ];
+  return prefixes.find((prefix) => path.startsWith(prefix)) ?? '/api/v1';
+}
+
+function parseRetryAfterMs(value: string | null): number {
+  if (!value) return 30000;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds)) return Math.max(1000, seconds * 1000);
+  const date = Date.parse(value);
+  return Number.isFinite(date) ? Math.max(1000, date - Date.now()) : 30000;
 }
 
 function parseFieldErrors(details: unknown): Record<string, string> {
@@ -101,7 +122,7 @@ async function refreshAccessToken(): Promise<boolean> {
 /**
  * 统一的 API 请求函数
  */
-export async function apiRequest<T = any>(
+export async function apiRequest<T = unknown>(
   endpoint: string,
   config: RequestConfig = {}
 ): Promise<T> {
@@ -115,6 +136,18 @@ export async function apiRequest<T = any>(
 
   // 构建完整 URL
   const url = endpoint.startsWith('http') ? endpoint : `${API_BASE_URL}${endpoint}`;
+  const rateLimitBucket = requestBucket(endpoint);
+  const rateLimitedUntil = rateLimitedUntilByBucket.get(rateLimitBucket) ?? 0;
+
+  // 后端明确要求退避时，在浏览器内共享冷却窗口，避免多个 SWR 请求继续冲击服务。
+  if (Date.now() < rateLimitedUntil) {
+    throw new ApiRequestError(
+      'Rate limit exceeded',
+      429,
+      {},
+      rateLimitedUntil - Date.now()
+    );
+  }
 
   // 构建请求头（使用 Record 类型以便动态添加属性）
   const requestHeaders: Record<string, string> = {
@@ -187,6 +220,15 @@ export async function apiRequest<T = any>(
 
     // 处理其他错误
     if (!response.ok) {
+      const retryAfterMs = response.status === 429
+        ? parseRetryAfterMs(response.headers.get('retry-after'))
+        : undefined;
+      if (retryAfterMs) {
+        rateLimitedUntilByBucket.set(
+          rateLimitBucket,
+          Math.max(rateLimitedUntil, Date.now() + retryAfterMs)
+        );
+      }
       let errorData: {
         success?: boolean;
         detail?: unknown;
@@ -222,7 +264,8 @@ export async function apiRequest<T = any>(
       throw new ApiRequestError(
         envelopeMessage || topLevelMessage || legacyDetail || nestedDetail || fallback,
         response.status,
-        parseFieldErrors(validationDetails)
+        parseFieldErrors(validationDetails),
+        retryAfterMs
       );
     }
 
@@ -244,14 +287,14 @@ export async function apiRequest<T = any>(
 /**
  * GET 请求
  */
-export function apiGet<T = any>(endpoint: string, config?: RequestConfig): Promise<T> {
+export function apiGet<T = unknown>(endpoint: string, config?: RequestConfig): Promise<T> {
   return apiRequest<T>(endpoint, { ...config, method: 'GET' });
 }
 
 /**
  * POST 请求
  */
-export function apiPost<T = any>(
+export function apiPost<T = unknown>(
   endpoint: string,
   data?: unknown,
   config?: RequestConfig
@@ -266,7 +309,7 @@ export function apiPost<T = any>(
 /**
  * PUT 请求
  */
-export function apiPut<T = any>(
+export function apiPut<T = unknown>(
   endpoint: string,
   data?: unknown,
   config?: RequestConfig
@@ -281,14 +324,14 @@ export function apiPut<T = any>(
 /**
  * DELETE 请求
  */
-export function apiDelete<T = any>(endpoint: string, config?: RequestConfig): Promise<T> {
+export function apiDelete<T = unknown>(endpoint: string, config?: RequestConfig): Promise<T> {
   return apiRequest<T>(endpoint, { ...config, method: 'DELETE' });
 }
 
 /**
  * PATCH 请求
  */
-export function apiPatch<T = any>(
+export function apiPatch<T = unknown>(
   endpoint: string,
   data?: unknown,
   config?: RequestConfig

@@ -3,8 +3,5 @@ ocpp==0.26.0
 qrcode[pil]==7.4.2
 PyYAML==6.0.2
 requests==2.31.0
-# HTTP 客户端（用于支付 API 调用）
+# HTTP client for Admin/App/local fake-payment scenario actors
 httpx==0.27.2
-# Mercado Pago SDK（用于支付测试）
-mercadopago==2.2.0
-

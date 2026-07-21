@@ -5,6 +5,7 @@
 import { createAsyncThunk, createSlice, PayloadAction } from '@reduxjs/toolkit';
 import type { ChargingRecord, ChargingRecordDetail } from '../../api/transactions';
 import { getChargingRecordDetail, getChargingRecords } from '../../api/transactions';
+import { handleApiError } from '../../api/client';
 
 export interface TransactionsState {
   items: ChargingRecord[];
@@ -23,7 +24,7 @@ const initialState: TransactionsState = {
 };
 
 function extractErrorMessage(e: any, fallback: string) {
-  return e?.response?.data?.detail || e?.response?.data?.message || e?.message || fallback;
+  return handleApiError(e).message || fallback;
 }
 
 export const fetchChargingRecords = createAsyncThunk(
@@ -39,7 +40,7 @@ export const fetchChargingRecords = createAsyncThunk(
 
 export const fetchChargingRecordDetail = createAsyncThunk(
   'transactions/fetchDetail',
-  async (id: number, { rejectWithValue }) => {
+  async (id: string, { rejectWithValue }) => {
     try {
       return await getChargingRecordDetail(id);
     } catch (e: any) {

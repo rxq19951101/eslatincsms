@@ -83,19 +83,79 @@ def test_site_write_validation_and_uuid_boundary(admin_client, db_session):
     assert site.address == "Carrera 7 # 72-41"
 
 
-def test_charge_point_identity_validation_and_conflict(admin_client, sample_site):
+def test_charge_point_identity_validation_and_conflict(admin_client, db_session, sample_site):
     endpoint = f"/api/v1/sites/{sample_site.id}/charge-points"
     for identity in ("", "with space", "bad/identity", "x" * 65, "中文"):
-        response = admin_client.post(endpoint, json={"id": identity, "connector_count": 1})
+        response = admin_client.post(
+            endpoint,
+            json={"id": identity, "display_code": "A01", "connector_count": 1},
+        )
         assert response.status_code == 422
 
-    payload = {"id": "CP.demo_01:west", "connector_count": 1}
+    for display_code in ("1A", "A_01", "A.01", "A:01", "A" * 17):
+        response = admin_client.post(
+            endpoint,
+            json={"id": "CP-DISPLAY-VALIDATION", "display_code": display_code},
+        )
+        assert response.status_code == 422
+
+    for field, value in (("display_name", "N" * 81), ("location_hint", "L" * 161)):
+        response = admin_client.post(
+            endpoint,
+            json={"id": "CP-LABEL-LENGTH", "display_code": "A01", field: value},
+        )
+        assert response.status_code == 422
+
+    unsupported_connector = admin_client.post(
+        endpoint,
+        json={
+            "id": "CP-UNSUPPORTED-CONNECTOR",
+            "display_code": "A02",
+            "connector_type": "Type1",
+        },
+    )
+    assert unsupported_connector.status_code == 422
+
+    payload = {
+        "id": "CP.demo_01:west",
+        "display_code": " a01 ",
+        "display_name": "  North entrance  ",
+        "location_hint": "  P2 / bay 42  ",
+        "connector_count": 1,
+    }
     with patch("app.services.qr_service.generate_qr_code", return_value=Path("/tmp/test-qr.png")):
         first = admin_client.post(endpoint, json=payload)
     assert first.status_code == 201
     uuid.UUID(first.json()["id"])
     assert first.json()["ocpp_identity"] == payload["id"]
+    assert first.json()["display_code"] == "A01"
+    assert first.json()["display_name"] == "North entrance"
+    assert first.json()["location_hint"] == "P2 / bay 42"
+    assert first.json()["evses"][0]["physical_reference"] == "A01-1"
     assert admin_client.post(endpoint, json=payload).status_code == 409
+
+    same_site_duplicate = admin_client.post(
+        endpoint,
+        json={"id": "CP.demo_02:west", "display_code": "a01", "connector_count": 1},
+    )
+    assert same_site_duplicate.status_code == 409
+
+    other_site = Site(
+        tenant_id=sample_site.tenant_id,
+        name="Second display-code site",
+        address="Carrera 7 # 72-41, Bogotá",
+        latitude=4.658,
+        longitude=-74.056,
+        is_active=True,
+    )
+    db_session.add(other_site)
+    db_session.commit()
+    with patch("app.services.qr_service.generate_qr_code", return_value=Path("/tmp/test-qr.png")):
+        cross_site = admin_client.post(
+            f"/api/v1/sites/{other_site.id}/charge-points",
+            json={"id": "CP.demo_03:west", "display_code": "A01", "connector_count": 1},
+        )
+    assert cross_site.status_code == 201
 
 
 def _create_non_privileged_admin(db_session, tenant):
@@ -118,6 +178,61 @@ def _create_non_privileged_admin(db_session, tenant):
     db_session.add(TenantMembershipRole(membership_id=membership.id, role_id=role.id))
     db_session.commit()
     return admin
+
+
+def test_readonly_admin_cannot_create_site(client, db_session, sample_tenant):
+    readonly = AdminUser(
+        id=uuid.uuid4(),
+        username="site-readonly",
+        email="site-readonly@example.com",
+        password_hash=get_password_hash("test-password"),
+        is_active=True,
+        is_super_admin=False,
+    )
+    membership = TenantMembership(
+        id=uuid.uuid4(),
+        tenant_id=sample_tenant.id,
+        admin_user_id=readonly.id,
+        is_primary=True,
+        status="active",
+    )
+    role = Role(
+        id=uuid.uuid4(),
+        tenant_id=sample_tenant.id,
+        name="site-readonly",
+        permissions=["sites.read"],
+        scope="tenant",
+    )
+    db_session.add_all([readonly, membership, role])
+    db_session.flush()
+    db_session.add(TenantMembershipRole(membership_id=membership.id, role_id=role.id))
+    db_session.commit()
+
+    token = create_access_token({
+        "user_id": str(readonly.id),
+        "user_type": "admin",
+        "aud": "admin",
+    })
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "X-Tenant-Id": str(sample_tenant.id),
+    }
+    before = db_session.query(Site).count()
+    readable = client.get("/api/v1/sites", headers=headers)
+    denied = client.post(
+        "/api/v1/sites",
+        headers=headers,
+        json={
+            "name": "Forbidden Site",
+            "address": "Valid address Bogota",
+            "latitude": 4.6,
+            "longitude": -74.1,
+        },
+    )
+
+    assert readable.status_code == 200
+    assert denied.status_code == 403
+    assert db_session.query(Site).count() == before
 
 
 def test_remote_control_auth_permission_tenant_and_real_transaction(

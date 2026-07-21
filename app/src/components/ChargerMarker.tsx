@@ -6,6 +6,7 @@ import React from 'react';
 import { View, Text, StyleSheet, Platform } from 'react-native';
 import { MAP_CONFIG } from '../constants/config';
 import { Charger } from '../api/chargers';
+import Icon from './ui/Icon';
 
 // 仅在非Web平台导入Mapbox GL
 let MapboxGL: any = null;
@@ -53,7 +54,7 @@ const ChargerMarker: React.FC<ChargerMarkerProps> = ({ charger, onPress }) => {
     >
       <View style={styles.markerContainer}>
         <View style={[styles.marker, { backgroundColor: markerColor }]}>
-          <Text style={styles.markerIcon}>⚡</Text>
+          <Icon name="flash" size={20} color="#FFFFFF" />
         </View>
         {charger.available_connectors !== undefined && (
           <View style={[styles.badge, { backgroundColor: markerColor }]}>
@@ -226,10 +227,6 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.3,
     shadowRadius: 3,
     elevation: 5,
-  },
-  markerIcon: {
-    fontSize: 20,
-    color: '#FFFFFF',
   },
   badge: {
     position: 'absolute',

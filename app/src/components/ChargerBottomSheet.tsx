@@ -14,6 +14,10 @@ import {
 } from 'react-native';
 import { COLORS } from '../constants/config';
 import { ChargerDetail } from '../api/chargers';
+import { useI18n } from '../i18n';
+import { localizeStatus } from '../utils/localizeStatus';
+import { formatDateTime, publicChargerIdentity } from '../utils/localizedDisplay';
+import Icon from './ui/Icon';
 
 const { height: SCREEN_HEIGHT } = Dimensions.get('window');
 
@@ -32,6 +36,7 @@ const ChargerBottomSheet: React.FC<ChargerBottomSheetProps> = ({
   onNavigate,
   onStartCharging,
 }) => {
+  const { t, locale } = useI18n();
   if (!charger) return null;
 
   const isAvailable = (charger.available_connectors || 0) > 0;
@@ -64,10 +69,10 @@ const ChargerBottomSheet: React.FC<ChargerBottomSheetProps> = ({
               <View style={styles.header}>
                 <View style={styles.headerTop}>
                   <Text style={styles.title}>
-                    {charger.site_name || `充电站 ${charger.id}`}
+                    {charger.site_name || t.home.stationFallback.replace('{id}', publicChargerIdentity(charger, t.common.unknown))}
                   </Text>
                   <View style={[styles.statusBadge, { backgroundColor: statusColor }]}>
-                    <Text style={styles.statusText}>{charger.status}</Text>
+                    <Text style={styles.statusText}>{localizeStatus(charger.status, t)}</Text>
                   </View>
                 </View>
                 
@@ -79,70 +84,70 @@ const ChargerBottomSheet: React.FC<ChargerBottomSheetProps> = ({
               {/* Stats Grid */}
               <View style={styles.statsGrid}>
                 <View style={styles.statItem}>
-                  <Text style={styles.statIcon}>⚡</Text>
+                  <Icon name="flash-outline" size={24} color={COLORS.PRIMARY} style={styles.statIcon} />
                   <Text style={styles.statValue}>
                     {charger.available_connectors || 0}/{charger.total_connectors || 0}
                   </Text>
-                  <Text style={styles.statLabel}>可用接口</Text>
+                  <Text style={styles.statLabel}>{t.station.connectors}</Text>
                 </View>
 
                 {charger.price_per_kwh && (
                   <View style={styles.statItem}>
-                    <Text style={styles.statIcon}>💵</Text>
+                    <Icon name="cash-outline" size={24} color={COLORS.PRIMARY} style={styles.statIcon} />
                     <Text style={styles.statValue}>
                       ${charger.price_per_kwh.toFixed(2)}
                     </Text>
-                    <Text style={styles.statLabel}>每度电</Text>
+                    <Text style={styles.statLabel}>{t.station.perKwh}</Text>
                   </View>
                 )}
 
                 {charger.charging_rate && (
                   <View style={styles.statItem}>
-                    <Text style={styles.statIcon}>⚡</Text>
+                    <Icon name="speedometer-outline" size={24} color={COLORS.PRIMARY} style={styles.statIcon} />
                     <Text style={styles.statValue}>{charger.charging_rate}kW</Text>
-                    <Text style={styles.statLabel}>充电功率</Text>
+                    <Text style={styles.statLabel}>{t.station.power}</Text>
                   </View>
                 )}
 
                 {charger.rating && (
                   <View style={styles.statItem}>
-                    <Text style={styles.statIcon}>⭐</Text>
+                    <Icon name="star-outline" size={24} color={COLORS.PRIMARY} style={styles.statIcon} />
                     <Text style={styles.statValue}>{charger.rating.toFixed(1)}</Text>
-                    <Text style={styles.statLabel}>评分</Text>
+                    <Text style={styles.statLabel}>{t.station.rating}</Text>
                   </View>
                 )}
               </View>
 
               {/* Details */}
               <View style={styles.detailsSection}>
-                <Text style={styles.sectionTitle}>详细信息</Text>
+                <Text style={styles.sectionTitle}>{t.station.details}</Text>
                 
                 {charger.vendor && (
                   <View style={styles.detailRow}>
-                    <Text style={styles.detailLabel}>制造商</Text>
+                    <Text style={styles.detailLabel}>{t.station.vendor}</Text>
                     <Text style={styles.detailValue}>{charger.vendor}</Text>
                   </View>
                 )}
 
                 {charger.model && (
                   <View style={styles.detailRow}>
-                    <Text style={styles.detailLabel}>型号</Text>
+                    <Text style={styles.detailLabel}>{t.station.model}</Text>
                     <Text style={styles.detailValue}>{charger.model}</Text>
                   </View>
                 )}
 
                 {charger.connector_type && (
                   <View style={styles.detailRow}>
-                    <Text style={styles.detailLabel}>接口类型</Text>
+                    <Text style={styles.detailLabel}>{t.station.connectorType}</Text>
                     <Text style={styles.detailValue}>{charger.connector_type}</Text>
                   </View>
                 )}
 
                 {charger.last_seen && (
                   <View style={styles.detailRow}>
-                    <Text style={styles.detailLabel}>最后在线</Text>
+                    <Text style={styles.detailLabel}>{t.station.lastOnline}</Text>
                     <Text style={styles.detailValue}>
-                      {new Date(charger.last_seen).toLocaleString('zh-CN')}
+                      {formatDateTime(charger.last_seen, locale)}
                     </Text>
                   </View>
                 )}
@@ -151,7 +156,7 @@ const ChargerBottomSheet: React.FC<ChargerBottomSheetProps> = ({
               {/* Description */}
               {charger.description && (
                 <View style={styles.descriptionSection}>
-                  <Text style={styles.sectionTitle}>说明</Text>
+                  <Text style={styles.sectionTitle}>{t.station.description}</Text>
                   <Text style={styles.description}>{charger.description}</Text>
                 </View>
               )}
@@ -164,7 +169,8 @@ const ChargerBottomSheet: React.FC<ChargerBottomSheetProps> = ({
                   style={[styles.actionButton, styles.navigationButton]}
                   onPress={() => onNavigate(charger)}
                 >
-                  <Text style={styles.navigationButtonText}>📍 导航</Text>
+                  <Icon name="navigate-outline" size={18} color="#FFFFFF" style={styles.actionIcon} />
+                  <Text style={styles.navigationButtonText}>{t.station.navigate}</Text>
                 </TouchableOpacity>
               )}
 
@@ -173,13 +179,14 @@ const ChargerBottomSheet: React.FC<ChargerBottomSheetProps> = ({
                   style={[styles.actionButton, styles.chargeButton]}
                   onPress={() => onStartCharging(charger)}
                 >
-                  <Text style={styles.chargeButtonText}>⚡ 开始充电</Text>
+                  <Icon name="flash-outline" size={18} color="#FFFFFF" style={styles.actionIcon} />
+                  <Text style={styles.chargeButtonText}>{t.station.startCharge}</Text>
                 </TouchableOpacity>
               )}
 
               {!isAvailable && (
                 <View style={[styles.actionButton, styles.disabledButton]}>
-                  <Text style={styles.disabledButtonText}>暂无可用接口</Text>
+                  <Text style={styles.disabledButtonText}>{t.station.noAvailable}</Text>
                 </View>
               )}
             </View>
@@ -260,7 +267,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   statIcon: {
-    fontSize: 24,
     marginBottom: 6,
   },
   statValue: {
@@ -317,6 +323,11 @@ const styles = StyleSheet.create({
     paddingVertical: 14,
     borderRadius: 12,
     alignItems: 'center',
+    justifyContent: 'center',
+    flexDirection: 'row',
+  },
+  actionIcon: {
+    marginRight: 8,
   },
   // 兼容 RN Web / 旧 RN：不用 gap，改用按钮自身 margin
   navigationButton: {

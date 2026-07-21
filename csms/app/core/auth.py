@@ -5,8 +5,11 @@
 
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any
+import base64
+import bcrypt
+import hashlib
+import re
 from jose import JWTError, jwt
-from passlib.context import CryptContext
 from fastapi import Security, HTTPException, status, Depends, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from app.core.config import get_settings
@@ -14,33 +17,63 @@ import uuid
 
 settings = get_settings()
 
-# 密码加密上下文
-# 修复 bcrypt 版本兼容性问题：抑制 passlib 的警告，并使用兼容的配置
-import logging
-logging.getLogger('passlib').setLevel(logging.ERROR)  # 抑制 passlib 警告
-
-try:
-    pwd_context = CryptContext(schemes=["bcrypt", "pbkdf2_sha256"], deprecated="auto")
-    # 尝试进行一次哈希测试以检测兼容性问题（使用短密码避免bug检测）
-    _test_hash = pwd_context.hash("test")
-except (AttributeError, ValueError, TypeError) as e:
-    # bcrypt 版本不兼容，使用 pbkdf2_sha256 作为后备方案
-    logger = logging.getLogger(__name__)
-    logger.warning(f"bcrypt 不可用，使用备用方案: {e}")
-    pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
+BCRYPT_SHA256_SCHEME = "$csms-bcrypt-sha256$v=1$"
+PASSWORD_MAX_CHARACTERS = 128
+BCRYPT_LEGACY_MAX_BYTES = 72
+BCRYPT_ROUNDS = 12
+LEGACY_BCRYPT_PATTERN = re.compile(r"^\$2[aby]\$\d{2}\$[./A-Za-z0-9]{53}$")
 
 # HTTP Bearer认证
 security = HTTPBearer(auto_error=False)
 
 
+def _password_prehash(password: str) -> bytes:
+    """Pre-hash a bounded Unicode password to a fixed bcrypt-safe value."""
+    if not isinstance(password, str):
+        raise ValueError("Password must be a string")
+    if not password:
+        raise ValueError("Password must not be empty")
+    if len(password) > PASSWORD_MAX_CHARACTERS:
+        raise ValueError(
+            f"Password must be at most {PASSWORD_MAX_CHARACTERS} characters"
+        )
+    digest = hashlib.sha256(password.encode("utf-8")).digest()
+    return base64.b64encode(digest)
+
+
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """验证密码"""
-    return pwd_context.verify(plain_password, hashed_password)
+    """Verify a bcrypt password; malformed input is an authentication failure."""
+    try:
+        if not isinstance(hashed_password, str):
+            return False
+
+        if LEGACY_BCRYPT_PATTERN.fullmatch(hashed_password):
+            if not isinstance(plain_password, str) or not plain_password:
+                return False
+            legacy_password = plain_password.encode("utf-8")
+            if len(legacy_password) > BCRYPT_LEGACY_MAX_BYTES:
+                return False
+            return bcrypt.checkpw(legacy_password, hashed_password.encode("ascii"))
+
+        if not hashed_password.startswith(BCRYPT_SHA256_SCHEME):
+            return False
+        password_prehash = _password_prehash(plain_password)
+        bcrypt_payload = hashed_password[len(BCRYPT_SHA256_SCHEME):]
+        if not bcrypt_payload:
+            return False
+        bcrypt_hash = f"${bcrypt_payload}".encode("ascii")
+        return bcrypt.checkpw(password_prehash, bcrypt_hash)
+    except (TypeError, ValueError, UnicodeError):
+        return False
 
 
 def get_password_hash(password: str) -> str:
-    """生成密码哈希"""
-    return pwd_context.hash(password)
+    """Hash a password using the versioned CSMS bcrypt-SHA256 scheme."""
+    bcrypt_hash = bcrypt.hashpw(
+        _password_prehash(password),
+        bcrypt.gensalt(rounds=BCRYPT_ROUNDS),
+    ).decode("ascii")
+    return f"{BCRYPT_SHA256_SCHEME}{bcrypt_hash.removeprefix('$')}"
 
 
 def create_access_token(

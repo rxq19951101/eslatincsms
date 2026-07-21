@@ -10,28 +10,43 @@ import { useAuthStore } from '@/store/authStore';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Button } from '@/components/ui/button';
-import { Download, BarChart3 } from 'lucide-react';
+import { Download } from 'lucide-react';
 import { TrendChart } from '@/features/dashboard/TrendChart';
 import { useI18n } from '@/lib/i18n';
 
-const fetcher = (url: string) => apiGet(url);
+const fetcher = <T,>(url: string) => apiGet<T>(url);
+
+interface RevenueStat {
+  date: string;
+  total_revenue: number;
+}
+
+interface EnergyStat {
+  date: string;
+  total_energy_kwh: number;
+}
+
+interface OrdersStat {
+  date: string;
+  order_count: number;
+}
 
 export default function StatisticsPage() {
   const [days, setDays] = useState(30);
-  const [reportType, setReportType] = useState<'revenue' | 'energy' | 'orders'>('revenue');
+  const reportType = 'revenue';
   const { t } = useI18n();
 
-  const { data: revenueData, isLoading: revenueLoading } = useSWR(
+  const { data: revenueData, isLoading: revenueLoading } = useSWR<RevenueStat[]>(
     `${API_ENDPOINTS.STATISTICS_REVENUE}?days=${days}&group_by=day`,
     fetcher
   );
 
-  const { data: energyData, isLoading: energyLoading } = useSWR(
+  const { data: energyData, isLoading: energyLoading } = useSWR<EnergyStat[]>(
     `${API_ENDPOINTS.STATISTICS_ENERGY}?days=${days}&group_by=day`,
     fetcher
   );
 
-  const { data: ordersData, isLoading: ordersLoading } = useSWR(
+  const { data: ordersData, isLoading: ordersLoading } = useSWR<OrdersStat[]>(
     `${API_ENDPOINTS.STATISTICS_ORDERS}?days=${days}&group_by=day`,
     fetcher
   );
@@ -100,7 +115,7 @@ export default function StatisticsPage() {
             ) : revenueData ? (
               <div className="h-64">
                 <TrendChart
-                  data={revenueData.map((item: any) => ({ date: item.date, value: item.total_revenue }))}
+                  data={revenueData.map((item) => ({ date: item.date, value: item.total_revenue }))}
                   title={t('收入')}
                   color="hsl(var(--chart-primary))"
                   unit="¥"
@@ -123,7 +138,7 @@ export default function StatisticsPage() {
             ) : energyData ? (
               <div className="h-64">
                 <TrendChart
-                  data={energyData.map((item: any) => ({ date: item.date, value: item.total_energy_kwh }))}
+                  data={energyData.map((item) => ({ date: item.date, value: item.total_energy_kwh }))}
                   title={t('充电量')}
                   color="hsl(var(--chart-secondary))"
                   unit="kWh"
@@ -146,7 +161,7 @@ export default function StatisticsPage() {
             ) : ordersData ? (
               <div className="h-64">
                 <TrendChart
-                  data={ordersData.map((item: any) => ({ date: item.date, value: item.order_count }))}
+                  data={ordersData.map((item) => ({ date: item.date, value: item.order_count }))}
                   title={t('订单数')}
                   color="hsl(var(--chart-accent))"
                   unit=""

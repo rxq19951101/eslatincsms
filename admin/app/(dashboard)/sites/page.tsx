@@ -22,6 +22,7 @@ import {
 import { Building2, MapPin, Plus } from 'lucide-react';
 import GooglePlacesAutocomplete from '@/components/sites/GooglePlacesAutocomplete';
 import { useI18n } from '@/lib/i18n';
+import { matchesSearchQuery } from '@/lib/search';
 import {
   apiErrorMessageKey,
   apiFieldErrors,
@@ -71,14 +72,7 @@ export default function SitesPage() {
 
   const filtered = useMemo(() => {
     const list = sites || [];
-    const q = searchQuery.trim().toLowerCase();
-    if (!q) return list;
-    return list.filter((s) => {
-      return (
-        s.name.toLowerCase().includes(q) ||
-        s.address.toLowerCase().includes(q)
-      );
-    });
+    return list.filter((site) => matchesSearchQuery(searchQuery, [site.name, site.address]));
   }, [sites, searchQuery]);
 
   const handleCreate = async () => {
@@ -140,6 +134,7 @@ export default function SitesPage() {
           <p className="text-slate-400 mt-1">{t('以站点为单位管理充电桩与运营数据')}</p>
         </div>
         <Button
+          data-testid="admin-site-create-open"
           onClick={() => {
             setErrorText(null);
             setErrors({});
@@ -157,6 +152,7 @@ export default function SitesPage() {
           <div className="flex flex-col md:flex-row gap-4">
             <div className="flex-1">
               <Input
+                data-testid="admin-site-search"
                 type="text"
                 placeholder={t('搜索站点名称/地址...')}
                 value={searchQuery}
@@ -192,6 +188,8 @@ export default function SitesPage() {
                   {filtered.map((s) => (
                     <tr
                       key={s.id}
+                      data-testid="admin-site-row"
+                      data-site-code={s.site_code}
                       className="border-b border-slate-700/50 hover:bg-slate-700/30 cursor-pointer"
                       onClick={() => router.push(`/sites/${encodeURIComponent(s.id)}`)}
                     >
@@ -241,7 +239,7 @@ export default function SitesPage() {
       </Card>
 
       <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent className="bg-slate-900 border-slate-700 text-slate-100">
+        <DialogContent data-testid="admin-site-create-dialog" className="bg-slate-900 border-slate-700 text-slate-100">
           <DialogHeader>
             <DialogTitle className="text-white">{t('新增站点')}</DialogTitle>
             <DialogDescription className="text-slate-400">{t('创建一个新的运营站点。')}</DialogDescription>
@@ -257,6 +255,7 @@ export default function SitesPage() {
             <div className="space-y-2">
               <Label className="text-slate-300">{t('站点名称 *')}</Label>
               <Input
+                data-testid="admin-site-name"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 aria-invalid={!!errors.name}
@@ -277,6 +276,7 @@ export default function SitesPage() {
                 }}
                 placeholder={t('搜索地址（自动填充经纬度）')}
                 className="bg-slate-800 border-slate-600 text-slate-200"
+                inputTestId="admin-site-address"
               />
               {errors.address && <p className="text-sm text-red-400">{t(errors.address)}</p>}
             </div>
@@ -310,6 +310,7 @@ export default function SitesPage() {
               <div className="space-y-2">
                 <Label className="text-slate-300">{t('纬度 *')}</Label>
                 <Input
+                  data-testid="admin-site-latitude"
                   value={latitude}
                   onChange={(e) => setLatitude(e.target.value)}
                   aria-invalid={!!errors.latitude}
@@ -320,6 +321,7 @@ export default function SitesPage() {
               <div className="space-y-2">
                 <Label className="text-slate-300">{t('经度 *')}</Label>
                 <Input
+                  data-testid="admin-site-longitude"
                   value={longitude}
                   onChange={(e) => setLongitude(e.target.value)}
                   aria-invalid={!!errors.longitude}
@@ -332,6 +334,7 @@ export default function SitesPage() {
             <div className="space-y-2">
               <Label className="text-slate-300">{t('营业时间（可选）')}</Label>
               <Input
+                data-testid="admin-site-operating-hours"
                 value={operatingHours}
                 onChange={(e) => setOperatingHours(e.target.value)}
                 placeholder={t('例如：00:00-24:00')}
@@ -344,6 +347,7 @@ export default function SitesPage() {
 
           <DialogFooter>
             <Button
+              data-testid="admin-site-create-submit"
               type="button"
               variant="outline"
               onClick={() => setOpen(false)}

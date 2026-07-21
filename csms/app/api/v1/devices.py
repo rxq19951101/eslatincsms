@@ -5,7 +5,7 @@
 
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 from datetime import datetime, timezone
 
@@ -33,6 +33,8 @@ class CreateDeviceRequest(BaseModel):
 
 class DeviceResponse(BaseModel):
     """设备响应"""
+    model_config = ConfigDict(from_attributes=True)
+
     serial_number: str
     device_type_code: str
     device_type_name: str
@@ -42,10 +44,6 @@ class DeviceResponse(BaseModel):
     is_active: bool
     last_connected: Optional[str]
     created_at: str
-
-    class Config:
-        from_attributes = True
-
 
 class DeviceListResponse(BaseModel):
     """设备列表响应"""

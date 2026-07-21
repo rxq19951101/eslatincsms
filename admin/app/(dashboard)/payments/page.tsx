@@ -11,15 +11,18 @@ import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Search, RefreshCw, Eye } from 'lucide-react';
 import { useI18n } from '@/lib/i18n';
+import { matchesSearchQuery } from '@/lib/search';
+import { useAuthStore } from '@/store/authStore';
 
 interface PaymentOrder {
   id: string;
   app_user_id: string;
-  user_email?: string;
+  user_email?: string | null;
   type: string;
   amount: number;
   currency: string;
-  reference: string;
+  reference: string | null;
+  external_reference?: string | null;
   status: string;
   wompi_transaction_id?: string;
   created_at: string;
@@ -31,13 +34,15 @@ const fetcher = (url: string) => apiGet<PaymentOrder[]>(url);
 export default function PaymentsPage() {
   const router = useRouter();
   const { t, locale } = useI18n();
+  const user = useAuthStore((state) => state.user);
+  const canManagePlatformPayments = !!user?.is_super_admin;
   const dateLocale = locale === 'zh-CN' ? 'zh-CN' : locale === 'es' ? 'es-CO' : 'en-US';
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [typeFilter, setTypeFilter] = useState<string>('all');
 
   const { data: payments, error, isLoading, mutate } = useSWR<PaymentOrder[]>(
-    `${API_ENDPOINTS.PAYMENTS}?limit=100&offset=0`,
+    canManagePlatformPayments ? `${API_ENDPOINTS.PAYMENTS}?limit=100&offset=0` : null,
     fetcher,
     {
       refreshInterval: 30000,
@@ -45,10 +50,12 @@ export default function PaymentsPage() {
   );
 
   const filteredPayments = payments?.filter((payment) => {
-    const matchesSearch =
-      payment.reference.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      (payment.user_email && payment.user_email.toLowerCase().includes(searchQuery.toLowerCase())) ||
-      payment.id.toLowerCase().includes(searchQuery.toLowerCase());
+    const matchesSearch = matchesSearchQuery(searchQuery, [
+      payment.reference,
+      payment.external_reference,
+      payment.user_email,
+      payment.id,
+    ]);
     const matchesStatus = statusFilter === 'all' || payment.status === statusFilter;
     const matchesType = typeFilter === 'all' || payment.type === typeFilter;
     return matchesSearch && matchesStatus && matchesType;
@@ -69,6 +76,14 @@ export default function PaymentsPage() {
         return 'bg-slate-500/20 text-slate-400 border-slate-500/30';
     }
   };
+
+  if (!canManagePlatformPayments) {
+    return (
+      <div className="flex items-center justify-center h-full">
+        <div className="text-slate-400">{t('仅超级管理员可以管理平台支付')}</div>
+      </div>
+    );
+  }
 
   if (isLoading) {
     return (
@@ -155,7 +170,9 @@ export default function PaymentsPage() {
                 >
                   <div className="flex-1">
                     <div className="flex items-center gap-3 mb-2">
-                      <span className="font-semibold text-white">{payment.reference}</span>
+                      <span className="font-semibold text-white">
+                        {payment.reference || payment.external_reference || t('未提供')}
+                      </span>
                       <span className={`px-2 py-1 rounded text-xs font-medium border ${getStatusBadgeColor(payment.status)}`}>
                         {payment.status}
                       </span>

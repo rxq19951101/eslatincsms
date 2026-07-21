@@ -1,7 +1,5 @@
-"""
-主应用单元测试
-"""
-import pytest
+"""主应用运行时契约测试。"""
+
 from fastapi.testclient import TestClient
 
 
@@ -15,15 +13,15 @@ class TestMainApp:
         data = response.json()
         assert "ok" in data or "status" in data
     
-    def test_root_endpoint(self, client: TestClient):
-        """测试根端点"""
-        response = client.get("/")
-        # 根端点可能返回200或404，取决于是否实现
-        assert response.status_code in [200, 404]
-    
-    def test_cors_headers(self, client: TestClient):
-        """测试CORS头"""
-        response = client.options("/health")
-        # CORS预检请求应该返回200
-        assert response.status_code in [200, 405]  # 405如果没有实现OPTIONS
+    def test_cors_preflight_returns_configured_headers(self, client: TestClient):
+        response = client.options(
+            "/health",
+            headers={
+                "Origin": "http://localhost:3000",
+                "Access-Control-Request-Method": "GET",
+            },
+        )
 
+        assert response.status_code == 200
+        assert response.headers["access-control-allow-origin"] == "http://localhost:3000"
+        assert "GET" in response.headers["access-control-allow-methods"]

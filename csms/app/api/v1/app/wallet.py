@@ -7,7 +7,9 @@
 from typing import List, Dict, Any, Optional
 from decimal import Decimal
 from uuid import UUID
+import hashlib
 import os
+import re
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -17,7 +19,7 @@ from app.core.logging_config import get_logger
 from app.core.api_logging import log_api_request, log_api_response, log_api_error, log_business_operation
 from app.core.auth import get_current_user
 from app.database.base import get_db, SuperSessionLocal
-from app.database.models import AppUser, AppUserPaymentMethod, AppWalletTransaction, ChargePoint, Tenant
+from app.database.models import AppUser, AppUserPaymentMethod, AppWalletTransaction, ChargePoint, Site, Tenant
 from app.core.id_generator import generate_order_id
 
 logger = get_logger("ocpp_csms")
@@ -32,6 +34,10 @@ async def get_current_app_user(
     user_id = current_user_payload.get("user_id")
     if not user_id:
         raise HTTPException(status_code=401, detail="Invalid token")
+    try:
+        user_id = UUID(str(user_id))
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise HTTPException(status_code=401, detail="Invalid token") from exc
 
     app_user = db.query(AppUser).filter(AppUser.id == user_id).first()
     if not app_user:
@@ -48,10 +54,35 @@ class WalletBalanceResponse(BaseModel):
 class WalletTransactionResponse(BaseModel):
     id: str
     type: str
+    reference: str
     amount: Decimal
     description: Optional[str] = None
     created_at: str
     charge_point_name: Optional[str] = None
+    ocpp_identity: Optional[str] = None
+
+
+_UUID_TEXT = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}"
+)
+
+
+def _public_wallet_reference(transaction: AppWalletTransaction) -> str:
+    """Expose a stable business reference without leaking embedded DB UUIDs."""
+    candidate = (transaction.transaction_number or "").strip()
+    if candidate and not _UUID_TEXT.search(candidate):
+        return candidate
+    digest_source = candidate or str(transaction.id)
+    digest = hashlib.sha256(digest_source.encode("utf-8")).hexdigest()[:12].upper()
+    return f"WLT-{digest}"
+
+
+def get_app_wallet_db():
+    db = SuperSessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
 
 class TopUpRequest(BaseModel):
@@ -152,7 +183,7 @@ def list_wallet_transactions(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     current_user_obj: AppUser = Depends(get_current_app_user),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_app_wallet_db),
 ) -> List[WalletTransactionResponse]:
     try:
         log_api_request(
@@ -168,28 +199,36 @@ def list_wallet_transactions(
 
         # 批量取 charge_point 名称（可选）
         cp_ids = [t.charge_point_id for t in txs if t.charge_point_id]
-        cp_name_map: Dict[str, str] = {}
+        cp_name_map: Dict[UUID, Optional[str]] = {}
+        cp_identity_map: Dict[UUID, str] = {}
         if cp_ids:
             # charge_points 启用了 RLS，平台用户这里用 super session 读一下用于展示
             sdb = SuperSessionLocal()
             try:
-                cps = sdb.query(ChargePoint).filter(ChargePoint.id.in_(cp_ids)).all()
+                charge_point_names = (
+                    sdb.query(ChargePoint.id, ChargePoint.ocpp_identity, Site.name)
+                    .outerjoin(Site, ChargePoint.site_id == Site.id)
+                    .filter(ChargePoint.id.in_(cp_ids))
+                    .all()
+                )
             finally:
                 sdb.close()
-            for cp in cps:
-                # 站点名称在 APP chargers 返回的是 site_name，这里优先用 charge_point_id 作为兜底展示
-                cp_name_map[cp.id] = cp.id
+            for charge_point_id, ocpp_identity, site_name in charge_point_names:
+                cp_name_map[charge_point_id] = site_name
+                cp_identity_map[charge_point_id] = ocpp_identity
 
         result: List[WalletTransactionResponse] = []
         for t in txs:
             result.append(
                 WalletTransactionResponse(
-                    id=t.id,
+                    id=str(t.id),
                     type=t.type,
+                    reference=_public_wallet_reference(t),
                     amount=float(t.amount) if t.amount is not None else 0.0,
                     description=t.description,
                     created_at=t.created_at.isoformat() if t.created_at else "",
                     charge_point_name=cp_name_map.get(t.charge_point_id) if t.charge_point_id else None,
+                    ocpp_identity=cp_identity_map.get(t.charge_point_id) if t.charge_point_id else None,
                 )
             )
 
@@ -266,7 +305,7 @@ def top_up(
                 charge_point_id=None,
                 type="top_up",
                 amount=amount,
-                description=f"模拟充值 ${amount}",
+                description="Wallet top-up",
             )
 
             db.add(tx)

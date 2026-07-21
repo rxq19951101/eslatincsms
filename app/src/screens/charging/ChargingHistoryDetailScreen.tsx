@@ -16,21 +16,13 @@ import { useAppDispatch, useAppSelector } from '../../hooks/useRedux';
 import { fetchChargingRecordDetail } from '../../store/slices/transactionsSlice';
 import ScreenHeader from '../../components/ui/ScreenHeader';
 import { localizeStatus } from '../../utils/localizeStatus';
+import { formatDateTime, publicChargerIdentity } from '../../utils/localizedDisplay';
 
 type R = RouteProp<RootStackParamList, 'ChargingHistoryDetail'>;
 type Nav = StackNavigationProp<RootStackParamList, 'ChargingHistoryDetail'>;
 
-function fmtTime(s?: string | null) {
-  if (!s) return '—';
-  try {
-    return new Date(s).toLocaleString();
-  } catch {
-    return s;
-  }
-}
-
 const ChargingHistoryDetailScreen = () => {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
 
   const navigation = useNavigation<Nav>();
   const route = useRoute<R>();
@@ -56,22 +48,22 @@ const ChargingHistoryDetailScreen = () => {
         </View>
       ) : !d ? (
         <View style={styles.center}>
-          <Text style={styles.errorText}>{error || t.history.notFound}</Text>
+          <Text style={styles.errorText}>{error ? t.history.loadFailed : t.history.notFound}</Text>
         </View>
       ) : (
         <ScrollView contentContainerStyle={{ padding: 16, paddingBottom: 24 }}>
           <View style={styles.card}>
-            <Text style={styles.title}>{d.site_name || d.charge_point_id}</Text>
+            <Text style={styles.title}>{d.site_name || publicChargerIdentity(d, t.common.unknown)}</Text>
             <Text style={styles.subTitle}>{d.site_address || '—'}</Text>
           </View>
 
           <View style={styles.card}>
             <Row label={t.history.status} value={localizeStatus(d.status, t)} />
-            <Row label={t.history.startTime} value={fmtTime(d.start_time)} />
-            <Row label={t.history.endTime} value={fmtTime(d.end_time)} />
-            <Row label={t.history.chargerId} value={d.charge_point_id} />
-            <Row label="EVSE" value={String(d.evse_id)} />
-            <Row label="TransactionId" value={String(d.transaction_id)} />
+            <Row label={t.history.startTime} value={formatDateTime(d.start_time, locale)} />
+            <Row label={t.history.endTime} value={formatDateTime(d.end_time, locale)} />
+            <Row label={t.history.chargerId} value={publicChargerIdentity(d)} />
+            {typeof d.connector_id === 'number' && <Row label={t.history.connector} value={String(d.connector_id)} />}
+            <Row label={t.history.transaction} value={String(d.transaction_id)} />
           </View>
 
           <View style={styles.card}>
@@ -80,8 +72,8 @@ const ChargingHistoryDetailScreen = () => {
               label={t.history.durationMin}
               value={typeof d.duration_minutes === 'number' ? d.duration_minutes.toFixed(1) : '—'}
             />
-            {typeof d.meter_start === 'number' && <Row label="MeterStart(Wh)" value={String(d.meter_start)} />}
-            {typeof d.meter_stop === 'number' && <Row label="MeterStop(Wh)" value={String(d.meter_stop)} />}
+            {typeof d.meter_start === 'number' && <Row label={t.history.meterStart} value={String(d.meter_start)} />}
+            {typeof d.meter_stop === 'number' && <Row label={t.history.meterStop} value={String(d.meter_stop)} />}
           </View>
         </ScrollView>
       )}

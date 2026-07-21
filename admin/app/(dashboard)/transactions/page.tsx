@@ -11,15 +11,21 @@ import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Search, Download, FileText } from 'lucide-react';
 import { useI18n } from '@/lib/i18n';
+import { matchesSearchQuery } from '@/lib/search';
+import {
+  formatDateTime,
+  formatMeasurement,
+  getStatusBadgeClass,
+  getStatusMessageKey,
+  isOngoingStatus,
+} from '@/lib/localization';
 
 const fetcher = (url: string) => apiGet<Transaction[]>(url);
 
 export default function TransactionsPage() {
   const { t, locale } = useI18n();
-  const dateLocale = locale === 'zh-CN' ? 'zh-CN' : locale === 'es' ? 'es-CO' : 'en-US';
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('all');
-  const [chargePointFilter, setChargePointFilter] = useState<string>('');
 
   const { data: transactions, error, isLoading } = useSWR<Transaction[]>(
     API_ENDPOINTS.TRANSACTIONS + `?limit=100&offset=0`,
@@ -30,14 +36,9 @@ export default function TransactionsPage() {
   );
 
   const filteredTransactions = transactions?.filter((tx) => {
-    const txId = String(tx.transaction_id ?? '');
-    const cpId = String(tx.charge_point_id ?? '');
-    const matchesSearch =
-      txId.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      cpId.toLowerCase().includes(searchQuery.toLowerCase());
-    const matchesStatus = statusFilter === 'all' || tx.status === statusFilter;
-    const matchesCharger = !chargePointFilter || tx.charge_point_id === chargePointFilter;
-    return matchesSearch && matchesStatus && matchesCharger;
+    const matchesSearch = matchesSearchQuery(searchQuery, [tx.transaction_id, tx.ocpp_identity]);
+    const matchesStatus = statusFilter === 'all' || tx.status?.toLowerCase() === statusFilter;
+    return matchesSearch && matchesStatus;
   });
 
   const handleExport = () => {
@@ -93,9 +94,9 @@ export default function TransactionsPage() {
               </SelectTrigger>
               <SelectContent className="bg-slate-800 border-slate-700">
                 <SelectItem value="all">{t('全部状态')}</SelectItem>
-                <SelectItem value="Active">{t('进行中')}</SelectItem>
-                <SelectItem value="Completed">{t('已完成')}</SelectItem>
-                <SelectItem value="Cancelled">{t('已取消')}</SelectItem>
+                <SelectItem value="ongoing">{t('status.ongoing')}</SelectItem>
+                <SelectItem value="completed">{t('status.completed')}</SelectItem>
+                <SelectItem value="cancelled">{t('status.cancelled')}</SelectItem>
               </SelectContent>
             </Select>
           </div>
@@ -122,33 +123,34 @@ export default function TransactionsPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {filteredTransactions.map((tx) => (
-                    <tr key={tx.id} className="border-b border-slate-700/50 hover:bg-slate-700/30">
-                      <td className="py-3 px-4 text-white">{tx.transaction_id}</td>
-                      <td className="py-3 px-4 text-slate-300">{tx.charge_point_id}</td>
-                      <td className="py-3 px-4 text-slate-300">
-                        {tx.start_time ? new Date(tx.start_time).toLocaleString(dateLocale) : 'N/A'}
-                      </td>
-                      <td className="py-3 px-4 text-slate-300">
-                        {tx.end_time ? new Date(tx.end_time).toLocaleString(dateLocale) : t('进行中')}
-                      </td>
-                      <td className="py-3 px-4 text-slate-300">{tx.energy_kwh?.toFixed(2) || 'N/A'}</td>
-                      <td className="py-3 px-4 text-slate-300">{tx.duration_minutes?.toFixed(1) || 'N/A'}</td>
-                      <td className="py-3 px-4">
-                        <span
-                          className={`px-2 py-1 rounded-md text-xs ${
-                            tx.status === 'Completed'
-                              ? 'bg-green-500/20 text-green-400'
-                              : tx.status === 'Active'
-                              ? 'bg-blue-500/20 text-blue-400'
-                              : 'bg-red-500/20 text-red-400'
-                          }`}
-                        >
-                          {tx.status}
-                        </span>
-                      </td>
-                    </tr>
-                  ))}
+                  {filteredTransactions.map((tx) => {
+                    const fallback = t('common.notAvailable');
+                    return (
+                      <tr key={tx.id} data-testid="admin-transaction-row" className="border-b border-slate-700/50 hover:bg-slate-700/30">
+                        <td className="py-3 px-4 text-white">{tx.transaction_id ?? fallback}</td>
+                        <td className="py-3 px-4 text-slate-300" data-testid="transaction-ocpp-identity">
+                          {tx.ocpp_identity?.trim() || fallback}
+                        </td>
+                        <td className="py-3 px-4 text-slate-300">
+                          {formatDateTime(tx.start_time, locale, fallback)}
+                        </td>
+                        <td className="py-3 px-4 text-slate-300">
+                          {tx.end_time
+                            ? formatDateTime(tx.end_time, locale, fallback)
+                            : isOngoingStatus(tx.status) ? t('status.ongoing') : fallback}
+                        </td>
+                        <td className="py-3 px-4 text-slate-300">{formatMeasurement(tx.energy_kwh, 2, '', fallback)}</td>
+                        <td className="py-3 px-4 text-slate-300">{formatMeasurement(tx.duration_minutes, 1, '', fallback)}</td>
+                        <td className="py-3 px-4">
+                          <span
+                            className={`px-2 py-1 rounded-md text-xs ${getStatusBadgeClass(tx.status)}`}
+                          >
+                            {t(getStatusMessageKey(tx.status))}
+                          </span>
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>

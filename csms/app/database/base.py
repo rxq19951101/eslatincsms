@@ -9,6 +9,7 @@ import time
 import uuid
 import logging
 from typing import Optional
+from contextlib import contextmanager
 from contextvars import ContextVar
 from sqlalchemy import create_engine, text, event
 from sqlalchemy.orm import sessionmaker, Session
@@ -28,6 +29,23 @@ Base = declarative_base()
 tenant_id_context: ContextVar[Optional[uuid.UUID]] = ContextVar('tenant_id', default=None)
 is_super_admin_context: ContextVar[bool] = ContextVar('is_super_admin', default=False)
 use_super_connection_context: ContextVar[bool] = ContextVar('use_super_connection', default=False)
+database_access_scope_context: ContextVar[Optional[str]] = ContextVar(
+    'database_access_scope', default=None
+)
+
+DATABASE_ACCESS_SCOPES = frozenset({"authentication", "app_platform", "system"})
+
+
+@contextmanager
+def database_access_scope(scope: str):
+    """Mark an explicit, non-tenant database path without granting super access."""
+    if scope not in DATABASE_ACCESS_SCOPES:
+        raise ValueError(f"Unsupported database access scope: {scope}")
+    token = database_access_scope_context.set(scope)
+    try:
+        yield
+    finally:
+        database_access_scope_context.reset(token)
 
 # 创建数据库引擎（带连接池）
 # 注意：普通请求使用 app_user 角色，超级管理员请求使用 app_super 角色
@@ -57,23 +75,24 @@ super_engine = create_engine(
     echo=settings.db_echo
 )
 
-# 在超级引擎的每个连接上设置 app_super 角色
-@event.listens_for(super_engine, "connect")
-def set_app_super_role(dbapi_conn, connection_record):
-    """在连接建立后设置 app_super 角色"""
-    cursor = dbapi_conn.cursor()
-    try:
-        cursor.execute("SET ROLE app_super")
-    except Exception as e:
-        # 如果角色不存在或没有权限，记录警告但不中断
-        logger.warning(f"无法设置 app_super 角色: {e}")
-        # 关键：SET ROLE 失败会让连接处于 aborted transaction 状态，必须 rollback 清理，否则后续任何查询都会 InFailedSqlTransaction
+# 在 PostgreSQL 超级引擎的每个连接上设置 app_super 角色。
+# 显式超级会话不得在角色缺失时静默回退到普通连接权限。
+if super_engine.dialect.name == "postgresql":
+    @event.listens_for(super_engine, "connect")
+    def set_app_super_role(dbapi_conn, connection_record):
+        """在连接建立后设置 app_super 角色。"""
+        cursor = dbapi_conn.cursor()
         try:
-            dbapi_conn.rollback()
+            cursor.execute("SET ROLE app_super")
         except Exception:
-            pass
-    finally:
-        cursor.close()
+            try:
+                dbapi_conn.rollback()
+            except Exception:
+                pass
+            logger.error("Unable to activate required app_super database role", exc_info=True)
+            raise
+        finally:
+            cursor.close()
 
 # 创建会话工厂
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -83,116 +102,44 @@ SuperSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=super_e
 # 在每个事务开始时设置租户上下文（硬规则）
 @event.listens_for(Session, "after_begin")
 def set_tenant_context(session, transaction, connection):
-    """在每个事务开始时设置租户上下文（硬规则）"""
-    # 检查是否使用的是 super_engine（绕过所有检查）
-    # 通过检查连接字符串是否包含 role=app_super 来判断
-    try:
-        engine_url = str(connection.engine.url) if hasattr(connection, 'engine') and hasattr(connection.engine, 'url') else ''
-        is_super_engine = 'role=app_super' in engine_url or 'role%3Dapp_super' in engine_url
-    except:
-        is_super_engine = False
-    
-    # 如果使用 super_engine，直接跳过所有检查和设置（完全绕过 RLS）
-    if is_super_engine:
+    """在每个普通事务开始时设置租户上下文。"""
+    # SuperSessionLocal 是代码中的显式特权边界。两个引擎可以使用相同 URL，
+    # 因此必须按引擎实例识别，不能从 URL 文本猜测。
+    if connection.engine is super_engine:
         return
-    
-    # 使用 get() 方法，如果未设置则使用默认值
-    try:
-        tenant_id = tenant_id_context.get()
-    except LookupError:
-        tenant_id = None
-    
-    try:
-        is_super_admin = is_super_admin_context.get()
-    except LookupError:
-        is_super_admin = False
-    
-    try:
-        use_super_connection = use_super_connection_context.get()
-    except LookupError:
-        use_super_connection = False
-    
-    # 检查是否在测试环境中（SQLite不支持SET LOCAL）
-    # 对于SQLite，我们跳过SET LOCAL命令，但仍需要验证tenant_id
-    try:
-        from sqlalchemy.engine import Engine
-        dialect_name = connection.engine.dialect.name if hasattr(connection, 'engine') else None
-        is_sqlite = dialect_name == 'sqlite'
-    except:
-        is_sqlite = False
-    
-    # 如果是 super_admin，完全跳过所有检查和设置（允许访问所有数据）
-    if is_super_admin:
-        return  # super_admin 不需要设置 tenant_id，完全绕过 RLS
-    
-    # 硬规则：非 super admin 必须设置 tenant_id
-    # 例外情况：
-    # 1. 如果 tenant_id_context 和 is_super_admin_context 都未设置（可能是初始化脚本或认证接口）
-    # 2. 对于认证相关的操作（如登录、注册），应该在中间件层面跳过，而不是在这里检查
-    # 3. 如果使用 super_connection，说明是超级管理员操作，应该允许
-    # 4. 如果是初始化脚本或认证操作，应该允许（通过检查上下文是否为默认值）
-    if not tenant_id and not use_super_connection:
-        if not is_sqlite:  # 只在非SQLite（生产环境）中强制检查
-            # 对于认证操作，tenant_id_context 和 is_super_admin_context 都应该是默认值（未设置）
-            # 但这里我们无法区分"未设置"和"明确设置为 None"
-            # 所以暂时放宽检查：如果两者都是默认值，允许继续（可能是认证操作）
-            # 否则抛出异常
-            import logging
-            logger = logging.getLogger("ocpp_csms")
-            
-            # 检查是否是默认值（未设置或设置为 None）
-            try:
-                ctx_tenant_id = tenant_id_context.get()
-                # 如果 tenant_id 是 None，可能是：
-                # 1. 超级管理员请求（没有携带 X-Tenant-Id）
-                # 2. 认证操作（如 /auth/me，跳过了 tenant_middleware）
-                # 对于这两种情况，我们都应该允许继续
-                is_default_context = (ctx_tenant_id is None)
-            except LookupError:
-                is_default_context = True
-            
-            if is_default_context:
-                # 可能是认证操作或超级管理员访问，允许继续但记录警告
-                logger.warning(f"Database access without tenant_id context (likely during authentication or super admin operation). Allowing but this should be handled by middleware.")
-                # 不抛出异常，允许继续
-            else:
-                # tenant_id 存在但不是 None，正常情况，不需要额外检查
-                pass
-    
-    if use_super_connection and is_super_admin:
-        # 超级管理员使用 app_super 角色（绕过 RLS）
-        # 注意：这需要在连接字符串中指定角色，或者在连接时设置角色
-        if not is_sqlite:
-            try:
-                # 尝试设置角色为 app_super（绕过 RLS）
-                connection.execute(text("SET LOCAL role = app_super"))
-            except Exception as e:
-                # 如果角色不存在，记录警告但继续（可能是权限问题）
-                import logging
-                logger = logging.getLogger("ocpp_csms")
-                logger.warning(f"Failed to set role to app_super: {e}. Continuing without role change.")
-                # 不抛出异常，允许继续
-    elif tenant_id:
-        # 普通用户：设置 tenant_id（PostgreSQL 支持）
-        if not is_sqlite:
-            try:
-                connection.execute(
-                    text("SET LOCAL app.tenant_id = :tenant_id"),
-                    {"tenant_id": str(tenant_id)}
-                )
-            except Exception as e:
-                # SQLite 不支持 SET LOCAL，跳过
-                if not is_sqlite:
-                    raise
-    else:
-        # 如果 tenant_id 为 None 且不是 super_connection
-        # 这种情况不应该发生，因为前面的检查应该已经处理了
-        # 但如果到达这里，记录警告但不抛出异常（允许继续，可能是认证操作或初始化脚本）
-        if not is_sqlite and not use_super_connection:
-            import logging
-            logger = logging.getLogger("ocpp_csms")
-            logger.warning(f"Database access without tenant_id and super_connection. This should only happen during authentication or initialization. Allowing to continue.")
-            # 不抛出异常，允许继续（认证操作需要能够访问数据库）
+
+    if connection.engine.dialect.name == "sqlite":
+        return
+
+    tenant_id = tenant_id_context.get()
+    access_scope = database_access_scope_context.get()
+
+    if tenant_id:
+        connection.execute(
+            text("SET LOCAL app.tenant_id = :tenant_id"),
+            {"tenant_id": str(tenant_id)},
+        )
+        return
+
+    if access_scope in DATABASE_ACCESS_SCOPES:
+        logger.debug(
+            "Database access without tenant context under explicit scope=%s",
+            access_scope,
+        )
+        return
+
+    if is_super_admin_context.get() or use_super_connection_context.get():
+        logger.warning(
+            "Privileged request context used a regular database session; "
+            "SuperSessionLocal is required"
+        )
+        return
+
+    # 未标注的无租户普通会话仍是风险信号，不全局降级或静默忽略。
+    logger.warning(
+        "Database access without tenant_id or an explicit authentication, "
+        "app_platform, or system scope"
+    )
 
 
 # 数据库依赖注入

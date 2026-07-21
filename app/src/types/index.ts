@@ -33,7 +33,8 @@ export interface Location {
 }
 
 export interface EVSE {
-  evse_id: number;
+  id: string;
+  connector_id: number;
   connector_type: string;
   max_power_kw: number;
   status: 'Available' | 'Charging' | 'Offline' | 'Faulted';
@@ -105,11 +106,13 @@ export interface SavedPaymentMethodsResponse {
 
 export interface WalletTransaction {
   id: string;
-  type: 'charge' | 'top_up';
+  type: 'charge' | 'top_up' | 'refund' | 'adjustment' | string;
   amount: number;
-  description: string;
+  reference?: string | null;
+  description?: string | null;
   created_at: string;
-  charge_point_name?: string;
+  charge_point_name?: string | null;
+  ocpp_identity?: string | null;
 }
 
 export interface PaymentMethod {
@@ -136,7 +139,7 @@ export interface CreatePaymentRequest {
   amount: number;
   currency?: string;
   metadata?: {
-    session_id?: number;
+    session_id?: string;
     charge_point_id?: string;
     site_id?: string;
   };
@@ -185,7 +188,7 @@ export interface CreateMercadoPagoPaymentRequest {
   device_id?: string;  // 设备指纹（可选）
   description?: string;  // 支付描述（可选）
   metadata?: {
-    session_id?: number;
+    session_id?: string;
     charge_point_id?: string;
     site_id?: string;
   };
@@ -213,8 +216,10 @@ export interface PaymentStatusResponse {
 }
 
 export interface UnpaidCharge {
-  session_id: number;
+  session_id: string;
   charge_point_id: string;
+  ocpp_identity?: string | null;
+  charge_point_name?: string | null;
   amount: number;
   currency: string;
   created_at: string;
@@ -242,12 +247,12 @@ export type RootStackParamList = {
   // Main App
   MainTabs: NavigatorScreenParams<MainTabsParamList> | undefined;
   LocationPermission: undefined;
-  StationDetail: { chargePointId: string };
+  StationDetail: { siteId: string };
   // 仅支持扫码充电：不再实现预订模块（BookingDetail 等路由移除）
-  ChargingProcess: { qrToken: string };
-  ChargingComplete: { chargePointId?: string };
+  ChargingProcess: { qrToken?: string; sessionId?: string };
+  ChargingComplete: { ocppIdentity?: string };
   ChargingHistory: undefined;
-  ChargingHistoryDetail: { id: number };
+  ChargingHistoryDetail: { id: string };
   TopUp: undefined;
   PaymentMethod: undefined;
   TransactionHistory: undefined;
@@ -256,7 +261,7 @@ export type RootStackParamList = {
   PaymentHub: undefined;
   AddPayment: undefined;
   WompiPayment: { orderId?: string; checkoutUrl?: string; amount?: number };
-  MercadoPagoPayment: { amount: number; type: 'top_up' | 'charging'; metadata?: { session_id?: number; charge_point_id?: string; site_id?: string } };
+  MercadoPagoPayment: { amount: number; type: 'top_up' | 'charging'; metadata?: { session_id?: string; charge_point_id?: string; site_id?: string } };
   PaymentResult: { orderId?: string; status?: string };
   UnpaidBills: undefined;
   PersonalInfo: undefined;
@@ -280,7 +285,9 @@ export type MainTabsParamList = {
 export interface ApiError {
   message: string;
   code?: string;
+  status?: number;
   details?: any;
+  fieldErrors?: Record<string, string>;
 }
 
 export interface PaginationParams {

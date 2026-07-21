@@ -7,7 +7,7 @@ from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import func, and_
-from app.database.base import get_db, tenant_id_context
+from app.database.base import get_db, SuperSessionLocal
 from app.database.models import ChargePoint, Site, EVSE, EVSEStatus, Tariff, AppUser
 from app.core.logging_config import get_logger
 from app.core.auth import get_current_user
@@ -19,9 +19,18 @@ logger = get_logger("ocpp_csms")
 router = APIRouter()
 
 
+def get_public_charge_point_db():
+    """Explicit cross-tenant read boundary for public App charge-point data."""
+    db = SuperSessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
 async def get_current_app_user(
     current_user_payload: Dict[str, Any] = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_public_charge_point_db)
 ) -> AppUser:
     """
     获取当前 APP 平台用户对象（AppUser）
@@ -74,19 +83,12 @@ async def list_chargers_for_app(
     """
     logger.info(f"[APP API] GET /api/v1/app/chargers | 用户: {current_user_obj.id}, 位置: ({latitude}, {longitude}), 半径: {radius}m")
     
-    # 获取租户ID
-    tenant_id = tenant_id_context.get()
-    
     # 查询充电桩 + 站点
     # 注意：evses 表不存 status，实时状态在 evse_status 表
-    query = db.query(ChargePoint).join(Site, ChargePoint.site_id == Site.id)
-    
-    # 租户过滤
-    # App 用户（AppUser）是平台级用户，不带 tenant_id 时应该能看到所有租户的充电桩
-    # 只有当 tenant_id 不为 None 时，才进行租户过滤
-    if tenant_id:
-        query = query.filter(ChargePoint.tenant_id == tenant_id)
-    # 如果 tenant_id 为 None，不添加过滤条件，返回所有租户的充电桩
+    query = db.query(ChargePoint).join(Site, ChargePoint.site_id == Site.id).filter(
+        ChargePoint.is_active.is_(True),
+        Site.is_active.is_(True),
+    )
     
     # 只返回有位置信息的充电站
     query = query.filter(
@@ -155,6 +157,7 @@ async def list_chargers_for_app(
         
         charger_data = {
             "id": charger.id,
+            "ocpp_identity": charger.ocpp_identity,
             "vendor": charger.vendor,
             "model": charger.model,
             "site_name": site.name,
@@ -199,7 +202,7 @@ async def list_chargers_for_app(
 async def get_charger_detail_for_app(
     charge_point_id: str,
     current_user_obj: AppUser = Depends(get_current_app_user),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_public_charge_point_db)
 ) -> dict:
     """
     获取充电站详情（普通用户）
@@ -207,7 +210,11 @@ async def get_charger_detail_for_app(
     logger.info(f"[APP API] GET /api/v1/app/chargers/{charge_point_id} | 用户: {current_user_obj.id}")
     
     # 获取充电站
-    charger = db.query(ChargePoint).filter(ChargePoint.id == charge_point_id).first()
+    charger = db.query(ChargePoint).join(Site, ChargePoint.site_id == Site.id).filter(
+        ChargePoint.id == charge_point_id,
+        ChargePoint.is_active.is_(True),
+        Site.is_active.is_(True),
+    ).first()
     
     if not charger:
         raise HTTPException(status_code=404, detail="Charger not found")
@@ -261,6 +268,7 @@ async def get_charger_detail_for_app(
     
     return {
         "id": charger.id,
+        "ocpp_identity": charger.ocpp_identity,
         "vendor": charger.vendor,
         "model": charger.model,
         "serial_number": charger.serial_number,

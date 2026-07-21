@@ -56,9 +56,8 @@ def issue_password_reset(db: Session, user: AppUser) -> None:
     sent = send_user_email(user.email, subject, text_body, html_body)
     if not sent:
         logger.warning(
-            "Password reset issued without SMTP delivery | email=%s | url=%s",
+            "Account recovery issued without SMTP delivery | email=%s",
             user.email,
-            reset_url,
         )
 
 

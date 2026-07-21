@@ -9,7 +9,7 @@ export type GeocodingSuggestion = {
   display_name: string;
   lat: number;
   lon: number;
-  address?: Record<string, any>;
+  address?: Record<string, unknown>;
 };
 
 export function buildGeocodingSearchUrl(q: string, limit = 5) {

@@ -14,7 +14,7 @@ import { API_ENDPOINTS } from '@/lib/constants';
 import { setTokens } from '@/lib/auth';
 import { useAuthStore } from '@/store/authStore';
 import { useTenantStore } from '@/store/tenantStore';
-import { getTenantId, clearCurrentTenantId } from '@/lib/tenant';
+import { getDefaultTenant } from '@/lib/tenant';
 import { LoginRequest, LoginResponse, AdminUser } from '@/types';
 import { useI18n } from '@/lib/i18n';
 import Image from 'next/image';
@@ -29,7 +29,7 @@ type LoginFormValues = z.infer<typeof loginSchema>;
 export default function LoginPage() {
   const router = useRouter();
   const { setUser } = useAuthStore();
-  const { setCurrentTenant } = useTenantStore();
+  const { setCurrentTenant, clearTenant } = useTenantStore();
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const { t } = useI18n();
@@ -56,7 +56,9 @@ export default function LoginPage() {
         }
       );
 
-      // 存储 token
+      // 登录成功即开始一个干净的账号会话，绝不继承前一管理员的租户上下文。
+      clearTenant();
+      setUser(null);
       setTokens(response.access_token, response.refresh_token);
 
       // 获取完整的用户信息（包含租户列表）
@@ -65,19 +67,9 @@ export default function LoginPage() {
           skipTenantId: true, // /me 接口应该能够自动处理（已跳过 tenant_middleware 检查）
         });
         setUser(userData);
-        // 初始化当前租户（用于 UI 展示）
-        if (userData.is_super_admin) {
-          clearCurrentTenantId();
-          setCurrentTenant(null);
-        } else {
-          const tid = getTenantId(userData);
-          const selected =
-            (tid && userData.tenant_list?.find((t) => t.id === tid)) ||
-            userData.tenant_list?.find((t) => t.is_primary) ||
-            userData.tenant_list?.[0] ||
-            null;
-          if (selected) setCurrentTenant(selected);
-        }
+        // super_admin 默认保持全平台；普通管理员自动进入当前账号的有效默认租户。
+        const selected = getDefaultTenant(userData);
+        setCurrentTenant(selected, userData.id);
       } catch (error) {
         // 如果获取用户信息失败，使用登录响应中的基本信息（如果包含 default_tenant_id）
         console.error('Failed to fetch user info:', error);
@@ -90,7 +82,7 @@ export default function LoginPage() {
           default_tenant_id: response.user.default_tenant_id, // 使用登录响应中的 default_tenant_id
           tenant_list: [],
         });
-        // fallback 情况下没有 tenant_list，后续 useAuth 会再次尝试 /me 以恢复租户展示
+        // fallback 没有可验证成员关系，因此保持无租户上下文，避免使用不可信默认值。
       }
 
       // 跳转到 Dashboard
@@ -150,7 +142,7 @@ export default function LoginPage() {
         <CardContent>
           <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
             {error && (
-              <div className="p-3 text-sm text-red-400 bg-red-500/10 border border-red-500/20 rounded-md">
+              <div data-testid="admin-login-error" role="alert" className="p-3 text-sm text-red-400 bg-red-500/10 border border-red-500/20 rounded-md">
                 {error}
               </div>
             )}
@@ -160,6 +152,7 @@ export default function LoginPage() {
                 {t('username')}
               </Label>
               <Input
+                data-testid="admin-login-username"
                 id="username"
                 type="text"
                 placeholder={t('usernamePlaceholder')}
@@ -177,6 +170,7 @@ export default function LoginPage() {
                 {t('password')}
               </Label>
               <Input
+                data-testid="admin-login-password"
                 id="password"
                 type="password"
                 placeholder={t('passwordPlaceholder')}
@@ -190,6 +184,7 @@ export default function LoginPage() {
             </div>
 
             <Button
+              data-testid="admin-login-submit"
               type="submit"
               className="w-full bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-700 hover:to-blue-700 text-white"
               disabled={isLoading}

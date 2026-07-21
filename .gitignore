@@ -1,6 +1,11 @@
 # 文档已移动到 docs/ 目录，服务目录中不再保留 MD 文档
 *.md
 !README.md
+!AGENTS.md
+!docs/**/*.md
+
+# 本地转换文件与临时产物
+/tmp/
 
 # 本地密钥（含 Google Maps、数据库等），勿提交
 .env

@@ -17,8 +17,16 @@ import {
 } from 'lucide-react';
 import { TrendChart } from '@/features/dashboard/TrendChart';
 import { useI18n } from '@/lib/i18n';
+import { createMoneyFormatter, DEFAULT_CURRENCY, normalizeCurrency } from '@/lib/money';
+import { normalizeDashboardChargePointMetrics } from '@/lib/localization';
+import { useAuthStore } from '@/store/authStore';
+import { hasPermission, usePermissions } from '@/hooks/usePermissions';
 
-const fetcher = (url: string) => apiGet(url);
+const fetcher = <T,>(url: string) => apiGet<T>(url);
+
+interface CurrencyConfigResponse {
+  config_value: unknown;
+}
 
 const asNumber = (value: number | string | null | undefined, fallback = 0): number => {
   const parsed = typeof value === 'number' ? value : Number(value);
@@ -26,14 +34,23 @@ const asNumber = (value: number | string | null | undefined, fallback = 0): numb
 };
 
 export default function DashboardPage() {
-  const { t } = useI18n();
+  const { locale, t } = useI18n();
+  const user = useAuthStore((state) => state.user);
+  const { permissions } = usePermissions();
+  const canReadConfigs = !!user?.is_super_admin || hasPermission(permissions, 'configs.read');
   const days = 7;
   const [selectedSiteId, setSelectedSiteId] = useState<string>('all');
+
+  const { data: currencyConfig } = useSWR<CurrencyConfigResponse>(
+    canReadConfigs ? `${API_ENDPOINTS.CONFIGS}/currency?default=${DEFAULT_CURRENCY}` : null,
+    fetcher
+  );
+  const currency = normalizeCurrency(currencyConfig?.config_value);
+  const formatMoney = useMemo(() => createMoneyFormatter(locale, currency), [currency, locale]);
 
   // 站点列表（用于下拉选择）
   const { data: sites } = useSWR<SiteListItem[]>(API_ENDPOINTS.SITES, fetcher, {
     refreshInterval: REFRESH_INTERVAL,
-    revalidateOnFocus: true,
   });
 
   // 获取 Dashboard 概览数据
@@ -41,8 +58,7 @@ export default function DashboardPage() {
     API_ENDPOINTS.DASHBOARD_SUMMARY,
     fetcher,
     {
-      refreshInterval: REFRESH_INTERVAL, // 30 秒自动刷新
-      revalidateOnFocus: true,
+      refreshInterval: REFRESH_INTERVAL,
     }
   );
 
@@ -52,7 +68,6 @@ export default function DashboardPage() {
     fetcher,
     {
       refreshInterval: REFRESH_INTERVAL,
-      revalidateOnFocus: true,
     }
   );
 
@@ -67,7 +82,6 @@ export default function DashboardPage() {
     fetcher,
     {
       refreshInterval: REFRESH_INTERVAL,
-      revalidateOnFocus: true,
     }
   );
 
@@ -80,6 +94,11 @@ export default function DashboardPage() {
     if (selectedSiteId === 'all') return null;
     return (siteStats || []).find((s) => s.site_id === selectedSiteId) || null;
   }, [selectedSiteId, siteStats]);
+
+  const chargePointMetrics = useMemo(
+    () => normalizeDashboardChargePointMetrics(summary),
+    [summary],
+  );
 
   const sortedSiteStats = useMemo(() => {
     const list = siteStats || [];
@@ -126,16 +145,16 @@ export default function DashboardPage() {
       return [
         {
           title: t('充电桩总数'),
-          value: summary?.total_charge_points || 0,
-          subtitle: t(`在线 ${summary?.online_charge_points || 0} | 离线 ${summary?.offline_charge_points || 0}`),
+          value: chargePointMetrics.total,
+          subtitle: t(`在线 ${chargePointMetrics.online} | 离线 ${chargePointMetrics.offline}`),
           icon: Zap,
           color: 'from-purple-600 to-purple-800',
           iconBg: 'bg-purple-600/20',
         },
         {
           title: t('充电桩状态'),
-          value: summary?.charging_charge_points || 0,
-          subtitle: t(`充电中 ${summary?.charging_charge_points || 0} | 可用 ${summary?.available_charge_points || 0} | 故障 ${summary?.faulted_charge_points || 0}`),
+          value: chargePointMetrics.charging,
+          subtitle: t(`充电中 ${chargePointMetrics.charging} | 可用 ${chargePointMetrics.available} | 故障 ${chargePointMetrics.faulted}`),
           icon: Activity,
           color: 'from-blue-600 to-blue-800',
           iconBg: 'bg-blue-600/20',
@@ -150,7 +169,7 @@ export default function DashboardPage() {
         },
         {
           title: t('今日收入'),
-          value: `¥${asNumber(summary?.today_revenue).toFixed(2)}`,
+          value: formatMoney(asNumber(summary?.today_revenue)),
           subtitle: `${t('订单')} ${summary?.today_orders || 0}`,
           icon: DollarSign,
           color: 'from-yellow-600 to-yellow-800',
@@ -197,7 +216,7 @@ export default function DashboardPage() {
       },
       {
         title: t(`近${days}天收入`),
-        value: `¥${revenue.toFixed(2)}`,
+        value: formatMoney(revenue),
         subtitle: `${t('订单')} ${orders}`,
         icon: DollarSign,
         color: 'from-yellow-600 to-yellow-800',
@@ -205,7 +224,7 @@ export default function DashboardPage() {
       },
       ...common,
     ];
-  }, [days, selectedSiteId, selectedSiteStat, summary, t]);
+  }, [chargePointMetrics, days, formatMoney, selectedSiteId, selectedSiteStat, summary, t]);
 
   if (summaryLoading) {
     return (
@@ -322,7 +341,7 @@ export default function DashboardPage() {
                         <td className="py-3 px-4 text-slate-300">{s.faulted_charge_points}</td>
                         <td className="py-3 px-4 text-slate-300">{s.orders_count}</td>
                         <td className="py-3 px-4 text-slate-300">{asNumber(s.energy_kwh).toFixed(2)} kWh</td>
-                        <td className="py-3 px-4 text-slate-300">¥{asNumber(s.revenue).toFixed(2)}</td>
+                        <td className="py-3 px-4 text-slate-300">{formatMoney(asNumber(s.revenue))}</td>
                       </tr>
                     );
                   })}
@@ -376,7 +395,9 @@ export default function DashboardPage() {
           <CardHeader>
             <CardTitle className="text-white">{t('收入趋势')}</CardTitle>
             <p className="text-sm text-slate-400">
-              {t(`过去 ${days} 天收入（¥）${selectedSiteId === 'all' ? '（租户汇总）' : `（${selectedSite?.name || selectedSiteId}）`}`)}
+              {t(`近${days}天收入`)} ({currency}) · {selectedSiteId === 'all'
+                ? t('全部站点（租户汇总）')
+                : selectedSite?.name || selectedSiteId}
             </p>
           </CardHeader>
           <CardContent>
@@ -394,7 +415,7 @@ export default function DashboardPage() {
                   data={normalizedTrends.revenue_trend}
                   title={t('收入')}
                   color="hsl(var(--chart-secondary))"
-                  unit="¥"
+                  valueFormatter={formatMoney}
                 />
               </div>
             ) : (

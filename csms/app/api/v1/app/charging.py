@@ -3,12 +3,13 @@
 # 提供给终端用户通过扫码启动/结束充电的接口
 #
 
+import asyncio
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.orm import Session
-from sqlalchemy import func, and_
+from sqlalchemy import func, and_, or_
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal
 from uuid import UUID
@@ -16,7 +17,7 @@ from uuid import UUID
 from app.core.logging_config import get_logger
 from app.core.api_logging import log_api_request, log_api_response, log_api_error, log_business_operation
 from app.core.auth import get_current_user
-from app.database.base import get_db, tenant_id_context, SuperSessionLocal
+from app.database.base import get_db, SuperSessionLocal
 from app.database.models import AppUser, ChargingSession, MeterValue, AppWalletTransaction, Tariff, ChargePoint, EVSEStatus, EVSE, Site
 from app.services.billing_service import BillingService
 from app.services.qr_service import resolve_qr_token
@@ -32,6 +33,95 @@ logger = get_logger("ocpp_csms")
 router = APIRouter()
 
 
+_start_attempts: dict[tuple[str, str, int], asyncio.Task] = {}
+_start_attempts_guard = asyncio.Lock()
+_ACCEPTED_START_REPLAY_SECONDS = 30.0
+
+
+def _session_public_data(
+    session: ChargingSession,
+    charge_point: ChargePoint,
+    connector_id: int,
+) -> Dict[str, Any]:
+    """Return the public data needed by the App to resume an active charge."""
+    return {
+        "session_id": str(session.id),
+        "transaction_id": session.transaction_id,
+        "charge_point_id": str(charge_point.id),
+        "ocpp_identity": charge_point.ocpp_identity,
+        "connector_id": connector_id,
+        "start_time": session.start_time.isoformat() if session.start_time else None,
+        "status": session.status,
+        "meter_start": session.meter_start,
+        "meter_stop": session.meter_stop,
+    }
+
+
+def _remote_start_payload(result: Any) -> Dict[str, Any]:
+    if hasattr(result, "model_dump"):
+        return result.model_dump()
+    if hasattr(result, "dict"):
+        return result.dict()
+    if isinstance(result, dict):
+        return dict(result)
+    return {}
+
+
+def _remote_device_status(payload: Dict[str, Any]) -> Optional[str]:
+    details = payload.get("details") if isinstance(payload.get("details"), dict) else {}
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    return details.get("device_status") or data.get("status") or payload.get("status")
+
+
+async def _coalesced_remote_start(
+    key: tuple[str, str, int],
+    charge_point_identity: str,
+    id_tag: str,
+    connector_id: int,
+) -> Any:
+    """Share one device command between concurrent identical App requests."""
+    async with _start_attempts_guard:
+        task = _start_attempts.get(key)
+        if task is None:
+            task = asyncio.create_task(
+                send_remote_start(charge_point_identity, id_tag, connector_id)
+            )
+            _start_attempts[key] = task
+
+    try:
+        result = await asyncio.shield(task)
+    except BaseException:
+        async with _start_attempts_guard:
+            if _start_attempts.get(key) is task:
+                _start_attempts.pop(key, None)
+        raise
+
+    payload = _remote_start_payload(result)
+    device_status = _remote_device_status(payload)
+    if payload.get("success") and device_status == "Accepted":
+        loop = asyncio.get_running_loop()
+
+        def expire() -> None:
+            if _start_attempts.get(key) is task:
+                _start_attempts.pop(key, None)
+
+        loop.call_later(_ACCEPTED_START_REPLAY_SECONDS, expire)
+    else:
+        async with _start_attempts_guard:
+            if _start_attempts.get(key) is task:
+                _start_attempts.pop(key, None)
+    return result
+
+
+def _business_error(status_code: int, code: str, message: str, **details: Any) -> HTTPException:
+    exc = HTTPException(
+        status_code=status_code,
+        detail={"code": code, "message": message, **details},
+    )
+    exc.error_code = code
+    return exc
+
+
 async def get_current_app_user(
     current_user_payload: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -42,6 +132,10 @@ async def get_current_app_user(
     user_id = current_user_payload.get("user_id")
     if not user_id:
         raise HTTPException(status_code=401, detail="Invalid token")
+    try:
+        user_id = UUID(str(user_id))
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise HTTPException(status_code=401, detail="Invalid token") from exc
 
     app_user = db.query(AppUser).filter(AppUser.id == user_id).first()
     if not app_user:
@@ -55,7 +149,21 @@ class StartChargingRequest(BaseModel):
 
 
 class StopChargingRequest(BaseModel):
-    qr_token: str = Field(..., description="二维码 token（爆改测试版：token-only）", min_length=10)
+    qr_token: Optional[str] = Field(
+        None,
+        description="二维码 token；与 session_id 二选一",
+        min_length=10,
+    )
+    session_id: Optional[UUID] = Field(
+        None,
+        description="当前认证 AppUser 的 ongoing charging session UUID；与 qr_token 二选一",
+    )
+
+    @model_validator(mode="after")
+    def exactly_one_reference(self):
+        if (self.qr_token is None) == (self.session_id is None):
+            raise ValueError("Exactly one of qr_token or session_id must be provided")
+        return self
 
 
 class SettleChargingRequest(BaseModel):
@@ -66,25 +174,20 @@ class SettleChargingRequest(BaseModel):
 async def start_charging_by_scan(
     req: StartChargingRequest,
     current_user_obj: AppUser = Depends(get_current_app_user),
-    db: Session = Depends(get_db),
 ):
-    """
-    通过扫码启动充电：
-    - 解析 qr_token -> (operator_tenant_id, charge_point_id, connector_id)
-    - 使用平台用户 id 作为 OCPP idTag：APPUSER:{uuid}
-    - 实际 RemoteStart 结果只代表"请求已发送/是否被接受"，不一定立即产生 transactionId
-    """
+    """Resolve a QR token and wait for the device's RemoteStart response."""
     try:
         log_api_request(
             method="POST",
             path="/api/v1/app/charging/start",
             operation="start_charging",
             current_user=current_user_obj,
-            params={"qr_token": f"{req.qr_token[:10]}..."}
+            params={"qr_token": "[REDACTED]"}
         )
         
+        lookup_db = SuperSessionLocal()
         try:
-            token_rec = resolve_qr_token(db=db, token=req.qr_token)
+            token_rec = resolve_qr_token(db=lookup_db, token=req.qr_token)
         except Exception as e:
             log_api_error(
                 method="POST",
@@ -92,24 +195,72 @@ async def start_charging_by_scan(
                 operation="start_charging",
                 error=e,
                 current_user=current_user_obj,
-                params={"qr_token": f"{req.qr_token[:10]}..."}
+                params={"qr_token": "[REDACTED]"}
             )
             raise HTTPException(status_code=400, detail=f"Invalid QR token: {e}")
+        finally:
+            lookup_db.close()
 
-        # 检查用户是否有欠费
+        # App users are platform identities. QR ownership, not a client-selected
+        # tenant, defines the operator scope for this command.
         sdb = SuperSessionLocal()
         try:
             app_user = sdb.query(AppUser).filter(AppUser.id == current_user_obj.id).first()
-            
+            charge_point = sdb.query(ChargePoint).filter(
+                ChargePoint.id == token_rec.charge_point_id,
+                ChargePoint.tenant_id == token_rec.operator_tenant_id,
+            ).first()
+            if not charge_point:
+                raise HTTPException(status_code=404, detail="Charge point not found")
+
+            evse = sdb.query(EVSE).filter(
+                EVSE.charge_point_id == charge_point.id,
+                EVSE.evse_id == token_rec.connector_id,
+            ).first()
+            if not evse:
+                raise HTTPException(status_code=422, detail="QR connector does not exist")
+
+            active_session = (
+                sdb.query(ChargingSession)
+                .filter(
+                    ChargingSession.tenant_id == charge_point.tenant_id,
+                    ChargingSession.charge_point_id == charge_point.id,
+                    ChargingSession.evse_id == evse.id,
+                    ChargingSession.status == "ongoing",
+                    ChargingSession.end_time.is_(None),
+                )
+                .order_by(ChargingSession.start_time.desc())
+                .first()
+            )
+            if active_session:
+                is_owner = (
+                    active_session.app_user_id == current_user_obj.id
+                    or active_session.user_id == str(current_user_obj.id)
+                )
+                if is_owner:
+                    return {
+                        "success": True,
+                        "status": "already_active",
+                        "ocpp_identity": charge_point.ocpp_identity,
+                        "session": _session_public_data(
+                            active_session, charge_point, token_rec.connector_id
+                        ),
+                    }
+                raise _business_error(
+                    409,
+                    "CONNECTOR_OCCUPIED",
+                    "The connector already has an active charging session.",
+                    ocpp_identity=charge_point.ocpp_identity,
+                    connector_id=token_rec.connector_id,
+                )
+
+            if not app_user:
+                raise HTTPException(status_code=404, detail="User not found")
+
+            # Existing activity is checked first so a low balance or newly
+            # unpaid account can still recover its current session idempotently.
             if getattr(app_user, "has_unpaid_charges", False):
-                # 获取充电桩信息以检查站点
-                from app.database.models import ChargePoint
-                charger = sdb.query(ChargePoint).filter(
-                    ChargePoint.id == token_rec.charge_point_id
-                ).first()
-                
                 # 检查用户在该站点是否有未支付费用
-                from app.database.models import ChargingSession
                 unpaid_sessions = (
                     sdb.query(ChargingSession)
                     .filter(
@@ -118,13 +269,12 @@ async def start_charging_by_scan(
                     )
                 )
                 
-                if charger and charger.site_id:
+                if charge_point.site_id:
                     unpaid_sessions = unpaid_sessions.join(ChargePoint).filter(
-                        ChargePoint.site_id == charger.site_id
+                        ChargePoint.site_id == charge_point.site_id
                     )
                 
                 if unpaid_sessions.first():
-                    sdb.close()
                     error = HTTPException(
                         status_code=402,
                         detail={
@@ -147,7 +297,6 @@ async def start_charging_by_scan(
             min_bal = float(get_settings().min_wallet_balance_to_start)
             bal = float(app_user.balance or 0) if app_user else 0.0
             if bal < min_bal:
-                sdb.close()
                 error = HTTPException(
                     status_code=402,
                     detail={
@@ -186,15 +335,37 @@ async def start_charging_by_scan(
             details={"connector_id": token_rec.connector_id, "id_tag": id_tag}
     )
 
-    # 复用 ocpp_control 的实现
-        charge_point = db.query(ChargePoint).filter(ChargePoint.id == token_rec.charge_point_id).first()
-        if not charge_point:
-            raise HTTPException(status_code=404, detail="Charge point not found")
-        result = await send_remote_start(
+        attempt_key = (
+            str(current_user_obj.id),
+            str(token_rec.id),
+            token_rec.connector_id,
+        )
+        result = await _coalesced_remote_start(
+            attempt_key,
             charge_point.ocpp_identity,
             id_tag,
             token_rec.connector_id,
         )
+        payload = _remote_start_payload(result)
+        details = payload.get("details") if isinstance(payload.get("details"), dict) else {}
+        device_status = _remote_device_status(payload)
+        workflow_status = details.get("workflow_status")
+
+        if not payload.get("success") or device_status != "Accepted":
+            code = "START_IN_PROGRESS" if workflow_status == "start_in_progress" else "REMOTE_START_REJECTED"
+            message = (
+                "A start request is already in progress for this connector."
+                if code == "START_IN_PROGRESS"
+                else "The charge point rejected the start request."
+            )
+            raise _business_error(
+                409,
+                code,
+                message,
+                ocpp_identity=charge_point.ocpp_identity,
+                connector_id=token_rec.connector_id,
+                device_status=device_status or "Rejected",
+            )
         
         log_api_response(
             method="POST",
@@ -202,10 +373,17 @@ async def start_charging_by_scan(
             operation="start_charging",
             result="success",
             current_user=current_user_obj,
-            details={"charge_point_id": token_rec.charge_point_id, "connector_id": token_rec.connector_id, "status": result.get("status") if isinstance(result, dict) else "sent"}
+            details={"charge_point_id": token_rec.charge_point_id, "connector_id": token_rec.connector_id, "status": "accepted"}
         )
-        
-        return result
+
+        return {
+            "success": True,
+            "status": "accepted",
+            "ocpp_identity": charge_point.ocpp_identity,
+            "charge_point_id": str(charge_point.id),
+            "connector_id": token_rec.connector_id,
+            "device_status": "Accepted",
+        }
     except HTTPException:
         raise
     except Exception as e:
@@ -215,7 +393,7 @@ async def start_charging_by_scan(
             operation="start_charging",
             error=e,
             current_user=current_user_obj,
-            params={"qr_token": f"{req.qr_token[:10]}..."}
+            params={"qr_token": "[REDACTED]"}
         )
         raise
 
@@ -237,7 +415,7 @@ def check_charger_status(
         path="/api/v1/app/charging/check",
         operation="check_charger_status",
         current_user=current_user_obj,
-        params={"qr_token": f"{qr_token[:10]}..."}
+        params={"qr_token": "[REDACTED]"}
     )
     
     # 解析 QR token（使用 super session 绕过 RLS）
@@ -247,12 +425,12 @@ def check_charger_status(
             token_rec = resolve_qr_token(db=sdb, token=qr_token)
             charge_point_id = token_rec.charge_point_id
             connector_id = token_rec.connector_id
-            logger.info(f"[APP API] QR token resolved: charge_point_id={charge_point_id}, connector_id={connector_id}")
+            logger.info(f"[APP API] QR resolved: charge_point_id={charge_point_id}, connector_id={connector_id}")
         except ValueError as e:
-            logger.warning(f"[APP API] Invalid QR token: {qr_token[:20]}... - {e}")
+            logger.warning("[APP API] QR lookup rejected: %s", type(e).__name__)
             raise HTTPException(status_code=400, detail=f"Invalid QR token: {e}")
         except Exception as e:
-            logger.error(f"[APP API] Error resolving QR token: {e}", exc_info=True)
+            logger.error("[APP API] QR lookup failed: %s", type(e).__name__)
             raise HTTPException(status_code=400, detail=f"Invalid QR token: {e}")
     finally:
         sdb.close()
@@ -263,7 +441,7 @@ def check_charger_status(
         # 获取充电桩基本信息
         charger = db.query(ChargePoint).filter(ChargePoint.id == charge_point_id).first()
         if not charger:
-            logger.warning(f"[APP API] Charger not found: {charge_point_id} (from QR token: {qr_token[:20]}...)")
+            logger.warning("[APP API] Charger not found: %s (resolved from QR)", charge_point_id)
             raise HTTPException(status_code=404, detail=f"Charger not found: {charge_point_id}")
         
         logger.info(f"[APP API] Charger found: {charge_point_id}, tenant_id={charger.tenant_id}")
@@ -437,7 +615,7 @@ def check_charger_status(
             operation="check_charger_status",
             error=e,
             current_user=current_user_obj,
-            params={"qr_token": f"{qr_token[:10]}..."}
+            params={"qr_token": "[REDACTED]"}
         )
         raise
     finally:
@@ -446,11 +624,16 @@ def check_charger_status(
 
 @router.get("/active", summary="获取当前进行中的充电会话（终端用户）")
 def get_active_session(
-    qr_token: str = Query(..., description="二维码 token（爆改测试版：token-only）"),
+    qr_token: Optional[str] = Query(
+        None,
+        description="可选二维码 token；不传时恢复当前 AppUser 的唯一 ongoing 会话",
+    ),
     current_user_obj: AppUser = Depends(get_current_app_user),
 ):
     """
-    返回当前用户在某个充电桩上的 ongoing 会话（如果存在）。
+    返回当前用户的 ongoing 会话（如果存在）。
+    - 不传 qr_token：跨租户查找当前认证 AppUser 的唯一 ongoing 会话
+    - 传 qr_token：兼容旧客户端，并限定到二维码对应连接器
     注意：ChargingSession 是由协议事件（StartTransaction）创建的，所以 RemoteStart 后可能需要等待几秒才出现。
     """
     log_api_request(
@@ -458,53 +641,78 @@ def get_active_session(
         path="/api/v1/app/charging/active",
         operation="get_active_session",
         current_user=current_user_obj,
-        params={"qr_token": f"{qr_token[:10]}..."}
+        params={"qr_token": "[REDACTED]"}
     )
     
-    # token-only：通过 qr_token 解析得到 charge_point_id
-    sdb = SuperSessionLocal()
-    try:
-        token_rec = resolve_qr_token(db=sdb, token=qr_token)
-        charge_point_id = token_rec.charge_point_id
-    except Exception as e:
-        log_api_error(
-            method="GET",
-            path="/api/v1/app/charging/active",
-            operation="get_active_session",
-            error=e,
-            current_user=current_user_obj,
-            params={"qr_token": f"{qr_token[:10]}..."}
-        )
-        raise HTTPException(status_code=400, detail=f"Invalid QR token: {e}")
-    finally:
-        sdb.close()
-
     # 平台用户跨租户：用 super session 读取（绕过 RLS），并按 session.user_id 过滤
     db = SuperSessionLocal()
     try:
         user_id = str(current_user_obj.id)
-        session = (
-            db.query(ChargingSession)
-            .filter(
-                ChargingSession.charge_point_id == charge_point_id,
+        user_id_tag = f"APP{user_id.replace('-', '')[:17]}"
+        query = db.query(ChargingSession).filter(
+            or_(
+                ChargingSession.app_user_id == current_user_obj.id,
                 ChargingSession.user_id == user_id,
-                ChargingSession.status == "ongoing",
-                ChargingSession.end_time.is_(None),
-            )
-            .order_by(ChargingSession.start_time.desc())
-            .first()
+                ChargingSession.id_tag == user_id_tag,
+            ),
+            ChargingSession.status == "ongoing",
+            ChargingSession.end_time.is_(None),
         )
-        
-        if not session:
+
+        token_rec = None
+        if qr_token:
+            try:
+                token_rec = resolve_qr_token(db=db, token=qr_token)
+            except Exception as e:
+                log_api_error(
+                    method="GET",
+                    path="/api/v1/app/charging/active",
+                    operation="get_active_session",
+                    error=e,
+                    current_user=current_user_obj,
+                    params={"qr_token": "[REDACTED]"},
+                )
+                raise HTTPException(status_code=400, detail=f"Invalid QR token: {e}")
+            evse = db.query(EVSE).filter(
+                EVSE.charge_point_id == token_rec.charge_point_id,
+                EVSE.evse_id == token_rec.connector_id,
+            ).first()
+            if not evse:
+                raise HTTPException(status_code=404, detail="QR connector not found")
+            query = query.filter(
+                ChargingSession.charge_point_id == token_rec.charge_point_id,
+                ChargingSession.evse_id == evse.id,
+            )
+
+        sessions = query.order_by(ChargingSession.start_time.desc()).limit(2).all()
+        if not sessions:
             log_api_error(
                 method="GET",
                 path="/api/v1/app/charging/active",
                 operation="get_active_session",
                 error=HTTPException(status_code=404, detail="No active session"),
                 current_user=current_user_obj,
-                params={"charge_point_id": charge_point_id}
+                params={"charge_point_id": token_rec.charge_point_id if token_rec else None},
             )
             raise HTTPException(status_code=404, detail="No active session")
+        if not qr_token and len(sessions) > 1:
+            raise _business_error(
+                409,
+                "MULTIPLE_ACTIVE_SESSIONS",
+                "Multiple active sessions found; provide qr_token to select one.",
+            )
+        session = sessions[0]
+
+        charge_point = db.query(ChargePoint).filter(
+            ChargePoint.id == session.charge_point_id,
+            ChargePoint.tenant_id == session.tenant_id,
+        ).first()
+        evse = db.query(EVSE).filter(
+            EVSE.id == session.evse_id,
+            EVSE.charge_point_id == session.charge_point_id,
+        ).first()
+        if not charge_point or not evse:
+            raise HTTPException(status_code=404, detail="Active session asset not found")
 
         log_api_response(
             method="GET",
@@ -512,21 +720,23 @@ def get_active_session(
             operation="get_active_session",
             result="success",
             current_user=current_user_obj,
-            details={"session_id": session.id, "charge_point_id": charge_point_id}
+            details={"session_id": session.id, "charge_point_id": session.charge_point_id}
         )
 
         return {
-        "id": session.id,
-        "transaction_id": session.transaction_id,
-        "charge_point_id": session.charge_point_id,
-        "evse_id": session.evse_id,
-        "id_tag": session.id_tag,
-        "start_time": session.start_time.isoformat() if session.start_time else None,
-        "end_time": session.end_time.isoformat() if session.end_time else None,
-        "status": session.status,
-        "meter_start": session.meter_start,
-        "meter_stop": session.meter_stop,
-    }
+            "id": str(session.id),
+            "transaction_id": session.transaction_id,
+            "charge_point_id": str(session.charge_point_id),
+            "ocpp_identity": charge_point.ocpp_identity,
+            "evse_id": str(session.evse_id),
+            "connector_id": evse.evse_id,
+            "id_tag": session.id_tag,
+            "start_time": session.start_time.isoformat() if session.start_time else None,
+            "end_time": session.end_time.isoformat() if session.end_time else None,
+            "status": session.status,
+            "meter_start": session.meter_start,
+            "meter_stop": session.meter_stop,
+        }
     except HTTPException:
         raise
     except Exception as e:
@@ -536,7 +746,7 @@ def get_active_session(
             operation="get_active_session",
             error=e,
             current_user=current_user_obj,
-            params={"qr_token": f"{qr_token[:10]}..."}
+            params={"qr_token": "[REDACTED]"}
         )
         raise
     finally:
@@ -550,7 +760,8 @@ async def stop_charging(
 ):
     """
     结束充电：
-    - 先在 DB 查询该用户在此桩的 ongoing session，拿到 transaction_id
+    - qr_token/session_id 二选一
+    - 从认证 AppUser 查询本人 ongoing session，拿到 transaction_id
     - 再调用 RemoteStopTransaction
     """
     log_api_request(
@@ -558,40 +769,53 @@ async def stop_charging(
         path="/api/v1/app/charging/stop",
         operation="stop_charging",
         current_user=current_user_obj,
-        params={"qr_token": f"{req.qr_token[:10]}..."}
+        params={
+            "qr_token": "[REDACTED]" if req.qr_token else None,
+            "session_id": str(req.session_id) if req.session_id else None,
+        }
     )
-    
-    sdb = SuperSessionLocal()
-    try:
-        token_rec = resolve_qr_token(db=sdb, token=req.qr_token)
-        charge_point_id = token_rec.charge_point_id
-    except Exception as e:
-        log_api_error(
-            method="POST",
-            path="/api/v1/app/charging/stop",
-            operation="stop_charging",
-            error=e,
-            current_user=current_user_obj,
-            params={"qr_token": f"{req.qr_token[:10]}..."}
-        )
-        raise HTTPException(status_code=400, detail=f"Invalid QR token: {e}")
-    finally:
-        sdb.close()
 
     db = SuperSessionLocal()
     try:
         user_id = str(current_user_obj.id)
-        session = (
-            db.query(ChargingSession)
-            .filter(
-                ChargingSession.charge_point_id == charge_point_id,
+        user_id_tag = f"APP{user_id.replace('-', '')[:17]}"
+        query = db.query(ChargingSession).filter(
+            or_(
+                ChargingSession.app_user_id == current_user_obj.id,
                 ChargingSession.user_id == user_id,
-                ChargingSession.status == "ongoing",
-                ChargingSession.end_time.is_(None),
-            )
-            .order_by(ChargingSession.start_time.desc())
-            .first()
+                ChargingSession.id_tag == user_id_tag,
+            ),
+            ChargingSession.status == "ongoing",
+            ChargingSession.end_time.is_(None),
         )
+
+        if req.session_id:
+            query = query.filter(ChargingSession.id == req.session_id)
+        else:
+            try:
+                token_rec = resolve_qr_token(db=db, token=req.qr_token)
+            except Exception as e:
+                log_api_error(
+                    method="POST",
+                    path="/api/v1/app/charging/stop",
+                    operation="stop_charging",
+                    error=e,
+                    current_user=current_user_obj,
+                    params={"qr_token": "[REDACTED]"},
+                )
+                raise HTTPException(status_code=400, detail=f"Invalid QR token: {e}")
+            evse = db.query(EVSE).filter(
+                EVSE.charge_point_id == token_rec.charge_point_id,
+                EVSE.evse_id == token_rec.connector_id,
+            ).first()
+            if not evse:
+                raise HTTPException(status_code=404, detail="QR connector not found")
+            query = query.filter(
+                ChargingSession.charge_point_id == token_rec.charge_point_id,
+                ChargingSession.evse_id == evse.id,
+            )
+
+        session = query.order_by(ChargingSession.start_time.desc()).first()
         if not session:
             log_api_error(
                 method="POST",
@@ -599,49 +823,11 @@ async def stop_charging(
                 operation="stop_charging",
                 error=HTTPException(status_code=404, detail="No active session to stop"),
                 current_user=current_user_obj,
-                params={"charge_point_id": charge_point_id}
+                params={"session_id": str(req.session_id) if req.session_id else None}
             )
             raise HTTPException(status_code=404, detail="No active session to stop")
 
-        from app.database.models import PaymentOrder
-
-        if session.payment_status == "unpaid":
-            if session.payment_order_id:
-                payment_order = db.query(PaymentOrder).filter(
-                    PaymentOrder.id == session.payment_order_id
-                ).first()
-                if payment_order and payment_order.status not in ["approved"]:
-                    raise HTTPException(
-                        status_code=402,
-                        detail={
-                            "code": "PAYMENT_REQUIRED",
-                            "message": "Payment required before stopping charging session",
-                            "payment_order_id": str(payment_order.id),
-                        }
-                    )
-            else:
-                raise HTTPException(
-                    status_code=402,
-                    detail={
-                        "code": "PAYMENT_REQUIRED",
-                        "message": "Payment required before stopping charging session",
-                    }
-                )
-
-        if session.payment_order_id:
-            if session.payment_status != "paid":
-                payment_order = db.query(PaymentOrder).filter(
-                    PaymentOrder.id == session.payment_order_id
-                ).first()
-                if not payment_order or payment_order.status != "approved":
-                    raise HTTPException(
-                        status_code=402,
-                        detail={
-                            "code": "PAYMENT_REQUIRED",
-                            "message": "Payment must be completed before stopping charging session",
-                            "payment_order_id": str(session.payment_order_id) if session.payment_order_id else None,
-                        }
-                    )
+        charge_point_id = session.charge_point_id
 
         log_business_operation(
             operation="停止充电",
@@ -652,7 +838,10 @@ async def stop_charging(
             details={"charge_point_id": charge_point_id, "transaction_id": session.transaction_id}
         )
 
-        charge_point = db.query(ChargePoint).filter(ChargePoint.id == charge_point_id).first()
+        charge_point = db.query(ChargePoint).filter(
+            ChargePoint.id == charge_point_id,
+            ChargePoint.tenant_id == session.tenant_id,
+        ).first()
         if not charge_point:
             raise HTTPException(status_code=404, detail="Charge point not found")
         result = await send_remote_stop(charge_point.ocpp_identity, session.transaction_id)
@@ -676,7 +865,10 @@ async def stop_charging(
             operation="stop_charging",
             error=e,
             current_user=current_user_obj,
-            params={"qr_token": f"{req.qr_token[:10]}..."}
+            params={
+                "qr_token": "[REDACTED]" if req.qr_token else None,
+                "session_id": str(req.session_id) if req.session_id else None,
+            }
         )
         raise
     finally:

@@ -23,35 +23,9 @@ import Screen from '../../components/ui/Screen';
 import TextField from '../../components/ui/TextField';
 import Button from '../../components/ui/Button';
 import { radius, spacing, typography } from '../../theme';
+import { parseQrPayload } from '../../utils/qrPayload';
 
 type Nav = StackNavigationProp<RootStackParamList>;
-
-type ParsedQr = { qrToken: string };
-
-function parseQrPayload(raw: string): ParsedQr | null {
-  const s = (raw || '').trim();
-  if (!s) return null;
-
-  // 1) JSON: {"qrToken":"..."} 或 {"qr_token":"..."}
-  if ((s.startsWith('{') && s.endsWith('}')) || (s.startsWith('[') && s.endsWith(']'))) {
-    try {
-      const obj: any = JSON.parse(s);
-      const qrToken = obj.qrToken || obj.qr_token;
-      if (typeof qrToken === 'string' && qrToken.trim()) return { qrToken: qrToken.trim() };
-    } catch {
-      // ignore
-    }
-  }
-
-  // 2) token-only：qr:<token>
-  if (s.toLowerCase().startsWith('qr:')) {
-    const token = s.slice(3).trim();
-    if (token) return { qrToken: token };
-  }
-
-  // 爆改阶段不再兼容旧二维码格式
-  return null;
-}
 
 const ScanScreen = () => {
   const { t } = useI18n();
@@ -65,9 +39,7 @@ const ScanScreen = () => {
 
   const canUseCamera = Platform.OS !== 'web';
 
-  const hint = useMemo(() => {
-    return 'Formato: qr:<token> o JSON {"qrToken":"..."}';
-  }, []);
+  const hint = useMemo(() => t.scan.manualHint, [t.scan.manualHint]);
 
   const goToProcess = (payload: string) => {
     const parsed = parseQrPayload(payload);
@@ -81,7 +53,7 @@ const ScanScreen = () => {
   };
 
   return (
-    <Screen contentStyle={styles.container}>
+    <Screen testID="app-scan-screen" accessibilityLabel={t.scan.title} contentStyle={styles.container}>
       <View style={styles.header}>
         <Text style={styles.title}>{t.scan.title}</Text>
         <Text style={styles.subTitle}>{t.scan.subtitle}</Text>
@@ -92,6 +64,8 @@ const ScanScreen = () => {
           <Text style={styles.cardTitle}>{t.scan.manualTitle}</Text>
           <Text style={styles.cardHint}>{hint}</Text>
           <TextField
+            testID="app-qr-manual-input"
+            accessibilityLabel={t.scan.manualTitle}
             value={manual}
             onChangeText={setManual}
             placeholder={t.scan.placeholder}
@@ -99,9 +73,9 @@ const ScanScreen = () => {
           />
           <View style={styles.row}>
             {canUseCamera && !hasPermission && (
-              <Button title={t.scan.requestCamera} variant="secondary" onPress={requestPermission} style={styles.action} />
+              <Button testID="app-camera-permission" title={t.scan.requestCamera} variant="secondary" onPress={requestPermission} style={styles.action} />
             )}
-            <Button title={t.scan.start} onPress={() => goToProcess(manual)} style={styles.action} />
+            <Button testID="app-qr-check-submit" title={t.scan.start} onPress={() => goToProcess(manual)} style={styles.action} />
           </View>
         </View>
       )}
@@ -110,6 +84,8 @@ const ScanScreen = () => {
       {canUseCamera && hasPermission && (
         <View style={styles.cameraWrap}>
           <CameraView
+            testID="app-qr-camera"
+            accessibilityLabel={t.scan.subtitle}
             style={styles.camera}
             onBarcodeScanned={(result) => {
               if (scanned) return;

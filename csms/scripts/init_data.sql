@@ -29,7 +29,7 @@ BEGIN
     VALUES (tenant_id_val, '默认租户', NULL, 'active', 'premium', 100, 1000, '{}'::jsonb, NOW(), NOW());
     RAISE NOTICE '✓ 租户创建成功: 默认租户 (ID: %)', tenant_id_val;
     
-    -- 2. 创建超级管理员用户（密码: admin123）
+    -- 2. 创建超级管理员用户（密码必须由受支持的 Python bootstrap 显式注入）
     -- 注意：这里需要使用实际的密码哈希，但由于我们无法在 SQL 中调用 Python 函数，
     -- 我们将在 Python 脚本中计算哈希值，然后通过参数传入
     -- 这里先创建一个占位符，实际哈希值将在 Python 脚本中设置

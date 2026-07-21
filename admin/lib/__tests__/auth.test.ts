@@ -14,7 +14,7 @@ describe('auth utilities', () => {
     if (typeof window !== 'undefined' && window.localStorage) {
       try {
         window.localStorage.clear();
-      } catch (e) {
+      } catch {
         Object.keys(window.localStorage).forEach(key => {
           window.localStorage.removeItem(key);
         });

@@ -23,20 +23,12 @@ import type { ChargingRecord } from '../../api/transactions';
 import ScreenHeader from '../../components/ui/ScreenHeader';
 import Screen from '../../components/ui/Screen';
 import { localizeStatus } from '../../utils/localizeStatus';
+import { formatDateTime, publicChargerIdentity } from '../../utils/localizedDisplay';
 
 type Nav = StackNavigationProp<RootStackParamList, 'ChargingHistory'>;
 
-function fmtTime(s?: string | null) {
-  if (!s) return '—';
-  try {
-    return new Date(s).toLocaleString();
-  } catch {
-    return s;
-  }
-}
-
 const ChargingHistoryScreen = () => {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
 
   const navigation = useNavigation<Nav>();
   const dispatch = useAppDispatch();
@@ -50,11 +42,14 @@ const ChargingHistoryScreen = () => {
   }, []);
 
   const renderItem = ({ item }: { item: ChargingRecord }) => {
-    const title = item.site_name || item.charge_point_id;
-    const sub = `${fmtTime(item.start_time)}  ·  ${localizeStatus(item.status, t)}`;
+    const title = item.site_name || publicChargerIdentity(item, t.common.unknown);
+    const sub = `${formatDateTime(item.start_time, locale)}  ·  ${localizeStatus(item.status, t)}`;
     const energy = typeof item.energy_kwh === 'number' ? `${item.energy_kwh.toFixed(2)} kWh` : '—';
     return (
       <TouchableOpacity
+        testID="app-history-row"
+        accessibilityLabel={`${title}, ${sub}, ${energy}`}
+        accessibilityRole="button"
         style={styles.card}
         onPress={() => navigation.navigate('ChargingHistoryDetail', { id: item.id })}
       >
@@ -70,10 +65,10 @@ const ChargingHistoryScreen = () => {
   };
 
   return (
-    <Screen>
+    <Screen testID="app-history-screen" accessibilityLabel={t.history.title}>
       <ScreenHeader title={t.history.title} onBack={() => navigation.goBack()} />
 
-      {!!error && <Text style={styles.errorText}>{error}</Text>}
+      {!!error && <Text style={styles.errorText}>{t.history.loadFailed}</Text>}
 
       {loadingList && items.length === 0 ? (
         <View style={styles.center}>
@@ -86,6 +81,7 @@ const ChargingHistoryScreen = () => {
         </View>
       ) : (
         <FlatList
+          testID="app-history-list"
           data={items}
           keyExtractor={(it) => String(it.id)}
           renderItem={renderItem}

@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import Link from 'next/link';
 import useSWR from 'swr';
 import { apiGet, apiPut } from '@/lib/api';
 import { API_ENDPOINTS } from '@/lib/constants';
@@ -9,9 +10,20 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Search, AlertTriangle, CheckCircle, XCircle } from 'lucide-react';
+import { Search, AlertTriangle, CheckCircle, XCircle, MapPin, Cpu, CircuitBoard } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { useI18n } from '@/lib/i18n';
+import { matchesSearchQuery } from '@/lib/search';
+import { hasPermission, usePermissions } from '@/hooks/usePermissions';
+import {
+  alertDateLocale,
+  alertRawMessage,
+  alertSeverityLabel,
+  alertStatusLabel,
+  alertText,
+  localizedAlertMessage,
+  sanitizedAlertMessageParams,
+} from './alert-i18n';
 
 const fetcher = (url: string) => apiGet<Alert[]>(url);
 
@@ -19,7 +31,9 @@ export default function AlertsPage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [severityFilter, setSeverityFilter] = useState<string>('all');
   const [statusFilter, setStatusFilter] = useState<string>('all');
-  const { t, locale } = useI18n();
+  const { locale } = useI18n();
+  const { permissions } = usePermissions();
+  const canWriteAlerts = hasPermission(permissions, 'alerts.write');
 
   const { data: alerts, error, isLoading, mutate } = useSWR<Alert[]>(
     API_ENDPOINTS.ALERTS,
@@ -30,9 +44,19 @@ export default function AlertsPage() {
   );
 
   const filteredAlerts = alerts?.filter((alert) => {
-    const matchesSearch =
-      alert.ocpp_identity?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      alert.description.toLowerCase().includes(searchQuery.toLowerCase());
+    const localizedMessage = localizedAlertMessage(locale, alert);
+    const matchesSearch = matchesSearchQuery(searchQuery, [
+      alert.alert_code,
+      localizedMessage.title,
+      localizedMessage.description,
+      alert.site?.name,
+      alert.site?.address,
+      alert.charge_point?.ocpp_identity || alert.ocpp_identity,
+      alert.charge_point?.model,
+      alert.charge_point?.serial_number,
+      alert.evse?.evse_id,
+      alert.evse?.physical_reference,
+    ]);
     const matchesSeverity = severityFilter === 'all' || alert.severity === severityFilter;
     const matchesStatus = statusFilter === 'all' || alert.status === statusFilter;
     return matchesSearch && matchesSeverity && matchesStatus;
@@ -42,10 +66,10 @@ export default function AlertsPage() {
     try {
       await apiPut(API_ENDPOINTS.ALERT_ACKNOWLEDGE(alertId));
       mutate();
-      alert(t('告警已确认'));
+      window.alert(alertText(locale, 'acknowledgedNotice'));
     } catch (error) {
       console.error('Acknowledge failed:', error);
-      alert(t('确认失败'));
+      window.alert(alertText(locale, 'acknowledgeFailed'));
     }
   };
 
@@ -53,10 +77,10 @@ export default function AlertsPage() {
     try {
       await apiPut(API_ENDPOINTS.ALERT_RESOLVE(alertId));
       mutate();
-      alert(t('告警已解决'));
+      window.alert(alertText(locale, 'resolvedNotice'));
     } catch (error) {
       console.error('Resolve failed:', error);
-      alert(t('解决失败'));
+      window.alert(alertText(locale, 'resolveFailed'));
     }
   };
 
@@ -76,7 +100,7 @@ export default function AlertsPage() {
   if (isLoading) {
     return (
       <div className="flex items-center justify-center h-full">
-        <div className="text-slate-400">{t('加载中...')}</div>
+        <div className="text-slate-400">{alertText(locale, 'loading')}</div>
       </div>
     );
   }
@@ -84,16 +108,16 @@ export default function AlertsPage() {
   if (error) {
     return (
       <div className="flex items-center justify-center h-full">
-        <div className="text-red-400">{t('加载失败，请刷新页面重试')}</div>
+        <div className="text-red-400">{alertText(locale, 'loadFailed')}</div>
       </div>
     );
   }
 
   return (
-    <div className="space-y-6">
+    <div data-testid="admin-alerts-page" className="space-y-6">
       <div>
-        <h1 className="text-3xl font-bold text-white">{t('告警管理')}</h1>
-        <p className="text-slate-400 mt-1">{t('查看和处理系统告警')}</p>
+        <h1 className="text-3xl font-bold text-white">{alertText(locale, 'pageTitle')}</h1>
+        <p className="text-slate-400 mt-1">{alertText(locale, 'pageSubtitle')}</p>
       </div>
 
       <Card className="bg-slate-800/80 backdrop-blur-sm border-slate-700">
@@ -102,130 +126,185 @@ export default function AlertsPage() {
             <div className="flex-1 relative">
               <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 h-4 w-4 text-slate-400" />
               <Input
+                data-testid="admin-alert-search"
                 type="text"
-                placeholder={t('搜索 OCPP 身份、描述...')}
+                placeholder={alertText(locale, 'searchPlaceholder')}
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 className="pl-10 bg-slate-700/50 border-slate-600"
               />
             </div>
             <Select value={severityFilter} onValueChange={setSeverityFilter}>
-              <SelectTrigger className="w-full md:w-[180px] bg-slate-700/50 border-slate-600">
-                <SelectValue placeholder={t('严重程度')} />
+              <SelectTrigger data-testid="admin-alert-severity-filter" className="w-full md:w-[180px] bg-slate-700/50 border-slate-600">
+                <SelectValue placeholder={alertText(locale, 'severity')} />
               </SelectTrigger>
               <SelectContent className="bg-slate-800 border-slate-700">
-                <SelectItem value="all">{t('全部')}</SelectItem>
-                <SelectItem value="critical">{t('严重')}</SelectItem>
-                <SelectItem value="warning">{t('警告')}</SelectItem>
-                <SelectItem value="info">{t('信息')}</SelectItem>
+                <SelectItem value="all">{alertText(locale, 'all')}</SelectItem>
+                <SelectItem value="critical">{alertSeverityLabel(locale, 'critical')}</SelectItem>
+                <SelectItem value="warning">{alertSeverityLabel(locale, 'warning')}</SelectItem>
+                <SelectItem value="info">{alertSeverityLabel(locale, 'info')}</SelectItem>
               </SelectContent>
             </Select>
             <Select value={statusFilter} onValueChange={setStatusFilter}>
-              <SelectTrigger className="w-full md:w-[180px] bg-slate-700/50 border-slate-600">
-                <SelectValue placeholder={t('状态')} />
+              <SelectTrigger data-testid="admin-alert-status-filter" className="w-full md:w-[180px] bg-slate-700/50 border-slate-600">
+                <SelectValue placeholder={alertText(locale, 'status')} />
               </SelectTrigger>
               <SelectContent className="bg-slate-800 border-slate-700">
-                <SelectItem value="all">{t('全部')}</SelectItem>
-                <SelectItem value="pending">{t('待处理')}</SelectItem>
-                <SelectItem value="acknowledged">{t('已确认')}</SelectItem>
-                <SelectItem value="resolved">{t('已解决')}</SelectItem>
+                <SelectItem value="all">{alertText(locale, 'all')}</SelectItem>
+                <SelectItem value="pending">{alertStatusLabel(locale, 'pending')}</SelectItem>
+                <SelectItem value="acknowledged">{alertStatusLabel(locale, 'acknowledged')}</SelectItem>
+                <SelectItem value="resolved">{alertStatusLabel(locale, 'resolved')}</SelectItem>
               </SelectContent>
             </Select>
           </div>
         </CardContent>
       </Card>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+      <div className="space-y-3">
         {filteredAlerts && filteredAlerts.length > 0 ? (
-          filteredAlerts.map((alert) => (
-            <Card
-              key={alert.id}
-              className="bg-slate-800/80 backdrop-blur-sm border-slate-700 hover:border-purple-500/50 transition-colors"
-            >
-              <CardHeader>
-                <div className="flex items-start justify-between">
-                  <div className="flex items-center gap-3">
-                    <AlertTriangle className={`h-5 w-5 ${
-                      alert.severity === 'critical' ? 'text-red-400' :
-                      alert.severity === 'warning' ? 'text-yellow-400' : 'text-blue-400'
-                    }`} />
-                    <div>
-                      <CardTitle className="text-white text-lg">{t(alert.title)}</CardTitle>
-                      <Badge className={`mt-2 ${getSeverityColor(alert.severity)}`}>
-                        {t(alert.severity)}
-                      </Badge>
+          filteredAlerts.map((alert) => {
+            const message = localizedAlertMessage(locale, alert);
+            const rawMessage = alertRawMessage(alert);
+            const siteCode = alert.site?.site_code;
+            const ocppIdentity = alert.charge_point?.ocpp_identity || alert.ocpp_identity;
+            const safeMessageParams = sanitizedAlertMessageParams(alert.message_params);
+            const hasMessageParams = Object.keys(safeMessageParams).length > 0;
+
+            return (
+              <Card
+                key={alert.id}
+                data-testid="admin-alert-card"
+                className="bg-slate-800/80 backdrop-blur-sm border-slate-700 hover:border-purple-500/50 transition-colors"
+              >
+                <CardContent className="p-4 md:p-5">
+                  <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-start gap-3">
+                        <AlertTriangle className={`mt-0.5 h-5 w-5 shrink-0 ${
+                          alert.severity === 'critical' ? 'text-red-400' :
+                          alert.severity === 'warning' ? 'text-yellow-400' : 'text-blue-400'
+                        }`} />
+                        <div className="min-w-0">
+                          <h2 className="text-base font-semibold text-white">{message.title}</h2>
+                          <p className="mt-1 text-sm text-slate-300">{message.description}</p>
+                        </div>
+                      </div>
+                      <div className="mt-3 flex flex-wrap gap-2 pl-8">
+                        <Badge className={getSeverityColor(alert.severity)}>
+                          {alertSeverityLabel(locale, alert.severity)}
+                        </Badge>
+                        <Badge variant="outline" className="border-slate-600 text-slate-200">
+                          {alertStatusLabel(locale, alert.status)}
+                        </Badge>
+                        <span className="self-center text-xs text-slate-400">
+                          {alertText(locale, 'occurredAt')}: {new Date(alert.created_at).toLocaleString(alertDateLocale(locale))}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="flex shrink-0 flex-wrap gap-2 lg:justify-end">
+                      {canWriteAlerts && alert.status === 'pending' && (
+                        <Button
+                          data-testid="admin-alert-acknowledge"
+                          size="sm"
+                          onClick={() => handleAcknowledge(alert.id)}
+                          className="bg-yellow-600 hover:bg-yellow-700"
+                        >
+                          <CheckCircle className="h-4 w-4" />
+                          {alertText(locale, 'acknowledge')}
+                        </Button>
+                      )}
+                      {canWriteAlerts && alert.status !== 'resolved' && (
+                        <Button
+                          data-testid="admin-alert-resolve"
+                          size="sm"
+                          onClick={() => handleResolve(alert.id)}
+                          className="bg-green-600 hover:bg-green-700"
+                        >
+                          <XCircle className="h-4 w-4" />
+                          {alertText(locale, 'resolve')}
+                        </Button>
+                      )}
                     </div>
                   </div>
-                </div>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <div>
-                  <p className="text-sm text-slate-400">{t('描述')}</p>
-                  <p className="text-white mt-1">{t(alert.description)}</p>
-                </div>
-                {alert.ocpp_identity && (
-                  <div>
-                    <p className="text-sm text-slate-400">{t('OCPP 身份')}</p>
-                    <p className="text-white mt-1">{alert.ocpp_identity}</p>
-                  </div>
-                )}
-                <div>
-                  <p className="text-sm text-slate-400">{t('发生时间')}</p>
-                  <p className="text-white mt-1">
-                    {new Date(alert.created_at).toLocaleString(
-                      locale === 'en' ? 'en-US' : locale === 'es' ? 'es-ES' : 'zh-CN'
-                    )}
-                  </p>
-                </div>
-                <div className="flex gap-2 pt-2">
-                  {alert.status === 'pending' && (
-                    <>
-                      <Button
-                        size="sm"
-                        onClick={() => handleAcknowledge(alert.id)}
-                        className="flex-1 bg-yellow-600 hover:bg-yellow-700"
-                      >
-                        <CheckCircle className="h-4 w-4 mr-2" />
-                        {t('确认')}
-                      </Button>
-                      <Button
-                        size="sm"
-                        onClick={() => handleResolve(alert.id)}
-                        className="flex-1 bg-green-600 hover:bg-green-700"
-                      >
-                        <XCircle className="h-4 w-4 mr-2" />
-                        {t('解决')}
-                      </Button>
-                    </>
-                  )}
-                  {alert.status === 'acknowledged' && (
-                    <Button
-                      size="sm"
-                      onClick={() => handleResolve(alert.id)}
-                      className="flex-1 bg-green-600 hover:bg-green-700"
-                    >
-                      <XCircle className="h-4 w-4 mr-2" />
-                      {t('解决')}
-                    </Button>
-                  )}
-                  {alert.status === 'resolved' && (
-                      <div className="flex-1 text-center text-sm text-slate-400">
-                      {t('已解决')}
+
+                  <div className="mt-4 grid gap-3 rounded-lg border border-slate-700 bg-slate-900/35 p-3 md:grid-cols-3">
+                    <div className="min-w-0">
+                      <p className="flex items-center gap-1.5 text-xs font-medium uppercase tracking-wide text-slate-400">
+                        <MapPin className="h-3.5 w-3.5" /> {alertText(locale, 'site')}
+                      </p>
+                      <p className="mt-1 truncate text-sm font-medium text-white">{alert.site?.name || alertText(locale, 'unassigned')}</p>
+                      {alert.site?.address && <p className="truncate text-xs text-slate-400">{alert.site.address}</p>}
+                      {siteCode && (
+                        <Button asChild variant="link" size="sm" className="h-auto p-0 text-purple-300">
+                          <Link href={`/sites/${encodeURIComponent(siteCode)}`}>{alertText(locale, 'viewSite')}</Link>
+                        </Button>
+                      )}
                     </div>
-                  )}
-                </div>
-              </CardContent>
-            </Card>
-          ))
+
+                    <div className="min-w-0">
+                      <p className="flex items-center gap-1.5 text-xs font-medium uppercase tracking-wide text-slate-400">
+                        <Cpu className="h-3.5 w-3.5" /> {alertText(locale, 'device')}
+                      </p>
+                      <p className="mt-1 truncate text-sm font-medium text-white">{ocppIdentity || alertText(locale, 'unassigned')}</p>
+                      {(alert.charge_point?.model || alert.charge_point?.serial_number) && (
+                        <p className="truncate text-xs text-slate-400">
+                          {alert.charge_point?.model && `${alertText(locale, 'model')}: ${alert.charge_point.model}`}
+                          {alert.charge_point?.model && alert.charge_point?.serial_number && ' · '}
+                          {alert.charge_point?.serial_number && `${alertText(locale, 'serialNumber')}: ${alert.charge_point.serial_number}`}
+                        </p>
+                      )}
+                      {ocppIdentity && (
+                        <Button asChild variant="link" size="sm" className="h-auto p-0 text-purple-300">
+                          <Link href={`/chargers/${encodeURIComponent(ocppIdentity)}`}>{alertText(locale, 'viewDevice')}</Link>
+                        </Button>
+                      )}
+                    </div>
+
+                    <div className="min-w-0">
+                      <p className="flex items-center gap-1.5 text-xs font-medium uppercase tracking-wide text-slate-400">
+                        <CircuitBoard className="h-3.5 w-3.5" /> {alertText(locale, 'evse')}
+                      </p>
+                      <p className="mt-1 truncate text-sm font-medium text-white">
+                        {alert.evse?.evse_id == null ? alertText(locale, 'unassigned') : `EVSE ${alert.evse.evse_id}`}
+                      </p>
+                      {alert.evse?.physical_reference && (
+                        <p className="truncate text-xs text-slate-400">
+                          {alertText(locale, 'physicalReference')}: {alert.evse.physical_reference}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+
+                  <details data-testid="admin-alert-technical-details" className="mt-3 text-sm text-slate-300">
+                    <summary className="w-fit cursor-pointer select-none text-slate-400 hover:text-slate-200">
+                      {alertText(locale, 'technicalDetails')}
+                    </summary>
+                    <div className="mt-2 space-y-2 rounded-md bg-slate-950/60 p-3 font-mono text-xs">
+                      {alert.alert_code && <p><span className="text-slate-500">{alertText(locale, 'alertCode')}:</span> {alert.alert_code}</p>}
+                      {rawMessage && <p className="whitespace-pre-wrap break-words"><span className="text-slate-500">{alertText(locale, 'rawMessage')}:</span> {rawMessage}</p>}
+                      {hasMessageParams && (
+                        <div>
+                          <p className="text-slate-500">{alertText(locale, 'messageParams')}:</p>
+                          <pre className="mt-1 overflow-x-auto whitespace-pre-wrap break-words">{JSON.stringify(safeMessageParams, null, 2)}</pre>
+                        </div>
+                      )}
+                      {!alert.alert_code && !rawMessage && !hasMessageParams && <p>{alertText(locale, 'noTechnicalDetails')}</p>}
+                    </div>
+                  </details>
+                </CardContent>
+              </Card>
+            );
+          })
         ) : (
-          <div className="col-span-full text-center py-12">
+          <div className="text-center py-12">
             <AlertTriangle className="h-12 w-12 text-slate-500 mx-auto mb-4" />
-            <p className="text-slate-400">{t('没有找到告警')}</p>
+            <p className="text-slate-400">{alertText(locale, 'empty')}</p>
           </div>
         )}
       </div>
 
-      <AlertRulesSection />
+      <AlertRulesSection permissions={permissions} />
     </div>
   );
 }
@@ -238,12 +317,15 @@ interface AlertRule {
   is_enabled: boolean;
 }
 
-function AlertRulesSection() {
+function AlertRulesSection({ permissions }: { permissions: string[] }) {
   const { t } = useI18n();
+  const canReadRules = hasPermission(permissions, 'alert_rules.read');
   const { data: rules, isLoading } = useSWR<AlertRule[]>(
-    API_ENDPOINTS.ALERT_RULES,
+    canReadRules ? API_ENDPOINTS.ALERT_RULES : null,
     (url: string) => apiGet<AlertRule[]>(url)
   );
+
+  if (!canReadRules) return null;
 
   return (
     <Card className="bg-slate-800/80 backdrop-blur-sm border-slate-700">

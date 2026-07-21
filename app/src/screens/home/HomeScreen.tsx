@@ -15,8 +15,8 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import * as Location from 'expo-location';
 import { COLORS, MAP_CONFIG, IOS_STYLES } from '../../constants/config';
 import { useAppDispatch, useAppSelector } from '../../hooks/useRedux';
-import { fetchChargers, fetchNearbyChargers } from '../../store/slices/chargerSlice';
-import { Charger } from '../../api/chargers';
+import { fetchSites } from '../../store/slices/siteSlice';
+import type { SiteSummary } from '../../api/sites';
 import { useNavigation } from '@react-navigation/native';
 import type { StackNavigationProp } from '@react-navigation/stack';
 import type { RootStackParamList } from '../../types';
@@ -30,13 +30,19 @@ import TextField from '../../components/ui/TextField';
 import { useI18n } from '../../i18n';
 import { SkeletonCard } from '../../components/ui/Skeleton';
 import { formatDistance } from '../../utils/formatDistance';
-import { localizeStatus } from '../../utils/localizeStatus';
+import BrandLogo from '../../components/brand/BrandLogo';
+import { connectorStandardLabel } from '../../utils/connectorDisplay';
+import {
+  getSiteStatusBreakdown,
+  getSiteStatusColor,
+  getSiteAvailability,
+} from '../../utils/siteStatus';
 
 const HomeScreen = () => {
   const { t } = useI18n();
 
   const dispatch = useAppDispatch();
-  const { chargers, loading, error } = useAppSelector((state) => state.charger);
+  const { sites, loading, error } = useAppSelector((state) => state.site);
   const navigation = useNavigation<StackNavigationProp<RootStackParamList>>();
   
   const [viewMode, setViewMode] = useState<'list' | 'map'>('list');
@@ -62,22 +68,18 @@ const HomeScreen = () => {
         ];
         setUserLocation(coords);
         
-        // 获取附近的充电站
-        dispatch(
-          fetchNearbyChargers({
-            latitude: location.coords.latitude,
-            longitude: location.coords.longitude,
-            radius: MAP_CONFIG.SEARCH_RADIUS,
-          })
-        );
+        dispatch(fetchSites({
+          latitude: location.coords.latitude,
+          longitude: location.coords.longitude,
+          radius: MAP_CONFIG.SEARCH_RADIUS,
+        }));
       } else {
-        // 没有位置权限，获取所有充电站
-        dispatch(fetchChargers({ filter_type: 'configured' }));
+        dispatch(fetchSites(undefined));
       }
     } catch (err) {
-      console.error('Failed to load chargers:', err);
+      console.error('Failed to load sites:', err);
       // 出错时也获取所有充电站
-      dispatch(fetchChargers({ filter_type: 'configured' }));
+      dispatch(fetchSites(undefined));
     }
   };
 
@@ -87,44 +89,118 @@ const HomeScreen = () => {
     setRefreshing(false);
   };
 
-  const handleMarkerPress = (charger: Charger) => {
-    // 进入详情页（Phase 2.4）
-    navigation.navigate('StationDetail', { chargePointId: charger.id });
+  const handleMarkerPress = (site: SiteSummary) => {
+    navigation.navigate('StationDetail', { siteId: site.id });
   };
 
-  const renderStationCard = ({ item, index }: { item: Charger; index: number }) => {
+  const renderStationCard = ({ item, index }: { item: SiteSummary; index: number }) => {
     const available = item.available_connectors || 0;
     const total = item.total_connectors || 0;
     const isAvailable = available > 0;
-    const statusVariant: BadgeVariant = isAvailable ? 'success' : item.status === 'Offline' ? 'error' : 'warning';
+    const siteAvailability = getSiteAvailability(available, item.status_counts, item.status);
+    const statusVariant: BadgeVariant = siteAvailability === 'availableToCharge'
+      ? 'success'
+      : siteAvailability === 'siteNoConnectorsFree'
+      ? 'warning'
+      : 'error';
+    const statusLabel = t.station[siteAvailability];
+    const statusBreakdown = getSiteStatusBreakdown(item.status_counts);
+    const visibleOptions = item.charging_options.slice(0, 3);
 
     return (
       <Card
         key={item.id}
         onPress={() => handleMarkerPress(item)}
         interactive={true}
-        style={[styles.stationCard, { marginBottom: index < filteredChargers.length - 1 ? IOS_STYLES.SPACING.MD : 0 }]}
+        style={[styles.stationCard, { marginBottom: index < filteredSites.length - 1 ? IOS_STYLES.SPACING.MD : 0 }]}
       >
         <View style={styles.cardHeader}>
           <Text style={styles.stationName} numberOfLines={1}>
-            {item.site_name || t.home.stationFallback.replace('{id}', String(item.id))}
+            {item.name}
           </Text>
-          <Badge label={localizeStatus(item.status, t)} variant={statusVariant} dot />
+          <Badge label={statusLabel} variant={statusVariant} dot />
         </View>
 
         <View style={styles.addressRow}>
           <Text style={styles.stationAddress} numberOfLines={1}>
-            {item.site_address || t.home.addressUnknown}
+            {item.address || t.home.addressUnknown}
           </Text>
           {item.distance_km !== undefined && (
             <Text style={styles.distanceText}>{formatDistance(item.distance_km)}</Text>
           )}
         </View>
 
-        <View style={styles.cardFooter}>
-          <Text style={[styles.availabilityText, !isAvailable && styles.unavailableText]}>
-            {available}/{total} {t.home.available}
+        {statusBreakdown.length > 0 && (
+          <Text style={styles.statusBreakdown}>
+            {statusBreakdown.map(({ status, count }, statusIndex) => (
+              <React.Fragment key={status}>
+                {statusIndex > 0 && <Text style={styles.statusSeparator}> · </Text>}
+                <Text style={{ color: getSiteStatusColor(status) }}>
+                  {count} {t.status[status].toLocaleLowerCase()}
+                </Text>
+              </React.Fragment>
+            ))}
           </Text>
+        )}
+
+        {visibleOptions.length > 0 ? (
+          <View style={styles.chargingOptions}>
+            {visibleOptions.map((option) => {
+              const standardLabel = connectorStandardLabel(option.standard) || t.station.connectorTypeUnknown;
+              const capability = [
+                option.current_type,
+                typeof option.max_power_kw === 'number' ? `${option.max_power_kw} kW` : null,
+              ].filter(Boolean).join(' · ');
+              const optionBreakdown = getSiteStatusBreakdown(option.status_counts);
+              return (
+                <View
+                  key={`${option.standard}-${option.current_type || 'unknown'}-${option.max_power_kw ?? 'unknown'}`}
+                  style={styles.chargingOptionRow}
+                >
+                  <View style={styles.chargingOptionIdentity}>
+                    <Text style={styles.chargingOptionStandard}>{standardLabel}</Text>
+                    {!!capability && <Text style={styles.chargingOptionCapability}>{capability}</Text>}
+                  </View>
+                  <View style={styles.chargingOptionStatus}>
+                    <Text style={[
+                      styles.chargingOptionAvailability,
+                      option.available === 0 && styles.unavailableText,
+                    ]}>
+                      {option.available}/{option.total} {t.home.available}
+                    </Text>
+                    {optionBreakdown.length > 0 && (
+                      <Text style={styles.optionStatusBreakdown}>
+                        {optionBreakdown.map(({ status, count }, statusIndex) => (
+                          <React.Fragment key={status}>
+                            {statusIndex > 0 && <Text style={styles.statusSeparator}> · </Text>}
+                            <Text style={{ color: getSiteStatusColor(status) }}>
+                              {count} {t.status[status].toLocaleLowerCase()}
+                            </Text>
+                          </React.Fragment>
+                        ))}
+                      </Text>
+                    )}
+                  </View>
+                </View>
+              );
+            })}
+            {item.charging_options.length > visibleOptions.length && (
+              <Text style={styles.moreOptionsText}>
+                {t.home.moreChargingOptions.replace(
+                  '{count}',
+                  String(item.charging_options.length - visibleOptions.length),
+                )}
+              </Text>
+            )}
+          </View>
+        ) : null}
+
+        <View style={styles.cardFooter}>
+          {visibleOptions.length === 0 ? (
+            <Text style={[styles.availabilityText, !isAvailable && styles.unavailableText]}>
+              {available}/{total} {t.home.available}
+            </Text>
+          ) : <View />}
 
           {!!item.price_per_kwh && (
             <Text style={styles.priceText}>${item.price_per_kwh.toFixed(2)}/kWh</Text>
@@ -135,30 +211,28 @@ const HomeScreen = () => {
   };
 
   // 筛选充电站（根据搜索词）
-  const filteredChargers = chargers.filter((charger) => {
+  const filteredSites = sites.filter((site) => {
     if (!searchQuery) return true;
     const query = searchQuery.toLowerCase();
     return (
-      charger.id.toLowerCase().includes(query) ||
-      charger.site_name?.toLowerCase().includes(query) ||
-      charger.site_address?.toLowerCase().includes(query) ||
-      charger.vendor?.toLowerCase().includes(query)
+      site.name.toLowerCase().includes(query) ||
+      site.address.toLowerCase().includes(query) ||
+      site.connector_types.some((type) => type.toLowerCase().includes(query))
     );
   });
 
   const mapMarkers: MapMarker[] = useMemo(() => {
-    return filteredChargers
-      .filter((c) => typeof c.latitude === 'number' && typeof c.longitude === 'number')
-      .map((c) => ({
-        id: c.id,
-        latitude: c.latitude as number,
-        longitude: c.longitude as number,
-        title: c.site_name || t.home.stationFallback.replace('{id}', String(c.id)),
-        description: c.site_address || '',
-        status: c.status,
-        available: c.available_connectors,
+    return filteredSites
+      .map((site) => ({
+        id: site.id,
+        latitude: site.latitude,
+        longitude: site.longitude,
+        title: site.name,
+        description: site.address,
+        status: site.status,
+        available: site.available_connectors,
       }));
-  }, [filteredChargers]);
+  }, [filteredSites]);
 
   const mapCenter = useMemo(() => {
     if (userLocation) return { latitude: userLocation[1], longitude: userLocation[0] };
@@ -171,13 +245,25 @@ const HomeScreen = () => {
       
       {/* Header */}
       <View style={styles.header}>
-        <View>
-          <Text style={styles.eyebrow}>ESLATIN</Text>
-          <Text style={styles.headerTitle}>{t.home.title}</Text>
-        </View>
-        <TouchableOpacity style={styles.refreshButton} onPress={handleRefresh} accessibilityRole="button">
-          <Text style={styles.refreshText}>{refreshing ? '···' : t.common.refresh}</Text>
+        <BrandLogo compact style={styles.headerLogo} accessibilityLabel="EsLatin" />
+        <TouchableOpacity
+          style={styles.refreshButton}
+          onPress={handleRefresh}
+          accessibilityRole="button"
+          accessibilityLabel={t.common.refresh}
+          disabled={refreshing}
+        >
+          {refreshing ? (
+            <Text style={styles.refreshPending}>···</Text>
+          ) : (
+            <Icon name="refresh" library="Ionicons" size={20} color={COLORS.TEXT_PRIMARY} />
+          )}
         </TouchableOpacity>
+      </View>
+
+      <View style={styles.hero}>
+        <Text style={styles.headerTitle}>{t.home.title}</Text>
+        <Text style={styles.headerSubtitle}>{t.home.subtitle}</Text>
       </View>
 
       {/* Search Bar */}
@@ -222,7 +308,7 @@ const HomeScreen = () => {
                 viewMode === 'list' && styles.toggleTextActive,
               ]}
             >
-              {t.home.list} ({filteredChargers.length})
+              {t.home.list} ({filteredSites.length})
             </Text>
           </TouchableOpacity>
           <TouchableOpacity
@@ -249,7 +335,7 @@ const HomeScreen = () => {
         <>
           {viewMode === 'list' ? (
             <FlatList
-              data={filteredChargers}
+              data={filteredSites}
               renderItem={({ item, index }) => renderStationCard({ item, index })}
               keyExtractor={(item) => item.id}
               contentContainerStyle={styles.listContent}
@@ -280,8 +366,8 @@ const HomeScreen = () => {
               zoomDelta={0.08}
               markers={mapMarkers}
               onMarkerPress={(m) => {
-                const charger = filteredChargers.find((c) => c.id === m.id);
-                if (charger) handleMarkerPress(charger);
+                const site = filteredSites.find((item) => item.id === m.id);
+                if (site) handleMarkerPress(site);
               }}
               showsUserLocation={true}
             />
@@ -298,39 +384,63 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.BACKGROUND,
   },
   header: {
+    width: '100%',
+    maxWidth: 960,
+    alignSelf: 'center',
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
     paddingHorizontal: 20,
-    paddingTop: 20,
-    paddingBottom: 18,
+    paddingTop: 10,
+    paddingBottom: 4,
   },
-  eyebrow: {
-    fontSize: 11,
-    fontWeight: '700',
-    letterSpacing: 1.8,
-    color: COLORS.PRIMARY,
-    marginBottom: 4,
+  headerLogo: {
+    width: 112,
+    height: 108,
+  },
+  hero: {
+    width: '100%',
+    maxWidth: 960,
+    alignSelf: 'center',
+    paddingHorizontal: 20,
+    marginTop: -4,
+    marginBottom: 18,
   },
   headerTitle: {
-    fontSize: 24,
-    fontWeight: '700',
+    fontSize: 30,
+    lineHeight: 36,
+    fontWeight: '800',
     color: COLORS.TEXT_PRIMARY,
+    letterSpacing: -0.6,
+  },
+  headerSubtitle: {
+    marginTop: 6,
+    maxWidth: 420,
+    fontSize: 15,
+    lineHeight: 22,
+    color: COLORS.TEXT_SECONDARY,
   },
   refreshButton: {
-    minWidth: 44,
-    height: 36,
+    width: 42,
+    height: 42,
     justifyContent: 'center',
     alignItems: 'center',
-    paddingHorizontal: 10,
+    borderRadius: 21,
+    backgroundColor: COLORS.IOS_WHITE,
+    borderWidth: 1,
+    borderColor: COLORS.BORDER,
   },
-  refreshText: {
-    color: COLORS.PRIMARY,
-    fontSize: 14,
-    fontWeight: '600',
+  refreshPending: {
+    color: COLORS.TEXT_SECONDARY,
+    fontSize: 16,
+    fontWeight: '700',
+    letterSpacing: 1,
   },
   searchContainer: {
-    marginHorizontal: IOS_STYLES.SPACING.MD,
+    width: '100%',
+    maxWidth: 960,
+    alignSelf: 'center',
+    paddingHorizontal: IOS_STYLES.SPACING.MD,
     marginBottom: IOS_STYLES.SPACING.MD,
   },
   searchField: { flex: 1 },
@@ -340,8 +450,10 @@ const styles = StyleSheet.create({
     color: COLORS.TEXT_PRIMARY,
   },
   viewToggle: {
+    width: '94%',
+    maxWidth: 920,
+    alignSelf: 'center',
     flexDirection: 'row',
-    marginHorizontal: 20,
     marginBottom: 16,
     backgroundColor: '#FFFFFF',
     borderRadius: IOS_STYLES.RADIUS.ROUND,
@@ -365,6 +477,9 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
   },
   listContent: {
+    width: '100%',
+    maxWidth: 960,
+    alignSelf: 'center',
     paddingHorizontal: 20,
     paddingBottom: 20,
   },
@@ -388,7 +503,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 18,
+    marginBottom: 10,
   },
   stationAddress: {
     fontSize: IOS_STYLES.FONT_SIZE.BODY,
@@ -405,6 +520,45 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
+  },
+  chargingOptions: {
+    marginTop: 8,
+    marginBottom: 14,
+    borderTopWidth: 1,
+    borderTopColor: COLORS.BORDER,
+  },
+  chargingOptionRow: {
+    minHeight: 42,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 9,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: COLORS.BORDER,
+  },
+  chargingOptionIdentity: { flex: 1, flexDirection: 'row', alignItems: 'baseline' },
+  chargingOptionStandard: {
+    minWidth: 70,
+    marginRight: 10,
+    color: COLORS.TEXT_PRIMARY,
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  chargingOptionCapability: { color: COLORS.TEXT_SECONDARY, fontSize: 13 },
+  chargingOptionAvailability: {
+    color: COLORS.PRIMARY_DARK,
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  chargingOptionStatus: { flexShrink: 1, alignItems: 'flex-end', marginLeft: 12 },
+  statusBreakdown: { fontSize: 12, fontWeight: '600', lineHeight: 18 },
+  optionStatusBreakdown: { marginTop: 3, fontSize: 11, fontWeight: '600', lineHeight: 16 },
+  statusSeparator: { color: COLORS.TEXT_TERTIARY },
+  moreOptionsText: {
+    marginTop: 8,
+    color: COLORS.TEXT_SECONDARY,
+    fontSize: 12,
+    fontWeight: '600',
   },
   availabilityText: {
     fontSize: IOS_STYLES.FONT_SIZE.SMALL,

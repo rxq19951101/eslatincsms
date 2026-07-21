@@ -1,9 +1,24 @@
-FROM python:3.11-slim
+FROM python:3.11-slim AS dependencies
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN python -m pip install --no-cache-dir -r requirements.txt
+
+FROM dependencies AS test
+
+COPY requirements-test.txt .
+RUN python -m pip install --no-cache-dir -r requirements-test.txt
+
+COPY . .
+COPY --from=repository docker-compose.yml /docker-compose.yml
+
+CMD ["python", "-m", "pytest", "-q", "tests", "smoke_test.py"]
+
+FROM dependencies AS runtime
 
 COPY . .
 

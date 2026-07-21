@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 from fastapi.encoders import jsonable_encoder
 import logging
+from app.core.log_sanitization import redact_log_text, redact_sensitive_data
 
 logger = logging.getLogger("ocpp_csms")
 
@@ -79,7 +80,11 @@ class AuthorizationException(OCPPException):
 # 异常处理器
 async def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
     """HTTP异常处理器"""
-    logger.error(f"HTTP异常: {exc.status_code} - {exc.detail}")
+    logger.error(
+        "HTTP异常: %s - %s",
+        exc.status_code,
+        redact_sensitive_data(exc.detail),
+    )
     if isinstance(exc.detail, dict):
         message = str(exc.detail.get("message") or "Request failed")
         raw_details = exc.detail.get("details")
@@ -106,7 +111,7 @@ async def http_exception_handler(request: Request, exc: HTTPException) -> JSONRe
 
 async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
     """验证异常处理器"""
-    logger.error(f"验证错误: {exc.errors()}")
+    logger.error("验证错误: %s", redact_sensitive_data(exc.errors()))
     details = []
     for error in exc.errors():
         path = [str(part) for part in error.get("loc", ())]
@@ -132,7 +137,11 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 
 async def general_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     """通用异常处理器"""
-    logger.exception(f"未处理的异常: {exc}")
+    logger.error(
+        "未处理的异常: %s (%s)",
+        redact_log_text(str(exc)),
+        type(exc).__name__,
+    )
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         content={

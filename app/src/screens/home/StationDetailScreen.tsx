@@ -3,7 +3,7 @@
  * 展示站点信息、状态、价格、连接器列表等
  */
  
-import React, { useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   View,
   Text,
@@ -26,13 +26,22 @@ import { COLORS, IOS_STYLES } from '../../constants/config';
 import { useI18n } from '../../i18n';
 import type { RootStackParamList } from '../../types';
 import { useAppDispatch, useAppSelector } from '../../hooks/useRedux';
-import { fetchChargerById } from '../../store/slices/chargerSlice';
+import { fetchSiteById } from '../../store/slices/siteSlice';
 import GoogleMapView from '../../components/GoogleMapView';
 import Button from '../../components/ui/Button';
 import ScreenHeader from '../../components/ui/ScreenHeader';
 import Badge, { BadgeVariant } from '../../components/ui/Badge';
 import { radius, spacing, typography } from '../../theme';
+import Icon from '../../components/ui/Icon';
+import { removeFavoriteSite, saveFavoriteSite } from '../../api/favorites';
+import { connectorStandardLabel } from '../../utils/connectorDisplay';
 import { localizeStatus } from '../../utils/localizeStatus';
+import {
+  getSiteStatusBreakdown,
+  getSiteStatusColor,
+  getSiteAvailability,
+  hasChargingWithoutAvailability,
+} from '../../utils/siteStatus';
 
 type StationDetailRouteProp = RouteProp<RootStackParamList, 'StationDetail'>;
 type StationDetailNavProp = StackNavigationProp<RootStackParamList, 'StationDetail'>;
@@ -44,12 +53,14 @@ const StationDetailScreen = () => {
   const navigation = useNavigation<StationDetailNavProp>();
   const route = useRoute<StationDetailRouteProp>();
 
-  const { chargePointId } = route.params;
-  const { selectedCharger, loading, error } = useAppSelector((state) => state.charger);
+  const { siteId } = route.params;
+  const { selectedSite, loading, error } = useAppSelector((state) => state.site);
+  const [isFavorite, setIsFavorite] = useState(false);
+  const [favoriteBusy, setFavoriteBusy] = useState(false);
 
   const loadDetail = async () => {
     try {
-      await dispatch(fetchChargerById(chargePointId)).unwrap();
+      await dispatch(fetchSiteById(siteId)).unwrap();
     } catch {
       // 错误由 slice 写入 error，这里不额外弹窗，避免干扰
     }
@@ -58,27 +69,40 @@ const StationDetailScreen = () => {
   useEffect(() => {
     loadDetail();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [chargePointId]);
+  }, [siteId]);
 
-  const charger = selectedCharger && selectedCharger.id === chargePointId ? selectedCharger : null;
+  const site = selectedSite && selectedSite.id === siteId ? selectedSite : null;
 
-  const isAvailable = (charger?.available_connectors || 0) > 0;
-  const statusVariant: BadgeVariant = !charger
+  useEffect(() => {
+    if (site) setIsFavorite(site.is_favorite);
+  }, [site]);
+
+  const isAvailable = (site?.available_connectors || 0) > 0;
+  const noConnectorsFree = hasChargingWithoutAvailability(
+    site?.available_connectors || 0,
+    site?.status_counts,
+  );
+  const siteAvailability = site
+    ? getSiteAvailability(site.available_connectors, site.status_counts, site.status)
+    : null;
+  const statusVariant: BadgeVariant = !site
     ? 'neutral'
-    : charger.status === 'Offline'
-    ? 'error'
-    : isAvailable
+    : siteAvailability === 'availableToCharge'
     ? 'success'
-    : 'warning';
+    : siteAvailability === 'siteNoConnectorsFree'
+    ? 'warning'
+    : 'error';
+  const statusLabel = siteAvailability ? t.station[siteAvailability] : '';
+  const statusBreakdown = getSiteStatusBreakdown(site?.status_counts);
 
   const handleNavigate = async () => {
-    if (!charger?.latitude || !charger?.longitude) {
+    if (!site?.latitude || !site?.longitude) {
       Alert.alert(t.station.navUnavailable, t.station.navNoCoords);
       return;
     }
-    const lat = charger.latitude;
-    const lng = charger.longitude;
-    const label = encodeURIComponent(charger.site_name || charger.id);
+    const lat = site.latitude;
+    const lng = site.longitude;
+    const label = encodeURIComponent(site.name);
 
     // iOS 优先 Apple Maps；Android 用 Google Maps
     const url =
@@ -103,11 +127,46 @@ const StationDetailScreen = () => {
     navigation.navigate('MainTabs', { screen: 'Scan' });
   };
 
+  const handleToggleFavorite = async () => {
+    if (!site || favoriteBusy) return;
+    const next = !isFavorite;
+    setFavoriteBusy(true);
+    try {
+      if (next) await saveFavoriteSite(site.id);
+      else await removeFavoriteSite(site.id);
+      setIsFavorite(next);
+    } catch {
+      Alert.alert(t.common.error, t.saved.loadFailed);
+    } finally {
+      setFavoriteBusy(false);
+    }
+  };
+
   return (
     <SafeAreaView style={styles.container}>
       <StatusBar barStyle="dark-content" />
 
-      <ScreenHeader title={t.station.title} onBack={() => navigation.goBack()} />
+      <ScreenHeader
+        title={t.station.title}
+        onBack={() => navigation.goBack()}
+        right={
+          <TouchableOpacity
+            testID="app-station-favorite-toggle"
+            accessibilityRole="button"
+            accessibilityLabel={isFavorite ? t.saved.remove : t.saved.save}
+            disabled={!site || favoriteBusy}
+            style={styles.favoriteButton}
+            onPress={handleToggleFavorite}
+          >
+            <Icon
+              name={isFavorite ? 'bookmark' : 'bookmark-outline'}
+              library="Ionicons"
+              size={22}
+              color={isFavorite ? COLORS.PRIMARY : COLORS.TEXT_SECONDARY}
+            />
+          </TouchableOpacity>
+        }
+      />
 
       <ScrollView
         style={styles.content}
@@ -115,7 +174,7 @@ const StationDetailScreen = () => {
         showsVerticalScrollIndicator={false}
       >
         {/* Loading */}
-        {loading && !charger && (
+        {loading && !site && (
           <View style={styles.loadingContainer}>
             <ActivityIndicator size="large" color={COLORS.PRIMARY} />
             <Text style={styles.loadingText}>{t.station.loading}</Text>
@@ -123,7 +182,7 @@ const StationDetailScreen = () => {
         )}
 
         {/* Error */}
-        {!!error && !charger && (
+        {!!error && !site && (
           <View style={styles.errorContainer}>
             <Text style={styles.errorTitle}>{t.station.loadFailed}</Text>
             <Text style={styles.errorText}>{error}</Text>
@@ -134,7 +193,7 @@ const StationDetailScreen = () => {
         )}
 
         {/* Empty */}
-        {!loading && !error && !charger && (
+        {!loading && !error && !site && (
           <View style={styles.emptyContainer}>
             <Text style={styles.emptyTitle}>{t.station.notFound}</Text>
             <Text style={styles.emptyText}>{t.station.notFoundHint}</Text>
@@ -143,62 +202,75 @@ const StationDetailScreen = () => {
         )}
 
         {/* Detail */}
-        {!!charger && (
+        {!!site && (
           <>
             {/* 基本信息 */}
             <View style={styles.card}>
               <View style={styles.titleRow}>
                 <View style={styles.titleLeft}>
                   <Text style={styles.title}>
-                    {charger.site_name || t.home.stationFallback.replace('{id}', String(charger.id))}
+                    {site.name}
                   </Text>
-                  <Text style={styles.subTitle}>{charger.site_address || t.home.addressUnknown}</Text>
+                  <Text style={styles.subTitle}>{site.address || t.home.addressUnknown}</Text>
                 </View>
-                <Badge label={localizeStatus(charger.status, t)} variant={statusVariant} />
+                <Badge label={statusLabel} variant={statusVariant} />
               </View>
+
+              {statusBreakdown.length > 0 && (
+                <Text style={styles.statusBreakdown}>
+                  {statusBreakdown.map(({ status, count }, statusIndex) => (
+                    <React.Fragment key={status}>
+                      {statusIndex > 0 && <Text style={styles.statusSeparator}> · </Text>}
+                      <Text style={{ color: getSiteStatusColor(status) }}>
+                        {count} {t.status[status].toLocaleLowerCase()}
+                      </Text>
+                    </React.Fragment>
+                  ))}
+                </Text>
+              )}
 
               <View style={styles.metricsRow}>
                 <View style={styles.metricItem}>
                   <Text style={styles.metricLabel}>{t.station.connectors}</Text>
                   <Text style={styles.metricValue}>
-                    {charger.available_connectors || 0}/{charger.total_connectors || 0}
+                    {site.available_connectors || 0}/{site.total_connectors || 0}
                   </Text>
                 </View>
                 <View style={styles.metricItem}>
                   <Text style={styles.metricLabel}>{t.station.price}</Text>
                   <Text style={styles.metricValue}>
-                    {typeof charger.price_per_kwh === 'number'
-                      ? `$${charger.price_per_kwh.toFixed(2)}/kWh`
+                    {typeof site.price_per_kwh === 'number'
+                      ? `$${site.price_per_kwh.toFixed(2)}/kWh`
                       : t.common.na}
                   </Text>
                 </View>
                 <View style={styles.metricItem}>
-                  <Text style={styles.metricLabel}>{t.station.rating}</Text>
+                  <Text style={styles.metricLabel}>{t.station.power}</Text>
                   <Text style={styles.metricValue}>
-                    {typeof (charger as any).rating === 'number' ? (charger as any).rating.toFixed(1) : t.common.na}
+                    {typeof site.max_power_kw === 'number' ? `${site.max_power_kw} kW` : t.common.na}
                   </Text>
                 </View>
               </View>
             </View>
 
             {/* 地图（仅 iOS/Android，展示站点位置） */}
-            {Platform.OS !== 'web' && typeof charger.latitude === 'number' && typeof charger.longitude === 'number' && (
+            {Platform.OS !== 'web' && typeof site.latitude === 'number' && typeof site.longitude === 'number' && (
               <View style={styles.card}>
                 <Text style={styles.sectionTitle}>{t.station.location}</Text>
                 <View style={styles.mapWrap}>
                   <GoogleMapView
                     style={styles.map}
-                    center={{ latitude: charger.latitude, longitude: charger.longitude }}
+                    center={{ latitude: site.latitude, longitude: site.longitude }}
                     zoomDelta={0.02}
                     markers={[
                       {
-                        id: charger.id,
-                        latitude: charger.latitude,
-                        longitude: charger.longitude,
-                        title: charger.site_name || t.home.stationFallback.replace('{id}', String(charger.id)),
-                        description: charger.site_address || '',
-                        status: charger.status,
-                        available: charger.available_connectors,
+                        id: site.id,
+                        latitude: site.latitude,
+                        longitude: site.longitude,
+                        title: site.name,
+                        description: site.address,
+                        status: site.status,
+                        available: site.available_connectors,
                       },
                     ]}
                     showsUserLocation={true}
@@ -207,30 +279,61 @@ const StationDetailScreen = () => {
               </View>
             )}
 
-            {/* 连接器列表 */}
+            {/* 面向司机的充电桩与连接器标签；不得回退显示内部 UUID 或 OCPP 身份。 */}
             <View style={styles.card}>
-              <Text style={styles.sectionTitle}>{t.station.connectorsTitle}</Text>
-              {Array.isArray(charger.connectors) && charger.connectors.length > 0 ? (
-                charger.connectors.map((c) => {
-                  const st = c.status || 'Unknown';
-                  const stVariant: BadgeVariant =
-                    st === 'Available'
-                      ? 'success'
-                      : st === 'Charging'
-                      ? 'warning'
-                      : st === 'Offline' || st === 'Faulted'
-                      ? 'error'
-                      : 'neutral';
+              <Text style={styles.sectionTitle}>{t.station.chargersTitle}</Text>
+              {site.charge_points.length > 0 ? (
+                site.charge_points.map((chargePoint) => {
+                  const chargerTitle = chargePoint.display_name?.trim() || chargePoint.display_code;
                   return (
-                    <View key={String(c.id)} style={styles.connectorRow}>
-                      <View style={styles.connectorLeft}>
-                        <Text style={styles.connectorName}>{t.station.connector.replace('{id}', String(c.connector_id ?? c.id))}</Text>
-                        <Text style={styles.connectorMeta}>
-                          {c.connector_type ? `${c.connector_type} · ` : ''}
-                          {typeof c.power_kw === 'number' ? `${c.power_kw} kW` : t.station.powerUnknown}
-                        </Text>
+                    <View
+                      key={chargePoint.id}
+                      testID={`app-public-charger-${chargePoint.display_code}`}
+                      style={styles.chargerCard}
+                    >
+                      <View style={styles.chargerHeader}>
+                        <View style={styles.chargerTitleBlock}>
+                          <Text style={styles.chargerName}>{chargerTitle}</Text>
+                          {!!chargePoint.display_name && (
+                            <Text style={styles.chargerCode}>{chargePoint.display_code}</Text>
+                          )}
+                          {!!chargePoint.location_hint && (
+                            <Text style={styles.locationHint}>{chargePoint.location_hint}</Text>
+                          )}
+                        </View>
+                        <Badge
+                          label={localizeStatus(chargePoint.status, t)}
+                          variant={chargePoint.status.toLowerCase() === 'available' ? 'success' : 'neutral'}
+                        />
                       </View>
-                      <Badge label={localizeStatus(st, t)} variant={stVariant} />
+                      {chargePoint.connectors.map((connector) => {
+                        const standardLabel = connectorStandardLabel(connector.connector_type || '')
+                          || t.station.connectorTypeUnknown;
+                        const capability = [
+                          standardLabel,
+                          typeof connector.power_kw === 'number'
+                            ? `${connector.power_kw} kW`
+                            : t.station.powerUnknown,
+                        ].join(' · ');
+                        return (
+                          <View
+                            key={connector.id}
+                            testID={`app-public-connector-${connector.physical_reference}`}
+                            style={styles.connectorRow}
+                          >
+                            <View style={styles.connectorIdentity}>
+                              <View style={styles.connectorIcon}>
+                                <Icon name="flash-outline" library="Ionicons" size={18} color={COLORS.PRIMARY_DARK} />
+                              </View>
+                              <View style={styles.connectorLeft}>
+                                <Text style={styles.connectorName}>{connector.physical_reference}</Text>
+                                <Text style={styles.connectorMeta}>{capability}</Text>
+                              </View>
+                            </View>
+                            <Text style={styles.connectorStatus}>{localizeStatus(connector.status, t)}</Text>
+                          </View>
+                        );
+                      })}
                     </View>
                   );
                 })
@@ -254,7 +357,11 @@ const StationDetailScreen = () => {
           style={{ flex: 1, marginRight: 10 }}
         />
         <Button
-          title={isAvailable ? t.station.startCharge : t.station.noAvailable}
+          title={isAvailable
+            ? t.station.startCharge
+            : noConnectorsFree
+            ? t.station.noConnectorsFree
+            : t.station.noAvailable}
           onPress={handleStartCharging}
           variant="primary"
           size="large"
@@ -268,7 +375,8 @@ const StationDetailScreen = () => {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: COLORS.BACKGROUND },
-  content: { flex: 1, padding: 16 },
+  content: { flex: 1, width: '100%', maxWidth: 960, alignSelf: 'center', padding: 16 },
+  favoriteButton: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
 
   loadingContainer: { paddingVertical: 40, alignItems: 'center' },
   loadingText: { marginTop: 10, color: COLORS.TEXT_SECONDARY },
@@ -301,6 +409,8 @@ const styles = StyleSheet.create({
   titleLeft: { flex: 1, paddingRight: 12 },
   title: { fontSize: 18, fontWeight: typography.bold, color: COLORS.TEXT_PRIMARY, marginBottom: 6 },
   subTitle: { color: COLORS.TEXT_SECONDARY, lineHeight: 20 },
+  statusBreakdown: { marginTop: 10, fontSize: 12, fontWeight: typography.semibold, lineHeight: 18 },
+  statusSeparator: { color: COLORS.TEXT_TERTIARY },
 
   metricsRow: { flexDirection: 'row', marginTop: 14 },
   metricItem: { flex: 1 },
@@ -308,17 +418,57 @@ const styles = StyleSheet.create({
   metricValue: { color: COLORS.TEXT_PRIMARY, fontWeight: typography.semibold },
 
   sectionTitle: { fontSize: 16, fontWeight: typography.semibold, color: COLORS.TEXT_PRIMARY, marginBottom: 10 },
+  chargerCard: {
+    marginTop: 10,
+    padding: 12,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: COLORS.BORDER,
+  },
+  chargerHeader: { flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between' },
+  chargerTitleBlock: { flex: 1, paddingRight: 12 },
+  chargerName: { color: COLORS.TEXT_PRIMARY, fontSize: 16, fontWeight: typography.bold },
+  chargerCode: { marginTop: 2, color: COLORS.PRIMARY_DARK, fontSize: 13, fontWeight: typography.semibold },
+  locationHint: { marginTop: 4, color: COLORS.TEXT_SECONDARY, fontSize: 12 },
   connectorRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingVertical: 10,
-    borderTopWidth: 1,
-    borderTopColor: COLORS.BORDER,
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+    marginTop: 8,
+    borderRadius: radius.md,
+    backgroundColor: COLORS.BACKGROUND,
+    borderWidth: 1,
+    borderColor: COLORS.BORDER,
+  },
+  connectorIdentity: { flex: 1, flexDirection: 'row', alignItems: 'center' },
+  connectorIcon: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 10,
+    backgroundColor: COLORS.PRIMARY_SOFT,
   },
   connectorLeft: { flex: 1, paddingRight: 12 },
-  connectorName: { fontWeight: typography.semibold, color: COLORS.TEXT_PRIMARY },
+  connectorName: { fontSize: 15, fontWeight: typography.semibold, color: COLORS.TEXT_PRIMARY },
   connectorMeta: { marginTop: 4, color: COLORS.TEXT_SECONDARY, fontSize: 12 },
+  connectorStatus: { marginLeft: 12, color: COLORS.TEXT_SECONDARY, fontSize: 12, fontWeight: typography.semibold },
+  optionAvailability: { flexShrink: 1, alignItems: 'flex-end', marginLeft: 12 },
+  optionAvailabilityValue: { color: COLORS.PRIMARY_DARK, fontSize: 16, fontWeight: typography.bold },
+  optionUnavailableValue: { color: COLORS.ERROR },
+  optionAvailabilityLabel: { marginTop: 2, color: COLORS.TEXT_SECONDARY, fontSize: 11 },
+  optionStatusBreakdown: {
+    marginTop: 4,
+    maxWidth: 210,
+    color: COLORS.TEXT_SECONDARY,
+    fontSize: 11,
+    fontWeight: typography.semibold,
+    lineHeight: 16,
+    textAlign: 'right',
+  },
   emptyBlock: { paddingVertical: 16, alignItems: 'center' },
   emptyBlockText: { color: COLORS.TEXT_SECONDARY },
 
@@ -333,6 +483,9 @@ const styles = StyleSheet.create({
   map: { flex: 1 },
 
   bottomBar: {
+    width: '100%',
+    maxWidth: 960,
+    alignSelf: 'center',
     flexDirection: 'row',
     padding: spacing.md,
     backgroundColor: COLORS.IOS_WHITE,

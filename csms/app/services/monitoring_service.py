@@ -37,27 +37,20 @@ class MonitoringService:
         ).all()
         
         for evse_status in offline_evses:
-            # 检查是否已有未解决的离线告警
-            existing_alert = self.db.query(Alert).filter(
-                Alert.tenant_id == tenant_id,
-                Alert.charge_point_id == evse_status.charge_point_id,
-                Alert.alert_type == "offline",
-                Alert.status.in_(["pending", "acknowledged"])
-            ).first()
-            
-            if not existing_alert:
-                # 创建离线告警
-                AlertService.create_alert(
-                    db=self.db,
-                    tenant_id=tenant_id,
-                    alert_type="offline",
-                    severity="critical",
-                    title=f"充电桩 {evse_status.charge_point_id} 离线",
-                    description=f"充电桩超过 {timeout_seconds} 秒未发送心跳",
-                    charge_point_id=evse_status.charge_point_id,
-                    evse_id=evse_status.evse_id
-                )
-                logger.warning(f"Created offline alert for charge point: {evse_status.charge_point_id}")
+            AlertService.ensure_automatic_alert(
+                db=self.db,
+                tenant_id=tenant_id,
+                alert_type="offline",
+                severity="critical",
+                title=f"充电桩 {evse_status.charge_point_id} 离线",
+                description=f"充电桩超过 {timeout_seconds} 秒未发送心跳",
+                charge_point_id=evse_status.charge_point_id,
+                evse_id=evse_status.evse_id,
+                metadata={"source": "heartbeat_timeout", "timeout_seconds": timeout_seconds},
+            )
+            evse_status.status = "Offline"
+            self.db.commit()
+            logger.warning(f"Created or refreshed offline alert for charge point: {evse_status.charge_point_id}")
     
     async def process_device_event(self, event: DeviceEvent):
         """
@@ -105,18 +98,31 @@ class MonitoringService:
     
     async def run_monitoring_loop(self, interval_seconds: int = 60):
         """运行监控循环（后台任务，每轮使用独立 DB session）"""
-        from app.database.base import SessionLocal
+        from app.database.base import SessionLocal, SuperSessionLocal, tenant_id_context
         from app.database.models import Tenant
 
         while True:
-            db = SessionLocal()
+            system_db = SuperSessionLocal()
             try:
-                tenants = db.query(Tenant).filter(Tenant.status == "active").all()
-                svc = MonitoringService(db)
-                for tenant in tenants:
-                    await svc.check_offline_chargers(tenant.id)
+                tenant_ids = [
+                    row[0]
+                    for row in system_db.query(Tenant.id).filter(Tenant.status == "active").all()
+                ]
             except Exception as e:
-                logger.error(f"监控循环出错: {e}", exc_info=True)
+                logger.error(f"监控循环读取租户失败: {e}", exc_info=True)
+                tenant_ids = []
             finally:
-                db.close()
+                system_db.close()
+
+            for tenant_id in tenant_ids:
+                token = tenant_id_context.set(tenant_id)
+                tenant_db = SessionLocal()
+                try:
+                    await MonitoringService(tenant_db).check_offline_chargers(tenant_id)
+                except Exception as e:
+                    tenant_db.rollback()
+                    logger.error(f"租户 {tenant_id} 监控循环出错: {e}", exc_info=True)
+                finally:
+                    tenant_db.close()
+                    tenant_id_context.reset(token)
             await asyncio.sleep(interval_seconds)

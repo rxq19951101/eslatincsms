@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -15,17 +16,25 @@ from ocpp.v16.enums import Action, AuthorizationStatus, RegistrationStatus
 
 from .metering import MeteringState, advance_meter
 from .profiles import ChargePointProfile, MeteringProfile
-from .payment_simulator import simulate_charging_payment
-
 logger = logging.getLogger("eslatin_charger_sim")
 
 
 def build_websocket_url(ws_base: str, ocpp_identity: str) -> str:
-    """Attach the independently configured OCPP identity to the WebSocket URL."""
+    """Build either /ocpp?id=IDENTITY or /ocpp/{identity}."""
+    if "{identity}" in ws_base:
+        from urllib.parse import quote
+        return ws_base.replace("{identity}", quote(ocpp_identity, safe="._:-"))
     parts = urlsplit(ws_base)
     query = [(key, value) for key, value in parse_qsl(parts.query, keep_blank_values=True) if key != "id"]
     query.append(("id", ocpp_identity))
     return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
+
+
+def build_auth_headers(ocpp_identity: str, secret: Optional[str]) -> Dict[str, str]:
+    if not secret:
+        return {}
+    value = base64.b64encode(f"{ocpp_identity}:{secret}".encode("utf-8")).decode("ascii")
+    return {"Authorization": f"Basic {value}"}
 
 
 @dataclass
@@ -36,6 +45,7 @@ class ConnectorRuntime:
     id_tag: Optional[str] = None
     meter: MeteringState = field(default_factory=MeteringState)
     metering_task: Optional[asyncio.Task] = None
+    start_pending: bool = False
 
 
 @dataclass
@@ -56,6 +66,13 @@ class SimChargePoint(OcppChargePoint):
         self.profile = profile
         self.state = RuntimeState()
         self.meterings: Dict[int, MeteringProfile] = {m.connector_id: m for m in meterings}
+        self.configuration: Dict[str, str] = {
+            "HeartbeatInterval": str(profile.heartbeat_interval_sec),
+            "MeterValueSampleInterval": str(
+                min((m.meter_values_interval_sec for m in meterings), default=5)
+            ),
+        }
+        self.received_commands: List[Dict[str, Any]] = []
         # 初始化 connector runtime
         for cid in sorted(self.meterings.keys()):
             self.state.connectors[cid] = ConnectorRuntime(connector_id=cid)
@@ -87,7 +104,7 @@ class SimChargePoint(OcppChargePoint):
             except asyncio.CancelledError:
                 pass
 
-    async def send_boot_notification(self) -> None:
+    async def send_boot_notification(self):
         payload = call.BootNotificationPayload(
             charge_point_vendor=self.profile.vendor,
             charge_point_model=self.profile.model,
@@ -99,6 +116,7 @@ class SimChargePoint(OcppChargePoint):
         logger.info("[%s] BootNotification -> %s", self.id, status)
         if status != RegistrationStatus.accepted:
             logger.warning("[%s] BootNotification not accepted: %s", self.id, status)
+        return status
 
     async def send_status_notification(self, status: str, connector_id: Optional[int] = None) -> None:
         cid = connector_id or 1
@@ -117,13 +135,23 @@ class SimChargePoint(OcppChargePoint):
         res = await self.call(payload)
         # ocpp lib 可能返回 dataclass 或 dict；这里做兼容
         try:
-            info = getattr(res, "id_tag_info", None) or getattr(res, "idTagInfo", None) or {}
+            if isinstance(res, dict):
+                info = res.get("id_tag_info") or res.get("idTagInfo") or {}
+            else:
+                info = getattr(res, "id_tag_info", None) or getattr(res, "idTagInfo", None) or {}
             status = info.get("status") if isinstance(info, dict) else getattr(info, "status", None)
             if status is None:
-                return True
-            return str(status) == str(AuthorizationStatus.accepted)
-        except Exception:
-            return True  # 认证失败也不阻塞模拟器流程（便于本地调试）
+                return False
+            status_value = getattr(status, "value", status)
+            accepted_value = getattr(
+                AuthorizationStatus.accepted,
+                "value",
+                AuthorizationStatus.accepted,
+            )
+            return str(status_value).strip().casefold() == str(accepted_value).strip().casefold()
+        except Exception as exc:
+            logger.warning("[%s] Authorize response could not be parsed: %s", self.id, exc)
+            return False
 
     async def send_start_transaction(self, id_tag: str, connector_id: int) -> int:
         if connector_id not in self.state.connectors:
@@ -147,12 +175,12 @@ class SimChargePoint(OcppChargePoint):
         logger.info("[%s] StartTransaction accepted, connector=%s tx=%s", self.id, connector_id, tx_id)
         return tx_id
 
-    async def send_stop_transaction(self, connector_id: int, reason: str = "Remote") -> None:
+    async def send_stop_transaction(self, connector_id: int, reason: str = "Remote") -> bool:
         if connector_id not in self.state.connectors:
-            return
+            return False
         c = self.state.connectors[connector_id]
         if c.transaction_id is None:
-            return
+            return False
         payload = call.StopTransactionPayload(
             transaction_id=c.transaction_id,
             meter_stop=c.meter.meter_wh,
@@ -163,12 +191,59 @@ class SimChargePoint(OcppChargePoint):
         logger.info("[%s] StopTransaction sent, connector=%s tx=%s", self.id, connector_id, c.transaction_id)
         c.transaction_id = None
         c.id_tag = None
+        return True
+
+    async def send_heartbeat(self):
+        return await self.call(call.HeartbeatPayload())
+
+    async def send_meter_values(self, connector_id: int, *, advance: bool = True):
+        if connector_id not in self.state.connectors:
+            raise ValueError(f"Unsupported connector_id={connector_id}")
+        connector = self.state.connectors[connector_id]
+        metering = self.meterings.get(connector_id)
+        if metering is None:
+            raise ValueError(f"Missing metering profile for connector_id={connector_id}")
+        if connector.transaction_id is None:
+            raise RuntimeError("MeterValues requires an active OCPP transaction")
+        if advance:
+            advance_meter(
+                connector.meter,
+                interval_sec=metering.meter_values_interval_sec,
+                power_kw=metering.power_kw,
+                soc_end=metering.soc_end,
+            )
+        sampled_value = [
+            {
+                "measurand": "Energy.Active.Import.Register",
+                "value": str(connector.meter.meter_wh),
+                "unit": "Wh",
+            },
+            {
+                "measurand": "Power.Active.Import",
+                "value": str(int(metering.power_kw * 1000)),
+                "unit": "W",
+            },
+            {"measurand": "Current.Import", "value": str(metering.current_a), "unit": "A"},
+            {"measurand": "Voltage", "value": str(metering.voltage_v), "unit": "V"},
+            {"measurand": "SoC", "value": str(int(connector.meter.soc)), "unit": "Percent"},
+        ]
+        payload = call.MeterValuesPayload(
+            connector_id=connector_id,
+            transaction_id=connector.transaction_id,
+            meter_value=[
+                {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "sampledValue": sampled_value,
+                }
+            ],
+        )
+        return await self.call(payload)
 
     async def _heartbeat_loop(self) -> None:
         while True:
             try:
                 await asyncio.sleep(self.profile.heartbeat_interval_sec)
-                await self.call(call.HeartbeatPayload())
+                await self.send_heartbeat()
             except asyncio.CancelledError:
                 return
             except Exception as e:
@@ -184,135 +259,52 @@ class SimChargePoint(OcppChargePoint):
         while c.transaction_id is not None:
             try:
                 await asyncio.sleep(m.meter_values_interval_sec)
-                advance_meter(
-                    c.meter,
-                    interval_sec=m.meter_values_interval_sec,
-                    power_kw=m.power_kw,
-                    soc_end=m.soc_end,
-                )
-
-                mv = {
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "sampledValue": [
-                        {"measurand": "Energy.Active.Import.Register", "value": str(c.meter.meter_wh), "unit": "Wh"},
-                        {"measurand": "Power.Active.Import", "value": str(int(m.power_kw * 1000)), "unit": "W"},
-                        {"measurand": "Current.Import", "value": str(m.current_a), "unit": "A"},
-                        {"measurand": "Voltage", "value": str(m.voltage_v), "unit": "V"},
-                        {"measurand": "SoC", "value": str(int(c.meter.soc)), "unit": "Percent"},
-                    ],
-                }
-
-                payload = call.MeterValuesPayload(
-                    connector_id=connector_id,
-                    transaction_id=c.transaction_id,
-                    meter_value=[mv],
-                )
-                await self.call(payload)
+                await self.send_meter_values(connector_id)
             except asyncio.CancelledError:
                 return
             except Exception as e:
                 logger.warning("[%s] MeterValues failed (connector=%s): %s", self.id, connector_id, e)
 
-    async def _trigger_payment_simulation(
-        self,
-        transaction_id: int,
-        connector_id: int,
-        id_tag: str,
-    ) -> None:
-        """
-        触发支付流程模拟（异步）
-        
-        在 StartTransaction 成功后，等待后端创建 ChargingSession，然后模拟支付
-        """
-        if not self.profile.enable_payment_simulation:
-            logger.info("[%s] Payment simulation disabled", self.id)
-            return
-        
-        if not self.profile.backend_api_url:
-            logger.warning("[%s] Backend API URL not configured, skipping payment simulation", self.id)
-            return
-        
-        async def _payment_flow() -> None:
-            try:
-                # 等待后端创建 ChargingSession（可能需要几秒）
-                logger.info(
-                    "[%s] Waiting for backend to create ChargingSession (transaction_id=%s)...",
-                    self.id, transaction_id
-                )
-                await asyncio.sleep(3)  # 等待 3 秒
-                
-                # 尝试获取 session_id
-                from .payment_simulator import get_session_id_by_transaction
-                session_id = await get_session_id_by_transaction(
-                    transaction_id=transaction_id,
-                    charge_point_id=self.profile.ocpp_identity,
-                    backend_api_url=self.profile.backend_api_url,
-                    backend_token=self.profile.backend_api_token,
-                )
-                
-                if not session_id:
-                    logger.warning(
-                        "[%s] Failed to get session_id, skipping payment simulation",
-                        self.id
-                    )
-                    return
-                
-                # 计算支付金额（使用配置的金额或默认值）
-                payment_amount = self.profile.payment_amount or 10000.0  # 默认 10000 COP
-                
-                logger.info(
-                    "[%s] Starting payment simulation: session_id=%s, amount=%s COP, transaction_id=%s",
-                    self.id, session_id, payment_amount, transaction_id
-                )
-                
-                # 调用支付模拟
-                success = await simulate_charging_payment(
-                    session_id=session_id,
-                    amount=payment_amount,
-                    charge_point_id=self.profile.ocpp_identity,
-                    backend_api_url=self.profile.backend_api_url,
-                    test_card_name=self.profile.payment_test_card,
-                    payment_delay_seconds=self.profile.payment_delay_seconds,
-                    backend_token=self.profile.backend_api_token,
-                )
-                
-                if success:
-                    logger.info(
-                        "[%s] Payment simulation completed successfully: session_id=%s, transaction_id=%s",
-                        self.id, session_id, transaction_id
-                    )
-                else:
-                    logger.warning(
-                        "[%s] Payment simulation failed or timeout: session_id=%s, transaction_id=%s",
-                        self.id, session_id, transaction_id
-                    )
-            except Exception as e:
-                logger.error("[%s] Payment simulation error: %s", self.id, e, exc_info=True)
-        
-        # 异步执行支付流程（不阻塞充电）
-        asyncio.create_task(_payment_flow())
-
     # ---------- CSMS -> CP handlers ----------
+
+    def _record_command(self, action: str, status: str, **details: Any) -> None:
+        self.received_commands.append(
+            {
+                "sequence": len(self.received_commands) + 1,
+                "action": action,
+                "status": status,
+                "received_at": datetime.now(timezone.utc).isoformat(),
+                **details,
+            }
+        )
 
     @on(Action.RemoteStartTransaction)
     async def on_remote_start(self, id_tag: str, connector_id: Optional[int] = None, **kwargs):
         logger.info("[%s] <- RemoteStartTransaction id_tag=%s connector_id=%s", self.id, id_tag, connector_id)
         if connector_id is None:
+            self._record_command("RemoteStartTransaction", "Rejected", connector_id=None)
             return call_result.RemoteStartTransactionPayload(status="Rejected")
         if connector_id not in self.state.connectors:
+            self._record_command("RemoteStartTransaction", "Rejected", connector_id=connector_id)
             return call_result.RemoteStartTransactionPayload(status="Rejected")
 
         c = self.state.connectors[connector_id]
-        if c.transaction_id is not None:
+        if c.transaction_id is not None or c.start_pending:
             # 已在充电中
+            self._record_command("RemoteStartTransaction", "Rejected", connector_id=connector_id)
             return call_result.RemoteStartTransactionPayload(status="Rejected")
+        c.start_pending = True
 
         # RemoteStartTransaction 的 CALLRESULT 应尽快返回，否则 CSMS 侧会超时。
         # 因此把“授权/启动事务/状态切换/开始抄表”的重活放到后台任务里执行。
         async def _run_start_flow() -> None:
             try:
                 await self.send_status_notification("Preparing", connector_id=connector_id)
-                await self.send_authorize(id_tag)
+                authorized = await self.send_authorize(id_tag)
+                if not authorized:
+                    logger.warning("[%s] Authorize rejected; StartTransaction aborted", self.id)
+                    await self.send_status_notification("Available", connector_id=connector_id)
+                    return
                 tx_id = await self.send_start_transaction(id_tag, connector_id=connector_id)
                 await self.send_status_notification("Charging", connector_id=connector_id)
 
@@ -321,17 +313,14 @@ class SimChargePoint(OcppChargePoint):
                     c.metering_task.cancel()
                 c.metering_task = asyncio.create_task(self._meter_values_loop(connector_id=connector_id))
                 
-                # 触发支付流程模拟（异步，不阻塞充电）
-                await self._trigger_payment_simulation(
-                    transaction_id=tx_id,
-                    connector_id=connector_id,
-                    id_tag=id_tag,
-                )
             except Exception as e:
                 logger.error("[%s] remote start flow failed: %s", self.id, e)
+            finally:
+                c.start_pending = False
 
         asyncio.create_task(_run_start_flow())
 
+        self._record_command("RemoteStartTransaction", "Accepted", connector_id=connector_id)
         return call_result.RemoteStartTransactionPayload(status="Accepted")
 
     @on(Action.RemoteStopTransaction)
@@ -344,6 +333,10 @@ class SimChargePoint(OcppChargePoint):
             if c.transaction_id == transaction_id:
                 target = (cid, c)
                 break
+
+        if target is None:
+            self._record_command("RemoteStopTransaction", "Rejected", transaction_id=transaction_id)
+            return call_result.RemoteStopTransactionPayload(status="Rejected")
 
         # RemoteStopTransaction 的 CALLRESULT 也应尽快返回，否则 CSMS 侧会超时并把停止操作判定为失败。
         # 所以把 StopTransaction/状态切换 放到后台任务。
@@ -360,7 +353,48 @@ class SimChargePoint(OcppChargePoint):
 
         asyncio.create_task(_run_stop_flow())
 
+        self._record_command("RemoteStopTransaction", "Accepted", transaction_id=transaction_id)
         return call_result.RemoteStopTransactionPayload(status="Accepted")
+
+    @on(Action.Reset)
+    async def on_reset(self, type: str, **kwargs):
+        if type not in {"Soft", "Hard"}:
+            self._record_command("Reset", "Rejected", reset_type=type)
+            return call_result.ResetPayload(status="Rejected")
+        for connector in self.state.connectors.values():
+            connector.start_pending = False
+            connector.transaction_id = None
+            connector.id_tag = None
+        self._record_command("Reset", "Accepted", reset_type=type)
+        return call_result.ResetPayload(status="Accepted")
+
+    @on(Action.GetConfiguration)
+    async def on_get_configuration(self, key: Optional[List[str]] = None, **kwargs):
+        selected = key or sorted(self.configuration)
+        configuration_key = [
+            {"key": item, "readonly": False, "value": self.configuration[item]}
+            for item in selected
+            if item in self.configuration
+        ]
+        unknown_key = [item for item in selected if item not in self.configuration]
+        self._record_command("GetConfiguration", "Accepted", keys=selected)
+        return call_result.GetConfigurationPayload(
+            configuration_key=configuration_key,
+            unknown_key=unknown_key,
+        )
+
+    @on(Action.ChangeConfiguration)
+    async def on_change_configuration(self, key: str, value: str, **kwargs):
+        self.configuration[key] = value
+        self._record_command("ChangeConfiguration", "Accepted", key=key)
+        return call_result.ChangeConfigurationPayload(status="Accepted")
+
+    @on(Action.UnlockConnector)
+    async def on_unlock_connector(self, connector_id: int, **kwargs):
+        connector = self.state.connectors.get(connector_id)
+        status = "Unlocked" if connector is not None and connector.transaction_id is None else "UnlockFailed"
+        self._record_command("UnlockConnector", status, connector_id=connector_id)
+        return call_result.UnlockConnectorPayload(status=status)
 
 
 async def connect_and_run(
@@ -369,6 +403,7 @@ async def connect_and_run(
     ws_base: str,
     runtime_holder: Optional[Dict[str, Any]] = None,
     ready_event: Optional[asyncio.Event] = None,
+    ocpp_secret: Optional[str] = None,
 ) -> None:
     url = build_websocket_url(ws_base, profile.ocpp_identity)
     logger.info(
@@ -377,21 +412,11 @@ async def connect_and_run(
         url,
         profile.boot_serial_number,
     )
-    async with websockets.connect(url, subprotocols=["ocpp1.6"]) as ws:
-        # CSMS 侧会在连接建立后发送一条非 OCPP 标准的 “Connected” JSON（用于调试）。
-        # ocpp 库的 listener 只能处理 OCPP 1.6 的数组消息格式，若直接进入 cp.start() 会因解析失败而断开。
-        # 因此这里先吞掉这条欢迎消息（如果存在）。
-        try:
-            hello = await asyncio.wait_for(ws.recv(), timeout=2)
-            if isinstance(hello, str) and hello.lstrip().startswith("{"):
-                logger.debug("[%s] ignored non-ocpp greeting: %s", profile.ocpp_identity, hello[:200])
-            else:
-                # 如果不是该欢迎消息，则不再额外处理（避免误吞合法 OCPP 数据）
-                logger.debug("[%s] first message not greeting, ignoring peek", profile.ocpp_identity)
-        except asyncio.TimeoutError:
-            # 某些环境不会发欢迎消息，超时即可
-            pass
-
+    async with websockets.connect(
+        url,
+        subprotocols=["ocpp1.6"],
+        extra_headers=build_auth_headers(profile.ocpp_identity, ocpp_secret),
+    ) as ws:
         cp = SimChargePoint(profile=profile, meterings=meterings, ws=ws)
         if runtime_holder is not None:
             runtime_holder["charge_point"] = cp

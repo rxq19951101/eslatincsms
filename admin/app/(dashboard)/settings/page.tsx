@@ -11,6 +11,7 @@ import { API_ENDPOINTS } from '@/lib/constants';
 import { useAuthStore } from '@/store/authStore';
 import { useTenantStore } from '@/store/tenantStore';
 import { useI18n } from '@/lib/i18n';
+import { hasPermission, usePermissions } from '@/hooks/usePermissions';
 import {
   configSchema,
   fieldErrors,
@@ -35,8 +36,11 @@ export default function SettingsPage() {
   const user = useAuthStore((state) => state.user);
   const currentTenant = useTenantStore((state) => state.currentTenant);
   const { t } = useI18n();
+  const { permissions } = usePermissions();
+  const canReadConfigs = !!user?.is_super_admin || hasPermission(permissions, 'configs.read');
+  const canReadTenantSettings = !!user?.is_super_admin || hasPermission(permissions, 'tenant_settings.read');
   const { data: configs, mutate: refreshConfigs } = useSWR<ConfigRecord[]>(
-    API_ENDPOINTS.CONFIGS,
+    canReadConfigs ? API_ENDPOINTS.CONFIGS : null,
     (url: string) => apiGet<ConfigRecord[]>(url)
   );
   const [configKey, setConfigKey] = useState('');
@@ -46,7 +50,7 @@ export default function SettingsPage() {
   const [tenantMessage, setTenantMessage] = useState<string | null>(null);
   const [tenantErrors, setTenantErrors] = useState<FieldErrors>({});
   useSWR<TenantSettings>(
-    currentTenant ? API_ENDPOINTS.TENANT_CURRENT : null,
+    currentTenant && canReadTenantSettings ? API_ENDPOINTS.TENANT_CURRENT : null,
     (url: string) => apiGet<TenantSettings>(url),
     {
       onSuccess: (settings) => {
@@ -138,14 +142,18 @@ export default function SettingsPage() {
             <Key className="h-4 w-4 mr-2" />
             {t('修改密码')}
           </TabsTrigger>
-          <TabsTrigger value="tenant" className="data-[state=active]:bg-slate-700">
-            <Building2 className="h-4 w-4 mr-2" />
-            {t('租户设置')}
-          </TabsTrigger>
-          <TabsTrigger value="system" className="data-[state=active]:bg-slate-700">
-            <Settings className="h-4 w-4 mr-2" />
-            {t('系统配置')}
-          </TabsTrigger>
+          {canReadTenantSettings && (
+            <TabsTrigger value="tenant" className="data-[state=active]:bg-slate-700">
+              <Building2 className="h-4 w-4 mr-2" />
+              {t('租户设置')}
+            </TabsTrigger>
+          )}
+          {canReadConfigs && (
+            <TabsTrigger value="system" className="data-[state=active]:bg-slate-700">
+              <Settings className="h-4 w-4 mr-2" />
+              {t('系统配置')}
+            </TabsTrigger>
+          )}
         </TabsList>
 
         <TabsContent value="profile">
@@ -188,7 +196,7 @@ export default function SettingsPage() {
           </Card>
         </TabsContent>
 
-        <TabsContent value="tenant">
+        {canReadTenantSettings && <TabsContent value="tenant">
           <Card className="bg-slate-800/80 backdrop-blur-sm border-slate-700">
             <CardHeader>
               <CardTitle className="text-white">{t('租户设置')}</CardTitle>
@@ -206,9 +214,9 @@ export default function SettingsPage() {
               </form>
             </CardContent>
           </Card>
-        </TabsContent>
+        </TabsContent>}
 
-        <TabsContent value="system">
+        {canReadConfigs && <TabsContent value="system">
           <Card className="bg-slate-800/80 backdrop-blur-sm border-slate-700">
             <CardHeader>
               <CardTitle className="text-white">{t('系统配置')}</CardTitle>
@@ -237,7 +245,7 @@ export default function SettingsPage() {
               </div>
             </CardContent>
           </Card>
-        </TabsContent>
+        </TabsContent>}
       </Tabs>
     </div>
   );

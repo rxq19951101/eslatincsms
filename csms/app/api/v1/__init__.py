@@ -39,6 +39,8 @@ def register_routes():
         ("dashboard", "/dashboard", "仪表板"),  # 添加 dashboard 路由
         ("app.auth", "/app/auth", "APP用户认证"),
     ("app.chargers", "/app/chargers", "APP充电站查询"),  # 添加 APP 认证路由
+    ("app.sites", "/app/sites", "APP公开站点查询"),
+    ("app.favorites", "/app/favorites", "APP收藏站点"),
     ("app.charging", "/app/charging", "APP扫码充电"),
     ("app.wallet", "/app/wallet", "APP钱包"),
         ("app.payments", "/app/wallet/payments", "APP支付（Wompi）"),
@@ -66,4 +68,3 @@ try:
 except Exception as e:
     logger.error(f"✗ 路由注册过程出错: {e}", exc_info=True)
     # 即使出错也继续，至少 api_router 对象已创建
-

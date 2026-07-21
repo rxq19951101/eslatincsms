@@ -251,11 +251,11 @@ class MercadoPagoService:
             # 验证
             is_valid = calculated_hash == hash_v1
             if not is_valid:
-                logger.warning(f"Webhook signature verification failed: calculated={calculated_hash}, received={hash_v1}")
+                logger.warning("Webhook signature verification failed")
             
             return is_valid
         except Exception as e:
-            logger.error(f"Error verifying webhook signature: {str(e)}", exc_info=True)
+            logger.error("Error verifying webhook signature: %s", type(e).__name__)
             return False
     
     def refund_payment(self, payment_id: str, amount: Optional[Decimal] = None) -> Dict[str, Any]:

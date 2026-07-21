@@ -24,6 +24,9 @@ export interface ListItemProps {
   labelStyle?: StyleProp<TextStyle>;
   index?: number;
   disabled?: boolean;
+  testID?: string;
+  accessibilityLabel?: string;
+  accessibilityHint?: string;
 }
 
 const ListItem: React.FC<ListItemProps> = ({
@@ -35,10 +38,17 @@ const ListItem: React.FC<ListItemProps> = ({
   labelStyle,
   index: _index = 0,
   disabled = false,
+  testID,
+  accessibilityLabel = label,
+  accessibilityHint,
 }) => {
   return (
     <View>
       <TouchableOpacity
+        testID={testID}
+        accessibilityLabel={accessibilityLabel}
+        accessibilityHint={accessibilityHint}
+        accessibilityRole="button"
         style={[
           styles.container,
           disabled && styles.disabled,

@@ -1,42 +1,59 @@
 import { STORAGE_KEYS } from './constants';
-import { AdminUser } from '@/types';
+import { AdminUser, Tenant } from '@/types';
+
+/**
+ * 普通租户管理员的初始租户只能来自当前账号的有效成员关系。
+ */
+export function getDefaultTenant(userInfo: AdminUser | null | undefined): Tenant | null {
+  if (!userInfo || userInfo.is_super_admin) return null;
+
+  return (
+    (userInfo.default_tenant_id
+      ? userInfo.tenant_list?.find((tenant) => tenant.id === userInfo.default_tenant_id)
+      : undefined) ||
+    userInfo.tenant_list?.find((tenant) => tenant.is_primary) ||
+    userInfo.tenant_list?.[0] ||
+    null
+  );
+}
 
 /**
  * 获取当前租户 ID（按优先级）
- * 优先级：localStorage > default_tenant > super_admin (null)
+ * 优先级：当前账号显式选择的 localStorage > 当前账号有效的 default/primary tenant
  * 租户切换必须通过受控选择器完成，不接受 URL 直接覆盖工作上下文。
  */
 export function getTenantId(userInfo: AdminUser | null | undefined): string | null {
   if (typeof window === 'undefined') return null;
 
-  // 优先级 1: localStorage（用户通过租户选择器选择）
+  // localStorage 中的选择必须同时属于当前管理员，避免账号切换后继承前一账号上下文。
   const localStorageTenantId = localStorage.getItem(STORAGE_KEYS.CURRENT_TENANT_ID);
+  const localStorageUserId = localStorage.getItem(STORAGE_KEYS.CURRENT_TENANT_USER_ID);
   if (localStorageTenantId && (
-    userInfo?.is_super_admin || userInfo?.tenant_list?.some((t) => t.id === localStorageTenantId)
+    localStorageUserId === userInfo?.id &&
+    (userInfo?.is_super_admin || userInfo?.tenant_list?.some((t) => t.id === localStorageTenantId))
   )) {
     return localStorageTenantId;
   }
 
-  // 优先级 2: 用户默认租户（从用户信息获取）
-  if (userInfo?.default_tenant_id) {
-    return userInfo.default_tenant_id;
+  if (localStorageTenantId || localStorageUserId) {
+    clearCurrentTenantId();
   }
 
-  // 优先级 3: super_admin 不传 tenant_id 表示全局作用域
+  // super_admin 未通过选择器显式选择时始终保持全平台视角。
   if (userInfo?.is_super_admin) {
-    return null; // super_admin 可以不传 tenant_id
+    return null;
   }
 
-  // 如果都没有且不是 super_admin，返回 null，触发跳转到租户选择页
-  return null;
+  return getDefaultTenant(userInfo)?.id || null;
 }
 
 /**
  * 设置当前租户 ID 到 localStorage
  */
-export function setCurrentTenantId(tenantId: string): void {
+export function setCurrentTenantId(tenantId: string, userId: string): void {
   if (typeof window === 'undefined') return;
   localStorage.setItem(STORAGE_KEYS.CURRENT_TENANT_ID, tenantId);
+  localStorage.setItem(STORAGE_KEYS.CURRENT_TENANT_USER_ID, userId);
 }
 
 /**
@@ -45,6 +62,7 @@ export function setCurrentTenantId(tenantId: string): void {
 export function clearCurrentTenantId(): void {
   if (typeof window === 'undefined') return;
   localStorage.removeItem(STORAGE_KEYS.CURRENT_TENANT_ID);
+  localStorage.removeItem(STORAGE_KEYS.CURRENT_TENANT_USER_ID);
 }
 
 /**

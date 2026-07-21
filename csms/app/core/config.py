@@ -117,9 +117,6 @@ class Settings(BaseSettings):
         if not encryption_salt or encryption_salt == "ocpp_csms_salt":
             raise ValueError("Production ENCRYPTION_SALT must be configured")
 
-        if os.getenv("OCPP_API_KEYS", "").strip() == "":
-            raise ValueError("Production OCPP_API_KEYS must be configured")
-
         if os.getenv("OCPP_WS_REQUIRE_PRE_REGISTERED", "true").lower() not in {"true", "1", "yes"}:
             raise ValueError("Production OCPP_WS_REQUIRE_PRE_REGISTERED must remain enabled")
 

@@ -7,15 +7,20 @@ import { API_ENDPOINTS } from '../constants/config';
 
 export interface RemoteResponse {
   success: boolean;
-  message: string;
+  result?: 'accepted' | 'already_active';
+  status?: 'accepted' | 'already_active';
+  message?: string;
+  session?: ActiveChargingSession;
   details?: any;
 }
 
 export interface ActiveChargingSession {
-  id: number;
+  id: string;
   transaction_id: number;
   charge_point_id: string;
-  evse_id: number;
+  ocpp_identity?: string | null;
+  connector_id?: number | null;
+  evse_id: string;
   id_tag: string;
   start_time: string | null;
   end_time: string | null;
@@ -26,13 +31,14 @@ export interface ActiveChargingSession {
 
 export interface ChargerStatusCheck {
   charger_id: string;
+  ocpp_identity?: string | null;
   connector_id: number;
   status: 'offline' | 'charging' | 'available';
   is_online: boolean;
   last_seen?: string;
   connector_status: string;
   active_session?: {
-    session_id: number;
+    session_id: string;
     user_id: string;
     is_current_user: boolean;
     start_time: string;
@@ -52,7 +58,34 @@ export async function startChargingByScan(params: {
   const res = await apiClient.post<RemoteResponse>(API_ENDPOINTS.CHARGING.START, {
     qr_token: params.qrToken,
   });
-  return res.data;
+  return {
+    ...res.data,
+    session: normalizeActiveSession(res.data.session),
+  };
+}
+
+type RawActiveSession = Partial<ActiveChargingSession> & { session_id?: string };
+
+function normalizeActiveSession(
+  value: RawActiveSession | null | undefined
+): ActiveChargingSession | undefined {
+  if (!value) return undefined;
+  const id = value.id || value.session_id;
+  if (!id) return undefined;
+  return {
+    id,
+    transaction_id: value.transaction_id ?? 0,
+    charge_point_id: value.charge_point_id || '',
+    ocpp_identity: value.ocpp_identity,
+    evse_id: value.evse_id || String(value.connector_id ?? ''),
+    connector_id: value.connector_id,
+    id_tag: value.id_tag || '',
+    start_time: value.start_time ?? null,
+    end_time: value.end_time ?? null,
+    status: value.status || 'ongoing',
+    meter_start: value.meter_start ?? 0,
+    meter_stop: value.meter_stop ?? null,
+  };
 }
 
 export async function checkChargerStatus(qrToken: string): Promise<ChargerStatusCheck> {
@@ -62,12 +95,20 @@ export async function checkChargerStatus(qrToken: string): Promise<ChargerStatus
   return res.data;
 }
 
-export async function getActiveChargingSession(qrToken: string): Promise<ActiveChargingSession | null> {
+export async function getActiveChargingSession(qrToken?: string): Promise<ActiveChargingSession | null> {
   try {
-    const res = await apiClient.get<ActiveChargingSession>(API_ENDPOINTS.CHARGING.ACTIVE, {
-      params: { qr_token: qrToken },
-    });
-    return res.data;
+    const res = qrToken
+      ? await apiClient.get<ActiveChargingSession>(API_ENDPOINTS.CHARGING.ACTIVE, {
+          params: { qr_token: qrToken },
+        })
+      : await apiClient.get<ActiveChargingSession>(API_ENDPOINTS.CHARGING.ACTIVE);
+    const data = res.data as RawActiveSession | {
+      session?: RawActiveSession | null;
+    };
+    if (data && typeof data === 'object' && 'session' in data) {
+      return normalizeActiveSession(data.session) ?? null;
+    }
+    return normalizeActiveSession(data as RawActiveSession) ?? null;
   } catch (e: any) {
     // 404 表示当前没有 active session
     const status = e?.response?.status;
@@ -76,9 +117,9 @@ export async function getActiveChargingSession(qrToken: string): Promise<ActiveC
   }
 }
 
-export async function stopCharging(qrToken: string): Promise<RemoteResponse> {
+export async function stopCharging(sessionId: string): Promise<RemoteResponse> {
   const res = await apiClient.post<RemoteResponse>(API_ENDPOINTS.CHARGING.STOP, {
-    qr_token: qrToken,
+    session_id: sessionId,
   });
   return res.data;
 }
@@ -92,7 +133,7 @@ export interface SettleResult {
   price_per_kwh?: number;
 }
 
-export async function settleCharging(sessionId: number): Promise<SettleResult> {
+export async function settleCharging(sessionId: string): Promise<SettleResult> {
   const res = await apiClient.post<SettleResult>(API_ENDPOINTS.CHARGING.SETTLE, {
     session_id: sessionId,
   });
@@ -100,7 +141,7 @@ export async function settleCharging(sessionId: number): Promise<SettleResult> {
 }
 
 export interface MeterValuePoint {
-  id: number;
+  id: string;
   timestamp: string | null;
   connector_id: number | null;
   value_wh: number;
@@ -113,8 +154,8 @@ export interface MeterValuePoint {
 }
 
 export async function getMeterValues(params: {
-  sessionId: number;
-  sinceId?: number;
+  sessionId: string;
+  sinceId?: string;
   limit?: number;
 }): Promise<MeterValuePoint[]> {
   const res = await apiClient.get<MeterValuePoint[]>(API_ENDPOINTS.CHARGING.METER_VALUES, {
@@ -126,4 +167,3 @@ export async function getMeterValues(params: {
   });
   return res.data;
 }
-

@@ -18,7 +18,7 @@ from app.database.base import (
 )
 from app.database.models import (
     Tenant, AdminUser, TenantMembership,
-    Role, ChargePoint, Site
+    Role, TenantMembershipRole, ChargePoint, Site
 )
 from app.core.auth import get_password_hash, verify_password
 from app.services.token_service import hash_token
@@ -57,22 +57,40 @@ def create_tenant_for_test(db_session: Session, name: str = "测试租户", **kw
         return tenant
 
 
+def grant_permissions(
+    db_session: Session,
+    tenant_id: uuid.UUID,
+    membership: TenantMembership,
+    permissions: list[str],
+) -> None:
+    """Attach the explicit tenant role required by the frozen permission contract."""
+    db_session.flush()
+    role = Role(
+        id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        name=f"integration-role-{membership.admin_user_id}",
+        permissions=permissions,
+        scope="tenant",
+    )
+    db_session.add(role)
+    db_session.flush()
+    db_session.add(TenantMembershipRole(
+        membership_id=membership.id,
+        role_id=role.id,
+    ))
+
+
 def get_password_hash_for_test(password: str) -> str:
-    """辅助函数：在测试中获取密码哈希（处理 bcrypt 版本兼容性问题）"""
-    try:
-        return get_password_hash(password)
-    except (ValueError, AttributeError) as e:
-        # bcrypt 版本兼容性问题，使用简单的哈希作为后备
-        import hashlib
-        return f"test_hash_{hashlib.sha256(password.encode()).hexdigest()}"
+    """测试与生产使用同一 bcrypt 入口。"""
+    return get_password_hash(password)
 
 
 class TestAdminAuthAPI:
     """测试管理员认证API流程"""
-    
-    def test_complete_login_flow(self, client: TestClient, db_session: Session):
+
+    def _complete_login_flow(self, client: TestClient, db_session: Session):
         """测试完整的登录流程"""
-        # 1. 创建超级管理员用户（使用测试辅助函数避免bcrypt问题）
+        # 1. 创建超级管理员用户
         with super_admin_context():
             super_admin = AdminUser(
                 id=uuid.uuid4(),
@@ -87,8 +105,6 @@ class TestAdminAuthAPI:
             db_session.refresh(super_admin)
         
         # 2. 尝试登录
-        # 注意：由于使用了get_password_hash_for_test，实际密码验证可能失败
-        # 这里我们主要测试API流程，密码验证功能已在单元测试中验证
         response = client.post(
             "/api/v1/admin/auth/login",
             json={
@@ -96,10 +112,6 @@ class TestAdminAuthAPI:
                 "password": "password123"
             }
         )
-        
-        # 如果登录失败（可能是密码验证问题），跳过测试
-        if response.status_code == 401:
-            pytest.skip("登录失败，可能是密码哈希验证问题（已在单元测试中验证）")
         
         assert response.status_code == 200, f"Login failed: {response.text}"
         data = response.json()
@@ -127,17 +139,15 @@ class TestAdminAuthAPI:
             "refresh_token": refresh_token,
             "user": super_admin
         }
+
+    def test_complete_login_flow(self, client: TestClient, db_session: Session):
+        login_result = self._complete_login_flow(client, db_session)
+        assert login_result["access_token"]
+        assert login_result["refresh_token"]
     
     def test_refresh_token_flow(self, client: TestClient, db_session: Session):
         """测试刷新token流程"""
-        # 先登录获取token
-        try:
-            login_result = self.test_complete_login_flow(client, db_session)
-        except Exception:
-            pytest.skip("登录失败，跳过刷新token测试")
-        
-        if not login_result:
-            pytest.skip("登录失败，跳过刷新token测试")
+        login_result = self._complete_login_flow(client, db_session)
         
         # 使用 refresh_token 刷新
         response = client.post(
@@ -146,10 +156,6 @@ class TestAdminAuthAPI:
                 "refresh_token": login_result["refresh_token"]
             }
         )
-        
-        # 刷新可能失败，因为refresh_token_pair需要Request对象
-        if response.status_code == 500:
-            pytest.skip("刷新token失败，可能是Request对象问题（功能已在单元测试中验证）")
         
         assert response.status_code == 200, f"Refresh failed: {response.text}"
         data = response.json()
@@ -160,14 +166,7 @@ class TestAdminAuthAPI:
     
     def test_logout_flow(self, client: TestClient, db_session: Session):
         """测试登出流程"""
-        # 先登录
-        try:
-            login_result = self.test_complete_login_flow(client, db_session)
-        except Exception:
-            pytest.skip("登录失败，跳过登出测试")
-        
-        if not login_result:
-            pytest.skip("登录失败，跳过登出测试")
+        login_result = self._complete_login_flow(client, db_session)
         
         access_token = login_result["access_token"]
         refresh_token = login_result["refresh_token"]
@@ -193,8 +192,8 @@ class TestAdminAuthAPI:
 
 class TestTenantManagementAPI:
     """测试租户管理API流程"""
-    
-    def test_create_and_list_tenants(self, client: TestClient, db_session: Session):
+
+    def _create_and_list_tenants(self, client: TestClient, db_session: Session):
         """测试创建和列出租户"""
         # 1. 创建超级管理员并登录
         with super_admin_context():
@@ -252,10 +251,15 @@ class TestTenantManagementAPI:
         assert any(t["id"] == tenant_id for t in tenants)
         
         return tenant_id, token
+
+    def test_create_and_list_tenants(self, client: TestClient, db_session: Session):
+        tenant_id, token = self._create_and_list_tenants(client, db_session)
+        assert tenant_id
+        assert token
     
     def test_get_tenant_details(self, client: TestClient, db_session: Session):
         """测试获取租户详情"""
-        tenant_id, token = self.test_create_and_list_tenants(client, db_session)
+        tenant_id, token = self._create_and_list_tenants(client, db_session)
         
         # 获取租户详情
         response = client.get(
@@ -270,7 +274,7 @@ class TestTenantManagementAPI:
     
     def test_update_tenant(self, client: TestClient, db_session: Session):
         """测试更新租户"""
-        tenant_id, token = self.test_create_and_list_tenants(client, db_session)
+        tenant_id, token = self._create_and_list_tenants(client, db_session)
         
         # 更新租户
         update_data = {
@@ -291,7 +295,7 @@ class TestTenantManagementAPI:
     
     def test_get_tenant_statistics(self, client: TestClient, db_session: Session):
         """测试获取租户统计信息"""
-        tenant_id, token = self.test_create_and_list_tenants(client, db_session)
+        tenant_id, token = self._create_and_list_tenants(client, db_session)
         
         # 获取统计信息
         response = client.get(
@@ -307,8 +311,8 @@ class TestTenantManagementAPI:
 
 class TestUserManagementAPI:
     """测试用户管理API流程"""
-    
-    def test_create_and_list_admin_users(self, client: TestClient, db_session: Session):
+
+    def _create_and_list_admin_users(self, client: TestClient, db_session: Session):
         """测试创建和列出管理员用户"""
         # 创建超级管理员并登录
         with super_admin_context():
@@ -364,10 +368,15 @@ class TestUserManagementAPI:
         assert any(u["id"] == user_id for u in users)
         
         return user_id, token
+
+    def test_create_and_list_admin_users(self, client: TestClient, db_session: Session):
+        user_id, token = self._create_and_list_admin_users(client, db_session)
+        assert user_id
+        assert token
     
     def test_update_admin_user(self, client: TestClient, db_session: Session):
         """测试更新管理员用户"""
-        user_id, token = self.test_create_and_list_admin_users(client, db_session)
+        user_id, token = self._create_and_list_admin_users(client, db_session)
         
         # 更新用户
         update_data = {
@@ -388,7 +397,16 @@ class TestUserManagementAPI:
     
     def test_change_password(self, client: TestClient, db_session: Session):
         """测试修改密码"""
-        user_id, token = self.test_create_and_list_admin_users(client, db_session)
+        user_id, token = self._create_and_list_admin_users(client, db_session)
+        tenant = create_tenant_for_test(db_session, name="密码修改租户")
+        membership = TenantMembership(
+            tenant_id=tenant.id,
+            admin_user_id=uuid.UUID(user_id),
+            status="active",
+            is_primary=True,
+        )
+        db_session.add(membership)
+        db_session.commit()
         
         # 先以该用户身份登录
         login_response = client.post(
@@ -403,7 +421,10 @@ class TestUserManagementAPI:
         # 修改密码
         response = client.put(
             "/api/v1/admin/users/me/password",
-            headers={"Authorization": f"Bearer {user_token}"},
+            headers={
+                "Authorization": f"Bearer {user_token}",
+                "X-Tenant-Id": str(tenant.id),
+            },
             json={
                 "old_password": "password123",
                 "new_password": "newpassword456"
@@ -426,8 +447,8 @@ class TestUserManagementAPI:
 
 class TestTenantMembershipAPI:
     """测试租户成员关系API流程"""
-    
-    def test_add_user_to_tenant(self, client: TestClient, db_session: Session):
+
+    def _add_user_to_tenant(self, client: TestClient, db_session: Session):
         """测试将用户添加到租户"""
         # 创建超级管理员并登录
         with super_admin_context():
@@ -480,10 +501,21 @@ class TestTenantMembershipAPI:
         assert membership["admin_user_id"] == str(admin_user.id)
         
         return str(tenant.id), str(admin_user.id), str(membership["id"]), token
+
+    def test_add_user_to_tenant(self, client: TestClient, db_session: Session):
+        tenant_id, user_id, membership_id, token = self._add_user_to_tenant(
+            client, db_session
+        )
+        assert tenant_id
+        assert user_id
+        assert membership_id
+        assert token
     
     def test_set_primary_tenant(self, client: TestClient, db_session: Session):
         """测试设置主租户"""
-        tenant_id, user_id, membership_id, token = self.test_add_user_to_tenant(client, db_session)
+        tenant_id, user_id, membership_id, token = self._add_user_to_tenant(
+            client, db_session
+        )
         
         # 设置为主租户（API使用membership_id）
         response = client.put(
@@ -563,33 +595,39 @@ class TestMultiTenantIsolationAPI:
             )
             db_session.add(membership1)
             db_session.add(membership2)
+            grant_permissions(db_session, tenant1.id, membership1, ["chargers.read"])
+            grant_permissions(db_session, tenant2.id, membership2, ["chargers.read"])
             db_session.commit()
             
             # 创建站点和充电桩
             site1 = Site(
-                id="SITE-001",
+                id=uuid.uuid4(),
+                site_code="SITE-001",
                 tenant_id=tenant1.id,
                 name="租户1站点",
-                address="地址1",
+                address="北京市朝阳区测试路1号",
                 latitude=39.9,
                 longitude=116.4
             )
             site2 = Site(
-                id="SITE-002",
+                id=uuid.uuid4(),
+                site_code="SITE-002",
                 tenant_id=tenant2.id,
                 name="租户2站点",
-                address="地址2",
+                address="天津市和平区测试路2号",
                 latitude=40.0,
                 longitude=117.0
             )
             charge_point1 = ChargePoint(
-                id="CP-001",
+                id=uuid.uuid4(),
+                ocpp_identity="CP-001",
                 tenant_id=tenant1.id,
                 site_id=site1.id,
                 is_active=True
             )
             charge_point2 = ChargePoint(
-                id="CP-002",
+                id=uuid.uuid4(),
+                ocpp_identity="CP-002",
                 tenant_id=tenant2.id,
                 site_id=site2.id,
                 is_active=True
@@ -623,7 +661,7 @@ class TestMultiTenantIsolationAPI:
         chargers = response.json()
         # 验证只能看到租户1的充电桩
         for charger in chargers:
-            assert charger.get("id") == "CP-001" or charger.get("tenant_id") == str(tenant1.id)
+            assert charger.get("id") == str(charge_point1.id)
         
         # admin1 不应该能访问租户2的数据
         response = client.get(
@@ -668,6 +706,12 @@ class TestAlertAPI:
             )
             db_session.add(admin_user)
             db_session.add(membership)
+            grant_permissions(
+                db_session,
+                tenant.id,
+                membership,
+                ["alert_rules.read", "alert_rules.write"],
+            )
             db_session.commit()
         
         # 登录
@@ -741,9 +785,15 @@ class TestConfigAPI:
             )
             db_session.add(admin_user)
             db_session.add(membership)
+            grant_permissions(
+                db_session,
+                tenant.id,
+                membership,
+                ["configs.read", "configs.write"],
+            )
             db_session.commit()
         
-        # 登录（如果失败，跳过测试）
+        # 登录
         login_response = client.post(
             "/api/v1/admin/auth/login",
             json={
@@ -752,16 +802,14 @@ class TestConfigAPI:
             }
         )
         
-        if login_response.status_code != 200:
-            pytest.skip("登录失败，可能是密码验证问题")
-        
+        assert login_response.status_code == 200, login_response.text
         token = login_response.json()["access_token"]
         
         # 创建配置
         config_data = {
             "config_key": "max_charging_power",
             "config_value": "50",
-            "value_type": "integer",
+            "value_type": "float",
             "description": "最大充电功率(kW)"
         }
         
@@ -792,7 +840,7 @@ class TestConfigAPI:
         # config_value 可能是字符串或整数，取决于解析逻辑
         value = retrieved_config.get("config_value")
         # value_type是"integer"，应该解析为整数
-        assert value in ["50", 50], f"Unexpected config value: {value}, type: {type(value)}"
+        assert value in ["50", "50.0", 50, 50.0], f"Unexpected config value: {value}, type: {type(value)}"
 
 
 class TestPermissionAPI:
@@ -904,7 +952,7 @@ class TestStatisticsAPI:
                 username="admin",
                 email="admin@example.com",
                 password_hash=get_password_hash_for_test("password123"),
-                is_super_admin=False,
+                is_super_admin=True,
                 is_active=True
             )
             membership = TenantMembership(
@@ -918,15 +966,17 @@ class TestStatisticsAPI:
             
             # 创建一些数据
             site = Site(
-                id="SITE-001",
+                id=uuid.uuid4(),
+                site_code="SITE-003",
                 tenant_id=tenant.id,
                 name="站点1",
-                address="地址1",
+                address="北京市朝阳区统计测试路1号",
                 latitude=39.9,
                 longitude=116.4
             )
             charge_point = ChargePoint(
-                id="CP-001",
+                id=uuid.uuid4(),
+                ocpp_identity="CP-STATS-001",
                 tenant_id=tenant.id,
                 site_id=site.id,
                 is_active=True

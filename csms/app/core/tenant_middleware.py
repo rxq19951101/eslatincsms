@@ -14,7 +14,8 @@ from app.database.base import (
     tenant_id_context, 
     is_super_admin_context, 
     use_super_connection_context,
-    SessionLocal
+    database_access_scope_context,
+    SuperSessionLocal,
 )
 from app.core.logging_config import get_logger
 
@@ -27,9 +28,11 @@ def get_tenant_id_from_request(request: Request, current_user=None) -> Optional[
     从请求中提取 tenant_id（优先级顺序）
     
     优先级：
-    1. X-Tenant-Id header（运营后台、App）
+    1. X-Tenant-Id header（运营后台）
     2. 子域名 tenant.domain.com（可选）
-    3. 管理员默认租户（AppUser 不绑定单一租户，必须显式提供租户上下文）
+    3. 管理员默认租户
+
+    AppUser 是平台级账户，不从客户端请求解析租户上下文。
     """
     # 1. 从 X-Tenant-Id header（优先级最高）
     # FastAPI/Starlette 的 headers.get 是大小写不敏感的，但为了明确性，先尝试精确匹配，再尝试小写
@@ -68,7 +71,6 @@ def get_tenant_id_from_request(request: Request, current_user=None) -> Optional[
 def get_user_default_tenant(admin_user_id: uuid.UUID) -> Optional[uuid.UUID]:
     """获取用户的默认租户（is_primary = TRUE）"""
     # 使用 SuperSessionLocal 绕过 RLS（因为这是查询用户-租户关系，不涉及业务数据）
-    from app.database.base import SuperSessionLocal
     db = SuperSessionLocal()
     try:
         membership = db.query(TenantMembership).filter(
@@ -136,7 +138,6 @@ def load_authenticated_user(token_payload):
 
     if user_type == "admin":
         from app.database.models import AdminUser
-        from app.database.base import SuperSessionLocal
         db = SuperSessionLocal()
         try:
             user = db.query(AdminUser).filter(AdminUser.id == user_id).first()
@@ -151,8 +152,9 @@ def load_authenticated_user(token_payload):
             db.close()
 
     if user_type == "app_user":
-        from app.database.base import SessionLocal
-        db = SessionLocal()
+        # Token subject lookup is an explicit authentication boundary and does
+        # not accept a tenant selected by the App client.
+        db = SuperSessionLocal()
         try:
             user = db.query(AppUser).filter(AppUser.id == user_id).first()
             if not user or user.status != "active":
@@ -177,8 +179,8 @@ def expected_audience_for_path(path: str) -> Optional[str]:
 
 
 def is_public_auth_path(path: str) -> bool:
-    """公开认证接口白名单；其余 /api/v1 请求必须先通过身份认证。"""
-    public_paths = (
+    """Exact public API allowlist; webhook handlers enforce provider signatures."""
+    public_paths = {
         "/api/v1/admin/auth/login",
         "/api/v1/admin/auth/refresh",
         "/api/v1/app/auth/refresh",
@@ -188,8 +190,11 @@ def is_public_auth_path(path: str) -> bool:
         "/api/v1/app/auth/verify-email",
         "/api/v1/app/auth/reset-password",
         "/api/v1/app/auth/confirm-reset-password",
-    )
-    return path.startswith(public_paths)
+        "/api/v1/app/wallet/payments/webhook",
+        "/api/v1/app/wallet/payments/webhook-mp",
+        "/api/v1/app/wallet/payments/sim-webhook",
+    }
+    return path in public_paths
 
 
 async def tenant_middleware(request: Request, call_next):
@@ -243,16 +248,29 @@ async def tenant_middleware(request: Request, call_next):
                 content={"success": False, "error": {"code": "AUTHENTICATION_ERROR", "message": "Authentication required", "details": [], "status_code": 401}},
                 headers={"WWW-Authenticate": "Bearer"},
             )
-        return await call_next(request)
+        access_scope_token = database_access_scope_context.set("authentication")
+        try:
+            return await call_next(request)
+        finally:
+            database_access_scope_context.reset(access_scope_token)
     
-    # 提取 tenant_id（简化中间件日志，详细日志在路由层面）
-    tenant_id_header = request.headers.get("X-Tenant-Id") or request.headers.get("x-tenant-id")
-    
-    try:
-        tenant_id = get_tenant_id_from_request(request, current_user)
-    except Exception as e:
-        logger.error("Unable to resolve tenant context", exc_info=True)
+    # AppUser 是平台级账户。所有 App API 的资源归属由端点按 current app_user
+    # 校验，不接受客户端选择运营商租户，也不把伪造的 X-Tenant-Id 写入上下文。
+    is_app_api_request = (
+        getattr(current_user, "user_type", None) == "app_user"
+        and request.url.path.startswith("/api/v1/app/")
+    )
+    if is_app_api_request:
+        tenant_id_header = None
         tenant_id = None
+    else:
+        # 提取 tenant_id（简化中间件日志，详细日志在路由层面）
+        tenant_id_header = request.headers.get("X-Tenant-Id") or request.headers.get("x-tenant-id")
+        try:
+            tenant_id = get_tenant_id_from_request(request, current_user)
+        except Exception:
+            logger.error("Unable to resolve tenant context", exc_info=True)
+            tenant_id = None
     
     # 如果还没有 tenant_id，且用户不是 super_admin，尝试从用户的默认租户获取
     if not tenant_id and current_user and current_user.user_type == "admin" and not current_user.is_super_admin:
@@ -263,11 +281,21 @@ async def tenant_middleware(request: Request, call_next):
         except Exception as e:
             logger.error("Failed to resolve user's default tenant", exc_info=True)
     
-    # 硬规则：任何非 super admin 的已认证业务请求都必须解析出 tenant_id。
-    if current_user and not current_user.is_super_admin and not tenant_id:
-        raise HTTPException(
+    # 非 App API 的其他非 super admin 业务请求仍必须解析出 tenant_id。
+    if (
+        current_user
+        and not current_user.is_super_admin
+        and not tenant_id
+        and not is_app_api_request
+    ):
+        return JSONResponse(
             status_code=403,
-            detail="TENANT_REQUIRED: Tenant context could not be resolved for this request."
+            content={"success": False, "error": {
+                "code": "TENANT_REQUIRED",
+                "message": "Tenant context could not be resolved for this request.",
+                "details": [],
+                "status_code": 403,
+            }},
         )
     
     # 判断是否使用 super 连接
@@ -277,11 +305,10 @@ async def tenant_middleware(request: Request, call_next):
     if tenant_id and current_user and not current_user.is_super_admin:
         # 说明：
         # - admin：校验 tenant_memberships（使用 super session，避免 RLS 影响）
-        # - app_user：平台级账户不绑定单一租户，租户上下文由请求明确指定。
+        # - app_user 不会到达此分支；App API 始终使用平台级无租户上下文。
         user_type = getattr(current_user, "user_type", "admin")
 
         if user_type == "admin":
-            from app.database.base import SuperSessionLocal
             db = SuperSessionLocal()
             try:
                 # 清理可能复用到的异常事务状态（避免 InFailedSqlTransaction）
@@ -291,9 +318,14 @@ async def tenant_middleware(request: Request, call_next):
                     pass
 
                 if not validate_tenant_membership(current_user.id, tenant_id, False, db):
-                    raise HTTPException(
+                    return JSONResponse(
                         status_code=403,
-                        detail="TENANT_ACCESS_DENIED: User does not belong to the specified tenant"
+                        content={"success": False, "error": {
+                            "code": "TENANT_ACCESS_DENIED",
+                            "message": "User does not belong to the specified tenant",
+                            "details": [],
+                            "status_code": 403,
+                        }},
                     )
             except SQLAlchemyError:
                 try:
@@ -306,9 +338,14 @@ async def tenant_middleware(request: Request, call_next):
 
 
         else:
-            raise HTTPException(
+            return JSONResponse(
                 status_code=403,
-                detail="TENANT_ACCESS_DENIED: Unsupported user type"
+                content={"success": False, "error": {
+                    "code": "TENANT_ACCESS_DENIED",
+                    "message": "Unsupported user type",
+                    "details": [],
+                    "status_code": 403,
+                }},
             )
     
     # 设置上下文变量
@@ -317,6 +354,9 @@ async def tenant_middleware(request: Request, call_next):
         current_user.is_super_admin if current_user else False
     )
     use_super_connection_context.set(use_super_connection)
+    access_scope_token = None
+    if is_app_api_request:
+        access_scope_token = database_access_scope_context.set("app_platform")
     
     # 如果使用 super 连接，记录审计日志（强制）
     if use_super_connection and current_user:
@@ -338,7 +378,7 @@ async def tenant_middleware(request: Request, call_next):
                 ip_address=request.client.host if request.client else None,
                 user_agent=request.headers.get("user-agent")
             )
-            db = SessionLocal()
+            db = SuperSessionLocal()
             try:
                 db.add(audit_log)
                 db.commit()
@@ -355,3 +395,5 @@ async def tenant_middleware(request: Request, call_next):
         tenant_id_context.set(None)
         is_super_admin_context.set(False)
         use_super_connection_context.set(False)
+        if access_scope_token is not None:
+            database_access_scope_context.reset(access_scope_token)

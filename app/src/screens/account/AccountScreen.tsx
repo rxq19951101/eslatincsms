@@ -21,36 +21,16 @@ import { logout, deleteAccount } from '../../store/slices/authSlice';
 import Button from '../../components/ui/Button';
 import ListItem from '../../components/ui/ListItem';
 import Card from '../../components/ui/Card';
-import { useI18n, type AppLocale } from '../../i18n';
+import { useI18n } from '../../i18n';
 
 type AccountScreenNavigationProp = StackNavigationProp<RootStackParamList>;
 
-const LANG_OPTIONS: { code: AppLocale; labelKey: 'languageEs' | 'languageZh' | 'languageEn' }[] = [
-  { code: 'es', labelKey: 'languageEs' },
-  { code: 'zh', labelKey: 'languageZh' },
-  { code: 'en', labelKey: 'languageEn' },
-];
-
 const AccountScreen = () => {
-  const { t, locale, setLocale } = useI18n();
+  const { t, locale } = useI18n();
 
   const navigation = useNavigation<AccountScreenNavigationProp>();
   const dispatch = useAppDispatch();
   const { user, isLoading } = useAppSelector((state) => state.auth);
-
-  const handleLanguage = () => {
-    Alert.alert(
-      t.account.language,
-      undefined,
-      [
-        ...LANG_OPTIONS.map((opt) => ({
-          text: `${locale === opt.code ? '✓ ' : ''}${t.account[opt.labelKey]}`,
-          onPress: () => setLocale(opt.code),
-        })),
-        { text: t.common.cancel, style: 'cancel' as const },
-      ]
-    );
-  };
 
   const handleLogout = () => {
     Alert.alert(t.auth.logout, t.auth.logoutConfirm, [
@@ -108,6 +88,8 @@ const AccountScreen = () => {
 
       <Card style={styles.menuSection}>
         <ListItem
+          testID="app-history-open"
+          accessibilityLabel={t.account.history}
           label={t.account.history}
           onPress={() => navigation.navigate('ChargingHistory')}
           index={0}
@@ -125,8 +107,10 @@ const AccountScreen = () => {
           />
         )}
         <ListItem
+          testID="app-language-open"
+          accessibilityLabel={t.account.language}
           label={`${t.account.language} · ${currentLangLabel}`}
-          onPress={handleLanguage}
+          onPress={() => navigation.navigate('Language')}
           index={3}
         />
         <ListItem

@@ -6,6 +6,7 @@
 import logging
 from typing import Dict, Any, Optional
 from fastapi import Request
+from app.core.log_sanitization import redact_log_text, redact_sensitive_data
 
 logger = logging.getLogger("ocpp_csms")
 
@@ -45,22 +46,9 @@ def mask_sensitive_data(data: Any, sensitive_keys: list = None) -> Any:
     脱敏敏感数据
     默认敏感字段：password, token, secret, key
     """
-    if sensitive_keys is None:
-        sensitive_keys = ["password", "token", "secret", "key", "access_token", "refresh_token"]
-    
-    if isinstance(data, dict):
-        masked = {}
-        for k, v in data.items():
-            k_lower = k.lower()
-            if any(sensitive in k_lower for sensitive in sensitive_keys):
-                if isinstance(v, str):
-                    masked[k] = f"{v[:4]}***" if len(v) > 4 else "***"
-                else:
-                    masked[k] = "***"
-            else:
-                masked[k] = v
-        return masked
-    return data
+    # ``sensitive_keys`` remains for caller compatibility; the central policy is
+    # intentionally stricter and recursively replaces complete values.
+    return redact_sensitive_data(data)
 
 
 def log_api_request(
@@ -114,6 +102,7 @@ def log_api_response(
     
     details_str = ""
     if details:
+        details = mask_sensitive_data(details)
         detail_items = []
         for k, v in details.items():
             if isinstance(v, str) and len(v) > 50:
@@ -146,7 +135,7 @@ def log_api_error(
     # 脱敏敏感参数
     safe_params = mask_sensitive_data(params) if params else {}
     
-    error_msg = str(error)
+    error_msg = redact_log_text(str(error))
     error_type = type(error).__name__
     
     params_str = ""
@@ -161,7 +150,14 @@ def log_api_error(
     logger.error(
         f"[API错误] {method} {path} | operation={operation} | user={user_info} | "
         f"error_type={error_type} | error={error_msg}{params_str}",
-        exc_info=exc_info
+        extra=redact_sensitive_data({
+            "event": "api_operation_error",
+            "method": method,
+            "path": path,
+            "operation": operation,
+            "error_type": error_type,
+            "params": safe_params,
+        }),
     )
 
 
@@ -183,6 +179,7 @@ def log_business_operation(
     
     details_str = ""
     if details:
+        details = mask_sensitive_data(details)
         detail_items = []
         for k, v in details.items():
             if isinstance(v, str) and len(v) > 50:

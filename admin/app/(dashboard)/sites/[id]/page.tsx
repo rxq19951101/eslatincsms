@@ -10,6 +10,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import AddressAutocomplete from '@/components/sites/AddressAutocomplete';
 import GoogleMapView from '@/components/map/GoogleMapView';
 import { hasPermission, usePermissions } from '@/hooks/usePermissions';
@@ -22,8 +23,9 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Badge } from '@/components/ui/badge';
-import { ArrowLeft, Link2, Pencil, Plus, Save } from 'lucide-react';
+import { ArrowLeft, Copy, Link2, Pencil, Plus, Save, Trash2 } from 'lucide-react';
 import { useI18n } from '@/lib/i18n';
+import { formatDateTime } from '@/lib/localization';
 import {
   chargePointSchema,
   apiErrorMessageKey,
@@ -54,7 +56,7 @@ function getStatusColor(status: string) {
 
 export default function SiteDetailPage() {
   const router = useRouter();
-  const { t } = useI18n();
+  const { locale, t } = useI18n();
   const params = useParams<{ id: string }>();
   const siteId = decodeURIComponent(String(params.id || ''));
 
@@ -99,10 +101,17 @@ export default function SiteDetailPage() {
   const [createError, setCreateError] = useState<string | null>(null);
   const [createErrors, setCreateErrors] = useState<FieldErrors>({});
   const [cpId, setCpId] = useState('');
+  const [cpDisplayCode, setCpDisplayCode] = useState('A01');
+  const [cpDisplayName, setCpDisplayName] = useState('');
+  const [cpLocationHint, setCpLocationHint] = useState('');
   const [cpVendor, setCpVendor] = useState('');
   const [cpModel, setCpModel] = useState('');
-  const [cpConnectorCount, setCpConnectorCount] = useState('1');
-  const [cpConnectorType, setCpConnectorType] = useState('Type2');
+  const [cpEvses, setCpEvses] = useState([
+    { evse_id: 1, physical_reference: 'A01-1', connector_type: 'Type2', max_power_kw: '7' },
+  ]);
+  const [provisionedCredentials, setProvisionedCredentials] = useState<null | {
+    username: string; secret: string; query_url: string; path_url: string;
+  }>(null);
 
   // 覆盖价弹窗（桩级）
   const [overrideOpen, setOverrideOpen] = useState(false);
@@ -256,10 +265,12 @@ export default function SiteDetailPage() {
     setCreateError(null);
     setCreateErrors({});
     setCpId('');
+    setCpDisplayCode('A01');
+    setCpDisplayName('');
+    setCpLocationHint('');
     setCpVendor('');
     setCpModel('');
-    setCpConnectorCount('1');
-    setCpConnectorType('Type2');
+    setCpEvses([{ evse_id: 1, physical_reference: 'A01-1', connector_type: 'Type2', max_power_kw: '7' }]);
     setCreateOpen(true);
   };
 
@@ -267,10 +278,14 @@ export default function SiteDetailPage() {
     if (!site) return;
     const result = chargePointSchema.safeParse({
       id: cpId,
+      display_code: cpDisplayCode,
+      display_name: cpDisplayName,
+      location_hint: cpLocationHint,
       vendor: cpVendor,
       model: cpModel,
-      connector_count: cpConnectorCount,
-      connector_type: cpConnectorType,
+      connector_count: cpEvses.length,
+      connector_type: cpEvses[0]?.connector_type || 'Type2',
+      evses: cpEvses,
     });
     if (!result.success) {
       setCreateErrors(fieldErrors(result.error));
@@ -283,11 +298,16 @@ export default function SiteDetailPage() {
     try {
       const body: CreateChargePointInSiteRequest = {
         ...result.data,
+        display_name: result.data.display_name || undefined,
+        location_hint: result.data.location_hint || undefined,
         vendor: result.data.vendor || undefined,
         model: result.data.model || undefined,
       };
-      await apiPost(API_ENDPOINTS.SITE_CREATE_CHARGE_POINT(site.id), body);
+      const created = await apiPost<{
+        ocpp_credentials: { username: string; secret: string; query_url: string; path_url: string };
+      }>(API_ENDPOINTS.SITE_CREATE_CHARGE_POINT(site.id), body);
       setCreateOpen(false);
+      setProvisionedCredentials(created.ocpp_credentials);
       mutate();
       alert(t('充电桩已添加并绑定到站点'));
     } catch (e) {
@@ -318,6 +338,7 @@ export default function SiteDetailPage() {
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
           <Button
+            data-testid="admin-charger-create-open"
             variant="outline"
             size="sm"
             onClick={() => router.push('/sites')}
@@ -512,7 +533,7 @@ export default function SiteDetailPage() {
               <table className="w-full">
                 <thead>
                   <tr className="border-b border-slate-700">
-                    <th className="text-left py-3 px-4 text-slate-400 font-medium">{t('OCPP 身份')}</th>
+                    <th className="text-left py-3 px-4 text-slate-400 font-medium">{t('公开编号')}</th>
                     <th className="text-left py-3 px-4 text-slate-400 font-medium">{t('厂商/型号')}</th>
                     <th className="text-left py-3 px-4 text-slate-400 font-medium">{t('状态')}</th>
                     <th className="text-left py-3 px-4 text-slate-400 font-medium">{t('最后在线')}</th>
@@ -528,8 +549,10 @@ export default function SiteDetailPage() {
                           className="text-white font-mono text-sm hover:text-purple-400 hover:underline transition-colors cursor-pointer"
                           title={t('点击查看详情')}
                         >
-                          {cp.ocpp_identity || t('未提供')}
+                          {cp.display_name || cp.display_code}
                         </button>
+                        {cp.display_name && <div className="mt-1 text-xs text-slate-400">{cp.display_code}</div>}
+                        {cp.location_hint && <div className="mt-1 text-xs text-slate-400">{cp.location_hint}</div>}
                       </td>
                       <td className="py-3 px-4 text-slate-300">
                         {(cp.vendor || 'Unknown') + ' ' + (cp.model || '')}
@@ -538,7 +561,7 @@ export default function SiteDetailPage() {
                         <Badge className={getStatusColor(cp.status)}>{cp.status}</Badge>
                       </td>
                       <td className="py-3 px-4 text-slate-300">
-                        {cp.last_seen ? new Date(cp.last_seen).toLocaleString('zh-CN') : '-'}
+                        {formatDateTime(cp.last_seen, locale, t('common.notAvailable'))}
                       </td>
                       <td className="py-3 px-4">
                         <div className="flex items-center justify-end gap-2 flex-wrap">
@@ -735,7 +758,7 @@ export default function SiteDetailPage() {
       </Dialog>
 
       <Dialog open={createOpen} onOpenChange={setCreateOpen}>
-        <DialogContent className="bg-slate-900 border-slate-700 text-slate-100 max-w-xl">
+        <DialogContent data-testid="admin-charger-create-dialog" className="bg-slate-900 border-slate-700 text-slate-100 max-w-xl">
           <DialogHeader>
             <DialogTitle className="text-white">{t('在站点下添加充电桩')}</DialogTitle>
             <DialogDescription className="text-slate-400">
@@ -750,9 +773,57 @@ export default function SiteDetailPage() {
           )}
 
           <div className="space-y-4">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label className="text-slate-300">{t('公开编号 *')}</Label>
+                <Input
+                  data-testid="admin-charger-display-code"
+                  value={cpDisplayCode}
+                  onChange={(e) => {
+                    const previousCode = cpDisplayCode.trim() || 'A01';
+                    const nextCode = e.target.value.toUpperCase();
+                    setCpDisplayCode(nextCode);
+                    setCpEvses((current) => current.map((evse) => (
+                      evse.physical_reference === `${previousCode}-${evse.evse_id}`
+                        ? { ...evse, physical_reference: `${nextCode.trim() || 'A01'}-${evse.evse_id}` }
+                        : evse
+                    )));
+                  }}
+                  placeholder={t('例如：A01')}
+                  aria-invalid={!!createErrors.display_code}
+                  className="bg-slate-800 border-slate-600 text-slate-200"
+                />
+                {createErrors.display_code && <p className="text-sm text-red-400">{t(createErrors.display_code)}</p>}
+              </div>
+              <div className="space-y-2">
+                <Label className="text-slate-300">{t('公开名称（可选）')}</Label>
+                <Input
+                  data-testid="admin-charger-display-name"
+                  value={cpDisplayName}
+                  onChange={(e) => setCpDisplayName(e.target.value)}
+                  aria-invalid={!!createErrors.display_name}
+                  className="bg-slate-800 border-slate-600 text-slate-200"
+                />
+                {createErrors.display_name && <p className="text-sm text-red-400">{t(createErrors.display_name)}</p>}
+              </div>
+            </div>
+            <div className="space-y-2">
+              <Label className="text-slate-300">{t('位置提示（可选）')}</Label>
+              <Input
+                data-testid="admin-charger-location-hint"
+                value={cpLocationHint}
+                onChange={(e) => setCpLocationHint(e.target.value)}
+                placeholder={t('例如：P2 / 42 号车位')}
+                aria-invalid={!!createErrors.location_hint}
+                className="bg-slate-800 border-slate-600 text-slate-200"
+              />
+              {createErrors.location_hint && <p className="text-sm text-red-400">{t(createErrors.location_hint)}</p>}
+              <div className="text-xs text-slate-400">{t('司机在 App 和设备现场看到这些公开标签。')}</div>
+            </div>
             <div className="space-y-2">
               <Label className="text-slate-300">{t('充电桩硬件码 *')}</Label>
               <Input
+                data-testid="admin-charger-ocpp-identity"
                 value={cpId}
                 onChange={(e) => setCpId(e.target.value)}
                 placeholder={t('例如：CO.BOGOTA:CP-01')}
@@ -769,6 +840,7 @@ export default function SiteDetailPage() {
               <div className="space-y-2">
                 <Label className="text-slate-300">{t('厂商（可选）')}</Label>
                 <Input
+                  data-testid="admin-charger-vendor"
                   value={cpVendor}
                   onChange={(e) => setCpVendor(e.target.value)}
                   aria-invalid={!!createErrors.vendor}
@@ -779,6 +851,7 @@ export default function SiteDetailPage() {
               <div className="space-y-2">
                 <Label className="text-slate-300">{t('型号（可选）')}</Label>
                 <Input
+                  data-testid="admin-charger-model"
                   value={cpModel}
                   onChange={(e) => setCpModel(e.target.value)}
                   aria-invalid={!!createErrors.model}
@@ -788,33 +861,52 @@ export default function SiteDetailPage() {
               </div>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <Label className="text-slate-300">{t('枪口数量（EVSE 数）')}</Label>
-                <Input
-                  value={cpConnectorCount}
-                  onChange={(e) => setCpConnectorCount(e.target.value)}
-                  aria-invalid={!!createErrors.connector_count}
-                  className="bg-slate-800 border-slate-600 text-slate-200"
-                />
-                {createErrors.connector_count && <p className="text-sm text-red-400">{t(createErrors.connector_count)}</p>}
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <Label className="text-slate-300">{t('EVSE / 枪口配置')}</Label>
+                <Button type="button" variant="outline" size="sm" onClick={() => {
+                  const next = cpEvses.length + 1;
+                  setCpEvses([...cpEvses, { evse_id: next, physical_reference: `${cpDisplayCode.trim() || 'A01'}-${next}`, connector_type: 'Type2', max_power_kw: '7' }]);
+                }} disabled={cpEvses.length >= 16}>
+                  <Plus className="h-4 w-4" /> {t('添加枪口')}
+                </Button>
               </div>
-              <div className="space-y-2">
-                <Label className="text-slate-300">{t('连接器类型')}</Label>
-                <Input
-                  value={cpConnectorType}
-                  onChange={(e) => setCpConnectorType(e.target.value)}
-                  placeholder="Type2/GBT/CCS2..."
-                  aria-invalid={!!createErrors.connector_type}
-                  className="bg-slate-800 border-slate-600 text-slate-200"
-                />
-                {createErrors.connector_type && <p className="text-sm text-red-400">{t(createErrors.connector_type)}</p>}
-              </div>
+              {cpEvses.map((evse, index) => (
+                <div key={index} className="grid grid-cols-1 md:grid-cols-[90px_1fr_1fr_120px_40px] gap-2 rounded-md border border-slate-700 p-3">
+                  <Input aria-label={t('EVSE 编号')} type="number" min={1} max={16} value={evse.evse_id}
+                    onChange={(e) => setCpEvses(cpEvses.map((item, i) => i === index ? { ...item, evse_id: Number(e.target.value) } : item))}
+                    className="bg-slate-800 border-slate-600" />
+                  <Input aria-label={t('物理编号')} value={evse.physical_reference} placeholder="A-01"
+                    onChange={(e) => setCpEvses(cpEvses.map((item, i) => i === index ? { ...item, physical_reference: e.target.value } : item))}
+                    className="bg-slate-800 border-slate-600" />
+                  <Select
+                    value={evse.connector_type}
+                    onValueChange={(value) => setCpEvses(cpEvses.map((item, i) => i === index ? { ...item, connector_type: value } : item))}
+                  >
+                    <SelectTrigger aria-label={t('连接器类型')} className="bg-slate-800 border-slate-600">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {['Type2', 'CCS1', 'CCS2', 'CHAdeMO', 'NACS', 'GB_T_AC', 'GB_T_DC'].map((value) => (
+                        <SelectItem key={value} value={value}>{value}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <Input aria-label={t('最大功率 kW')} type="number" min="0.1" step="0.1" value={evse.max_power_kw}
+                    onChange={(e) => setCpEvses(cpEvses.map((item, i) => i === index ? { ...item, max_power_kw: e.target.value } : item))}
+                    className="bg-slate-800 border-slate-600" />
+                  <Button type="button" variant="ghost" size="icon" aria-label={t('删除枪口')}
+                    disabled={cpEvses.length === 1} onClick={() => setCpEvses(cpEvses.filter((_, i) => i !== index))}>
+                    <Trash2 className="h-4 w-4" />
+                  </Button>
+                </div>
+              ))}
             </div>
           </div>
 
           <DialogFooter>
             <Button
+              data-testid="admin-charger-create-submit"
               type="button"
               variant="outline"
               onClick={() => setCreateOpen(false)}
@@ -831,6 +923,29 @@ export default function SiteDetailPage() {
             >
               {createLoading ? t('创建中...') : t('创建并绑定')}
             </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={!!provisionedCredentials} onOpenChange={(open) => !open && setProvisionedCredentials(null)}>
+        <DialogContent className="bg-slate-900 border-slate-700 text-slate-100 max-w-xl">
+          <DialogHeader>
+            <DialogTitle>{t('保存充电桩接入凭据')}</DialogTitle>
+            <DialogDescription>{t('密钥只显示这一次。请立即保存到设备安全配置中。')}</DialogDescription>
+          </DialogHeader>
+          {provisionedCredentials && (
+            <div className="space-y-3 rounded-md border border-amber-500/30 bg-amber-500/5 p-4 font-mono text-sm break-all">
+              <div><span className="text-slate-400">Identity: </span>{provisionedCredentials.username}</div>
+              <div><span className="text-slate-400">Secret: </span>{provisionedCredentials.secret}</div>
+              <div><span className="text-slate-400">URL 1: </span>{provisionedCredentials.query_url}</div>
+              <div><span className="text-slate-400">URL 2: </span>{provisionedCredentials.path_url}</div>
+            </div>
+          )}
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => provisionedCredentials && navigator.clipboard.writeText(JSON.stringify(provisionedCredentials, null, 2))}>
+              <Copy className="h-4 w-4" /> {t('复制凭据')}
+            </Button>
+            <Button type="button" onClick={() => setProvisionedCredentials(null)}>{t('我已安全保存')}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

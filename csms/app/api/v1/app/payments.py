@@ -3,12 +3,18 @@
 # 提供创建支付订单、查询状态、Webhook 回调等功能
 #
 
-from typing import Dict, Any, Optional
+import hashlib
+import hmac
+import json
+import os
+from typing import Dict, Any, Literal, Optional
 from decimal import Decimal
 from datetime import datetime, timezone, timedelta
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Header
 from pydantic import BaseModel, Field
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.logging_config import get_logger
@@ -26,6 +32,7 @@ from app.services.payment_providers.registry import get_payment_provider_registr
 from app.domain.payment import transition_status
 from app.core.id_generator import generate_order_id
 from app.core.config import get_settings
+from app.api.validation import StrictRequestModel
 from email_validator import validate_email, EmailNotValidError
 
 logger = get_logger("ocpp_csms")
@@ -122,6 +129,16 @@ class PaymentStatusResponse(BaseModel):
     is_expired: bool
 
 
+class SimPaymentWebhookRequest(StrictRequestModel):
+    """Narrow development/test webhook payload used by the scenario runner."""
+
+    event_id: str = Field(..., min_length=1, max_length=255)
+    provider: Literal["fake"]
+    status: Literal["approved", "pending", "rejected", "timeout"]
+    session_id: Optional[UUID] = None
+    payment_order_id: Optional[UUID] = None
+
+
 # ==================== API 端点 ====================
 
 TERMINAL_STATES = {"approved", "declined", "voided", "error", "refunded"}
@@ -162,7 +179,7 @@ def _apply_approved_business_logic(
             charge_point_id=None,
             type="top_up",
             amount=Decimal(str(order.amount)),
-            description=f"{provider_display_name} 充值（订单 {provider_ref or order.id}）",
+            description="Wallet top-up",
         )
         db.add(tx)
         logger.info(
@@ -204,8 +221,53 @@ def _apply_refund_ledger(db: Session, order: PaymentOrder, amount: Decimal) -> N
             charge_point_id=None,
             type="refund",
             amount=-amount,
-            description=f"支付退款（订单 {order.id}）",
+            description="Payment refund",
         ))
+
+
+def build_sim_webhook_signature(payload: Dict[str, Any], secret: str) -> str:
+    """Return the canonical HMAC-SHA256 signature for a SIM webhook payload."""
+    canonical = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        default=str,
+    ).encode("utf-8")
+    digest = hmac.new(secret.encode("utf-8"), canonical, hashlib.sha256).hexdigest()
+    return f"sha256={digest}"
+
+
+def _sim_webhook_invariants(
+    db: Session,
+    order: PaymentOrder,
+    event_id: str,
+    *,
+    replayed: bool,
+) -> Dict[str, Any]:
+    session = db.query(ChargingSession).filter(
+        ChargingSession.payment_order_id == order.id
+    ).first()
+    event = db.query(PaymentWebhookEvent).filter(
+        PaymentWebhookEvent.payment_provider == "fake",
+        PaymentWebhookEvent.payment_provider_id == str(order.id),
+        PaymentWebhookEvent.event_id == event_id,
+    ).one()
+    return {
+        "provider": "fake",
+        "status": (event.payload or {}).get("status"),
+        "order_status": order.status,
+        "event_id": event_id,
+        "payment_order_id": str(order.id),
+        "session_id": str(session.id) if session else None,
+        "session_payment_status": session.payment_status if session else None,
+        "wallet_balance": str(order.app_user.balance),
+        "webhook_event_count": 1,
+        "ledger_entry_count": db.query(AppWalletTransaction).filter(
+            AppWalletTransaction.payment_order_id == order.id
+        ).count(),
+        "replayed": replayed,
+    }
 
 
 def _create_order_from_command(
@@ -474,6 +536,136 @@ def get_payment_status(
             params={"order_id": order_id},
         )
         raise
+
+
+@router.post("/sim-webhook", summary="本地场景支付 Webhook（仅 development/test）")
+async def handle_sim_payment_webhook(
+    request_data: SimPaymentWebhookRequest,
+    x_sim_signature: Optional[str] = Header(None, alias="X-Sim-Signature"),
+    idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
+):
+    """Drive the real payment state machine without exposing a production test API."""
+    if os.getenv("ENVIRONMENT", "development").lower() not in {"development", "test"}:
+        raise HTTPException(status_code=404, detail="Not found")
+
+    secret = os.getenv("SIM_E2E_WEBHOOK_SECRET", "")
+    if not secret:
+        raise HTTPException(status_code=503, detail="SIM payment webhook is not configured")
+    if idempotency_key != request_data.event_id:
+        raise HTTPException(status_code=400, detail="Idempotency-Key must equal event_id")
+    if (request_data.session_id is None) == (request_data.payment_order_id is None):
+        raise HTTPException(
+            status_code=422,
+            detail="Exactly one of session_id or payment_order_id is required",
+        )
+
+    payload = request_data.model_dump(mode="json", exclude_none=True)
+    expected_signature = build_sim_webhook_signature(payload, secret)
+    if not x_sim_signature or not hmac.compare_digest(
+        expected_signature, x_sim_signature
+    ):
+        raise HTTPException(status_code=401, detail="Invalid SIM webhook signature")
+
+    db = SuperSessionLocal()
+    try:
+        session = None
+        if request_data.session_id is not None:
+            session = db.query(ChargingSession).filter(
+                ChargingSession.id == request_data.session_id
+            ).first()
+            if not session or not session.payment_order_id:
+                raise HTTPException(status_code=404, detail="Payment order not found")
+            order_id = session.payment_order_id
+        else:
+            order_id = request_data.payment_order_id
+
+        order = db.query(PaymentOrder).filter(
+            PaymentOrder.id == order_id,
+            PaymentOrder.payment_provider == "fake",
+        ).with_for_update().first()
+        if not order:
+            raise HTTPException(status_code=404, detail="Payment order not found")
+
+        provider_id = str(order.id)
+        existing_event = db.query(PaymentWebhookEvent).filter(
+            PaymentWebhookEvent.payment_provider == "fake",
+            PaymentWebhookEvent.payment_provider_id == provider_id,
+            PaymentWebhookEvent.event_id == request_data.event_id,
+        ).first()
+        if existing_event:
+            if existing_event.payload != payload:
+                raise HTTPException(
+                    status_code=409,
+                    detail="event_id was already used with a different payload",
+                )
+            if existing_event.processed:
+                return _sim_webhook_invariants(
+                    db, order, request_data.event_id, replayed=True
+                )
+
+        event = existing_event or PaymentWebhookEvent(
+            payment_order_id=order.id,
+            payment_provider="fake",
+            payment_provider_id=provider_id,
+            event_id=request_data.event_id,
+            event_type="payment.updated",
+            payload=payload,
+            processed=False,
+        )
+        if not existing_event:
+            db.add(event)
+            db.flush()
+
+        target_status = {
+            "approved": "approved",
+            "pending": "processing",
+            "rejected": "declined",
+            "timeout": "error",
+        }[request_data.status]
+        try:
+            order.status = transition_status(order.status, target_status)
+        except ValueError:
+            # Formal providers also preserve terminal state against late callbacks.
+            pass
+
+        app_user = db.query(AppUser).filter(AppUser.id == order.app_user_id).one()
+        if order.status == "approved":
+            order.paid_at = order.paid_at or datetime.now(timezone.utc)
+            _apply_approved_business_logic(db, order, app_user, "SIM fake", provider_id)
+        elif target_status in {"declined", "error"} and order.type == "charging":
+            if session is None:
+                session = db.query(ChargingSession).filter(
+                    ChargingSession.payment_order_id == order.id
+                ).first()
+            if session:
+                session.payment_status = "unpaid"
+                session.payment_order_id = order.id
+                app_user.has_unpaid_charges = True
+
+        order.updated_at = datetime.now(timezone.utc)
+        event.processed = True
+        event.processed_at = datetime.now(timezone.utc)
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            order = db.query(PaymentOrder).filter(PaymentOrder.id == order.id).one()
+            event = db.query(PaymentWebhookEvent).filter(
+                PaymentWebhookEvent.payment_provider == "fake",
+                PaymentWebhookEvent.payment_provider_id == provider_id,
+                PaymentWebhookEvent.event_id == request_data.event_id,
+            ).one_or_none()
+            if not event or event.payload != payload or not event.processed:
+                raise
+            return _sim_webhook_invariants(
+                db, order, request_data.event_id, replayed=True
+            )
+
+        return _sim_webhook_invariants(
+            db, order, request_data.event_id, replayed=False
+        )
+    finally:
+        db.close()
 
 
 @router.post("/webhook-mp", summary="Mercado Pago Webhook 回调")

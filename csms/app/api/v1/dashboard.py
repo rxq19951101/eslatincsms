@@ -25,6 +25,44 @@ router = APIRouter(tags=["仪表板"])  # prefix 在 __init__.py 中统一设置
 
 logger = get_logger("ocpp_csms")
 
+ONLINE_THRESHOLD_SECONDS = 300
+
+
+def _effective_charge_point_statuses(
+    db: Session,
+    charge_point_ids: List[Any],
+    now: datetime,
+) -> Dict[Any, str]:
+    """Classify every active charge point once using its latest EVSE heartbeat."""
+    if not charge_point_ids:
+        return {}
+    rows = (
+        db.query(EVSEStatus)
+        .filter(EVSEStatus.charge_point_id.in_(charge_point_ids))
+        .order_by(EVSEStatus.last_seen.desc())
+        .all()
+    )
+    latest: Dict[Any, EVSEStatus] = {}
+    for row in rows:
+        latest.setdefault(row.charge_point_id, row)
+
+    threshold = now - timedelta(seconds=ONLINE_THRESHOLD_SECONDS)
+    result: Dict[Any, str] = {}
+    for charge_point_id in charge_point_ids:
+        row = latest.get(charge_point_id)
+        if not row or not row.last_seen:
+            result[charge_point_id] = "Offline"
+            continue
+        last_seen = row.last_seen
+        if last_seen.tzinfo is None:
+            last_seen = last_seen.replace(tzinfo=timezone.utc)
+        result[charge_point_id] = (
+            row.status or "Unknown"
+            if last_seen >= threshold
+            else "Offline"
+        )
+    return result
+
 
 # ==================== 响应模型 ====================
 
@@ -115,51 +153,42 @@ async def get_dashboard_summary(
     # 构建基础查询（多租户过滤）
     # RLS 会自动过滤，但为了性能，我们也在应用层添加过滤
     charge_point_query = db.query(ChargePoint)
-    if tenant_id and not current_user.is_super_admin:
+    if tenant_id:
         charge_point_query = charge_point_query.filter(ChargePoint.tenant_id == tenant_id)
     
     site_query = db.query(Site)
-    if tenant_id and not current_user.is_super_admin:
+    if tenant_id:
         site_query = site_query.filter(Site.tenant_id == tenant_id)
     
     order_query = db.query(Order)
-    if tenant_id and not current_user.is_super_admin:
+    if tenant_id:
         order_query = order_query.filter(Order.tenant_id == tenant_id)
     
     invoice_query = db.query(Invoice)
-    if tenant_id and not current_user.is_super_admin:
+    if tenant_id:
         invoice_query = invoice_query.filter(Invoice.tenant_id == tenant_id)
     
     alert_query = db.query(Alert)
-    if tenant_id and not current_user.is_super_admin:
+    if tenant_id:
         alert_query = alert_query.filter(Alert.tenant_id == tenant_id)
     
     # 设备统计
-    total_charge_points = charge_point_query.filter(ChargePoint.is_active == True).count()
-    
-    # 获取EVSE状态统计
-    evse_status_query = db.query(EVSEStatus).join(ChargePoint)
-    if tenant_id and not current_user.is_super_admin:
-        evse_status_query = evse_status_query.filter(ChargePoint.tenant_id == tenant_id)
-    
-    # 在线充电桩（最近30秒内有心跳）
+    active_charge_points = charge_point_query.filter(
+        ChargePoint.is_active == True  # noqa: E712
+    ).all()
+    total_charge_points = len(active_charge_points)
+
+    # Summary and site views share one five-minute, latest-heartbeat rule.
     now = datetime.now(timezone.utc)
-    online_threshold = now - timedelta(seconds=30)
-    online_charge_points = evse_status_query.filter(
-        EVSEStatus.last_seen >= online_threshold
-    ).distinct(EVSEStatus.charge_point_id).count()
-    
+    effective_statuses = _effective_charge_point_statuses(
+        db, [cp.id for cp in active_charge_points], now
+    )
+    online_statuses = [status for status in effective_statuses.values() if status != "Offline"]
+    online_charge_points = len(online_statuses)
     offline_charge_points = total_charge_points - online_charge_points
-    
-    # 状态统计
-    status_counts = evse_status_query.with_entities(
-        EVSEStatus.status, func.count(func.distinct(EVSEStatus.charge_point_id))
-    ).group_by(EVSEStatus.status).all()
-    
-    status_dict = {status: count for status, count in status_counts}
-    faulted_charge_points = status_dict.get("Faulted", 0)
-    charging_charge_points = status_dict.get("Charging", 0)
-    available_charge_points = status_dict.get("Available", 0)
+    faulted_charge_points = online_statuses.count("Faulted")
+    charging_charge_points = online_statuses.count("Charging")
+    available_charge_points = online_statuses.count("Available")
     
     # 站点统计
     total_sites = site_query.filter(Site.is_active == True).count()
@@ -175,7 +204,7 @@ async def get_dashboard_summary(
     today_revenue = sum(float(inv.total_amount) for inv in today_invoices)
     
     # AppUser 是平台级用户；租户视图按该租户实际发生过充电会话的用户统计。
-    if tenant_id and not current_user.is_super_admin:
+    if tenant_id:
         user_scope = db.query(func.count(func.distinct(ChargingSession.user_id))).filter(
             ChargingSession.tenant_id == tenant_id,
             ChargingSession.user_id.isnot(None),
@@ -331,8 +360,8 @@ async def get_dashboard_sites(
     """
     站点维度汇总（用于 Admin 仪表盘按站点分析）：
     - 站点下充电桩数量（charge_points_count）
-    - 在线充电桩数量（online_charge_points_count，近 30 秒有心跳）
-    - 站点健康：Faulted/Charging/Available（按 EVSEStatus 统计 distinct charge_point）
+    - 在线充电桩数量（online_charge_points_count，近 5 分钟有心跳）
+    - 站点健康：按每个充电桩的最新 EVSEStatus 唯一归类
     - 近 N 天：订单数、充电量(kWh)、收入
     """
     # #region agent log
@@ -351,12 +380,32 @@ async def get_dashboard_sites(
 
     now = datetime.now(timezone.utc)
     start_date = (now - timedelta(days=days)).replace(hour=0, minute=0, second=0, microsecond=0)
-    online_threshold = now - timedelta(seconds=30)
 
     # 站点基础查询
     site_q = db.query(Site).filter(Site.is_active == True)  # noqa: E712
-    if tenant_id and not current_user.is_super_admin:
+    if tenant_id:
         site_q = site_q.filter(Site.tenant_id == tenant_id)
+
+    scoped_cp_q = db.query(ChargePoint.id, ChargePoint.site_id).filter(
+        ChargePoint.is_active == True  # noqa: E712
+    )
+    if tenant_id:
+        scoped_cp_q = scoped_cp_q.filter(ChargePoint.tenant_id == tenant_id)
+    scoped_charge_points = scoped_cp_q.all()
+    effective_statuses = _effective_charge_point_statuses(
+        db, [cp_id for cp_id, _ in scoped_charge_points], now
+    )
+    site_health: Dict[Any, Dict[str, int]] = {}
+    for cp_id, site_id in scoped_charge_points:
+        counts = site_health.setdefault(
+            site_id,
+            {"online": 0, "Faulted": 0, "Charging": 0, "Available": 0},
+        )
+        status = effective_statuses.get(cp_id, "Offline")
+        if status != "Offline":
+            counts["online"] += 1
+            if status in {"Faulted", "Charging", "Available"}:
+                counts[status] += 1
 
     # 站点下充电桩数量
     cp_count_sq = (
@@ -365,50 +414,6 @@ async def get_dashboard_sites(
             func.count(ChargePoint.id).label("cp_count"),
         )
         .filter(ChargePoint.is_active == True)  # noqa: E712
-        .group_by(ChargePoint.site_id)
-        .subquery()
-    )
-
-    # 在线充电桩数量（近 30 秒心跳）
-    online_cp_sq = (
-        db.query(
-            ChargePoint.site_id.label("site_id"),
-            func.count(func.distinct(ChargePoint.id)).label("online_cp_count"),
-        )
-        .join(EVSEStatus, EVSEStatus.charge_point_id == ChargePoint.id)
-        .filter(EVSEStatus.last_seen >= online_threshold)
-        .group_by(ChargePoint.site_id)
-        .subquery()
-    )
-
-    # 健康状态：Faulted / Charging / Available（distinct charge_point）
-    faulted_sq = (
-        db.query(
-            ChargePoint.site_id.label("site_id"),
-            func.count(func.distinct(ChargePoint.id)).label("faulted_cp_count"),
-        )
-        .join(EVSEStatus, EVSEStatus.charge_point_id == ChargePoint.id)
-        .filter(EVSEStatus.last_seen >= online_threshold, EVSEStatus.status == "Faulted")
-        .group_by(ChargePoint.site_id)
-        .subquery()
-    )
-    charging_sq = (
-        db.query(
-            ChargePoint.site_id.label("site_id"),
-            func.count(func.distinct(ChargePoint.id)).label("charging_cp_count"),
-        )
-        .join(EVSEStatus, EVSEStatus.charge_point_id == ChargePoint.id)
-        .filter(EVSEStatus.last_seen >= online_threshold, EVSEStatus.status == "Charging")
-        .group_by(ChargePoint.site_id)
-        .subquery()
-    )
-    available_sq = (
-        db.query(
-            ChargePoint.site_id.label("site_id"),
-            func.count(func.distinct(ChargePoint.id)).label("available_cp_count"),
-        )
-        .join(EVSEStatus, EVSEStatus.charge_point_id == ChargePoint.id)
-        .filter(EVSEStatus.last_seen >= online_threshold, EVSEStatus.status == "Available")
         .group_by(ChargePoint.site_id)
         .subquery()
     )
@@ -441,19 +446,11 @@ async def get_dashboard_sites(
 
     rows = (
         site_q.outerjoin(cp_count_sq, cp_count_sq.c.site_id == Site.id)
-        .outerjoin(online_cp_sq, online_cp_sq.c.site_id == Site.id)
-        .outerjoin(faulted_sq, faulted_sq.c.site_id == Site.id)
-        .outerjoin(charging_sq, charging_sq.c.site_id == Site.id)
-        .outerjoin(available_sq, available_sq.c.site_id == Site.id)
         .outerjoin(orders_sq, orders_sq.c.site_id == Site.id)
         .outerjoin(invoice_sq, invoice_sq.c.site_id == Site.id)
         .with_entities(
             Site,
             cp_count_sq.c.cp_count,
-            online_cp_sq.c.online_cp_count,
-            faulted_sq.c.faulted_cp_count,
-            charging_sq.c.charging_cp_count,
-            available_sq.c.available_cp_count,
             orders_sq.c.orders_count,
             invoice_sq.c.energy_kwh,
             invoice_sq.c.revenue,
@@ -467,10 +464,6 @@ async def get_dashboard_sites(
     for (
         site,
         cp_count,
-        online_cp_count,
-        faulted_cp_count,
-        charging_cp_count,
-        available_cp_count,
         orders_count,
         energy_kwh,
         revenue,
@@ -479,16 +472,20 @@ async def get_dashboard_sites(
         energy_f = float(energy_kwh or 0)
         revenue_f = float(revenue or 0)
 
+        health = site_health.get(
+            site.id,
+            {"online": 0, "Faulted": 0, "Charging": 0, "Available": 0},
+        )
         result.append(
             DashboardSiteItem(
-                site_id=site.id,
+                site_id=str(site.id),
                 site_name=site.name,
                 address=site.address,
                 charge_points_count=int(cp_count or 0),
-                online_charge_points_count=int(online_cp_count or 0),
-                faulted_charge_points=int(faulted_cp_count or 0),
-                charging_charge_points=int(charging_cp_count or 0),
-                available_charge_points=int(available_cp_count or 0),
+                online_charge_points_count=health["online"],
+                faulted_charge_points=health["Faulted"],
+                charging_charge_points=health["Charging"],
+                available_charge_points=health["Available"],
                 orders_count=int(orders_count or 0),
                 energy_kwh=round(energy_f, 3),
                 revenue=round(revenue_f, 2),

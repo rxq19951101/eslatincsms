@@ -7,11 +7,12 @@
 from typing import List, Optional, Dict, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Path
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.core.logging_config import get_logger
 from app.core.auth import get_current_user
-from app.database.base import get_db, tenant_id_context
+from app.database.base import get_db, SuperSessionLocal
 from app.database.models import AppUser, ChargingSession, ChargePoint, Site
 from uuid import UUID
 
@@ -20,9 +21,17 @@ logger = get_logger("ocpp_csms")
 router = APIRouter()
 
 
+def get_app_platform_db():
+    db = SuperSessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
 async def get_current_app_user(
     current_user_payload: Dict[str, Any] = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_app_platform_db),
 ) -> AppUser:
     user_id = current_user_payload.get("user_id")
     if not user_id:
@@ -55,12 +64,15 @@ def list_app_transactions(
     """
     返回当前用户的 ChargingSession 列表。
     """
-    tenant_id = tenant_id_context.get()
     id_tag = _app_user_id_tag(current_user_obj)
 
-    query = db.query(ChargingSession).filter(ChargingSession.id_tag == id_tag)
-    if tenant_id:
-        query = query.filter(ChargingSession.tenant_id == tenant_id)
+    query = db.query(ChargingSession).filter(
+        or_(
+            ChargingSession.app_user_id == current_user_obj.id,
+            ChargingSession.user_id == str(current_user_obj.id),
+            ChargingSession.id_tag == id_tag,
+        )
+    )
     if status:
         query = query.filter(ChargingSession.status == status)
 
@@ -81,6 +93,7 @@ def list_app_transactions(
             cp_site_map[cp.id] = {
                 "site_name": site.name if site else None,
                 "site_address": site.address if site else None,
+                "ocpp_identity": cp.ocpp_identity,
             }
 
     result: List[dict] = []
@@ -98,8 +111,9 @@ def list_app_transactions(
             {
                 "id": s.id,
                 "transaction_id": s.transaction_id,
-                "charge_point_id": s.charge_point_id,
-                "evse_id": s.evse_id,
+                "charge_point_id": str(s.charge_point_id),
+                "ocpp_identity": site_info.get("ocpp_identity"),
+                "evse_id": str(s.evse_id),
                 "start_time": s.start_time.isoformat() if s.start_time else None,
                 "end_time": s.end_time.isoformat() if s.end_time else None,
                 "status": s.status,
@@ -117,14 +131,18 @@ def list_app_transactions(
 def get_app_transaction_detail(
     session_id: UUID = Path(..., description="charging_sessions.id UUID"),
     current_user_obj: AppUser = Depends(get_current_app_user),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_app_platform_db),
 ) -> dict:
-    tenant_id = tenant_id_context.get()
     id_tag = _app_user_id_tag(current_user_obj)
 
-    query = db.query(ChargingSession).filter(ChargingSession.id == session_id, ChargingSession.id_tag == id_tag)
-    if tenant_id:
-        query = query.filter(ChargingSession.tenant_id == tenant_id)
+    query = db.query(ChargingSession).filter(
+        ChargingSession.id == session_id,
+        or_(
+            ChargingSession.app_user_id == current_user_obj.id,
+            ChargingSession.user_id == str(current_user_obj.id),
+            ChargingSession.id_tag == id_tag,
+        ),
+    )
     s = query.first()
     if not s:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -153,8 +171,9 @@ def get_app_transaction_detail(
     return {
         "id": s.id,
         "transaction_id": s.transaction_id,
-        "charge_point_id": s.charge_point_id,
-        "evse_id": s.evse_id,
+        "charge_point_id": str(s.charge_point_id),
+        "ocpp_identity": cp.ocpp_identity if cp else None,
+        "evse_id": str(s.evse_id),
         "start_time": s.start_time.isoformat() if s.start_time else None,
         "end_time": s.end_time.isoformat() if s.end_time else None,
         "status": s.status,

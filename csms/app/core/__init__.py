@@ -4,9 +4,9 @@
 #
 
 from app.core.config import get_settings, Settings
+from app.core.auth import verify_password, get_password_hash
 from app.core.security import (
-    verify_password, get_password_hash, create_access_token, verify_token,
-    get_current_user, verify_api_key
+    create_access_token, verify_token, get_current_user, verify_api_key
 )
 from app.core.exceptions import (
     OCPPException, ChargerNotFoundException, ChargerNotConnectedException,
@@ -36,4 +36,3 @@ __all__ = [
     "LoggingMiddleware",
     "SecurityHeadersMiddleware",
 ]
-

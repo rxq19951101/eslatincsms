@@ -3,6 +3,8 @@
 # 提供OCPP远程控制功能（RemoteStart, RemoteStop等）
 #
 
+import asyncio
+import time
 from typing import List, Literal, Optional
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
@@ -42,6 +44,14 @@ except ImportError:
     TransportType = None
 
 router = APIRouter()
+
+_remote_start_inflight: dict[tuple[str, int], float] = {}
+_remote_start_guard = asyncio.Lock()
+_REMOTE_START_INFLIGHT_SECONDS = 30.0
+
+
+def mark_remote_start_finished(charge_point_identity: str, connector_id: int) -> None:
+    _remote_start_inflight.pop((charge_point_identity, connector_id), None)
 
 
 def check_charger_connection(charge_point_id: str) -> bool:
@@ -231,6 +241,7 @@ class RemoteStartRequest(StrictRequestModel):
     charge_point_id: str = Field(..., min_length=1, max_length=64)
     id_tag: str = Field(..., min_length=1, max_length=20)
     connector_id: int = Field(1, ge=1, le=255)
+    idempotency_key: Optional[str] = Field(None, min_length=1, max_length=255)
 
 
 class RemoteStopRequest(StrictRequestModel):
@@ -268,13 +279,48 @@ class RemoteResponse(BaseModel):
 async def send_remote_start(charge_point_identity: str, id_tag: str, connector_id: int) -> RemoteResponse:
     if not check_charger_connection(charge_point_identity):
         raise ChargerNotConnectedException(charge_point_identity)
+    inflight_key = (charge_point_identity, connector_id)
+    async with _remote_start_guard:
+        expires_at = _remote_start_inflight.get(inflight_key, 0)
+        if expires_at > time.monotonic():
+            return RemoteResponse(
+                success=False,
+                message="远程启动被拒绝：该连接器已有启动流程进行中",
+                details={
+                    "device_status": "Rejected",
+                    "workflow_status": "start_in_progress",
+                },
+            )
+        _remote_start_inflight[inflight_key] = (
+            time.monotonic() + _REMOTE_START_INFLIGHT_SECONDS
+        )
     payload = {"connectorId": connector_id, "idTag": id_tag}
-    if settings.enable_distributed:
-        result = await message_handler.send_to_charger(charge_point_identity, "RemoteStartTransaction", payload)
-    else:
-        result = await message_handler.send_call(charge_point_identity, "RemoteStartTransaction", payload)
-    success = result.get("success", False)
-    return RemoteResponse(success=success, message="远程启动请求已发送" if success else "远程启动失败", details=result)
+    try:
+        if settings.enable_distributed:
+            result = await message_handler.send_to_charger(charge_point_identity, "RemoteStartTransaction", payload)
+        else:
+            result = await message_handler.send_call(charge_point_identity, "RemoteStartTransaction", payload)
+    except Exception:
+        mark_remote_start_finished(charge_point_identity, connector_id)
+        raise
+    device_result = result.get("data", result) if isinstance(result, dict) else {}
+    device_status = device_result.get("status") if isinstance(device_result, dict) else None
+    error_text = str(result.get("error", "")) if isinstance(result, dict) else ""
+    if not device_status and "timeout" in error_text.lower():
+        mark_remote_start_finished(charge_point_identity, connector_id)
+        exc = HTTPException(
+            status_code=504,
+            detail="Timed out waiting for RemoteStartTransaction response",
+        )
+        exc.error_code = "OCPP_RESPONSE_TIMEOUT"
+        raise exc
+    success = bool(result.get("success")) and device_status == "Accepted"
+    if not success:
+        mark_remote_start_finished(charge_point_identity, connector_id)
+    details = dict(result) if isinstance(result, dict) else {"transport_result": result}
+    details["device_status"] = device_status
+    details["workflow_status"] = "pending" if success else "not_started"
+    return RemoteResponse(success=success, message="远程启动已被充电桩接受" if success else "远程启动被拒绝", details=details)
 
 
 async def send_remote_stop(charge_point_identity: str, transaction_id: int) -> RemoteResponse:
@@ -285,8 +331,13 @@ async def send_remote_stop(charge_point_identity: str, transaction_id: int) -> R
         result = await message_handler.send_to_charger(charge_point_identity, "RemoteStopTransaction", payload)
     else:
         result = await message_handler.send_call(charge_point_identity, "RemoteStopTransaction", payload)
-    success = result.get("success", False)
-    return RemoteResponse(success=success, message="远程停止请求已发送" if success else "远程停止失败", details=result)
+    device_result = result.get("data", result) if isinstance(result, dict) else {}
+    device_status = device_result.get("status") if isinstance(device_result, dict) else None
+    success = bool(result.get("success")) and device_status == "Accepted"
+    details = dict(result) if isinstance(result, dict) else {"transport_result": result}
+    details["device_status"] = device_status
+    details["workflow_status"] = "pending" if success else "not_stopped"
+    return RemoteResponse(success=success, message="远程停止已被充电桩接受" if success else "远程停止被拒绝", details=details)
 
 
 @router.post("/remote-start-transaction", response_model=RemoteResponse, summary="远程启动充电")
@@ -297,6 +348,12 @@ async def remote_start(
     db: Session = Depends(get_db),
 ) -> RemoteResponse:
     """远程启动充电事务"""
+    if idempotency_key and req.idempotency_key and idempotency_key != req.idempotency_key:
+        raise HTTPException(
+            status_code=422,
+            detail="Idempotency-Key header and idempotency_key body field must match",
+        )
+    command_idempotency_key = idempotency_key or req.idempotency_key
     logger.info(
         f"[API] POST /api/v1/ocpp_control/remoteStart | "
         f"充电桩ID: {req.charge_point_id} | "
@@ -310,7 +367,7 @@ async def remote_start(
     event, is_new = _record_remote_command(
         db, charge_point=cp, admin=admin, action="remote_start",
         payload={"connector_id": req.connector_id, "id_tag": req.id_tag},
-        idempotency_key=idempotency_key,
+        idempotency_key=command_idempotency_key,
     )
     if not is_new:
         return _replay_remote_command(event)

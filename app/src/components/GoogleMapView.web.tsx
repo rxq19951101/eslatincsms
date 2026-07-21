@@ -3,6 +3,7 @@
  */
 import React from 'react';
 import { View, StyleSheet, Text } from 'react-native';
+import { useI18n } from '../i18n';
 
 export type MapMarker = {
   id: string;
@@ -23,12 +24,15 @@ export interface GoogleMapViewProps {
   style?: any;
 }
 
-export const GoogleMapView: React.FC<GoogleMapViewProps> = ({ style }) => (
-  <View style={[styles.webFallback, style]}>
-    <Text style={styles.webTitle}>地图仅在 iOS/Android 可用</Text>
-    <Text style={styles.webHint}>Web 下可照常使用登录、钱包等其它功能</Text>
-  </View>
-);
+export const GoogleMapView: React.FC<GoogleMapViewProps> = ({ style }) => {
+  const { t } = useI18n();
+  return (
+    <View style={[styles.webFallback, style]}>
+      <Text style={styles.webTitle}>{t.home.mapUnavailable}</Text>
+      <Text style={styles.webHint}>{t.home.mapUnavailableHint}</Text>
+    </View>
+  );
+};
 
 const styles = StyleSheet.create({
   webFallback: {

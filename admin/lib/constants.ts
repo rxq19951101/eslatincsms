@@ -24,6 +24,9 @@ export const API_ENDPOINTS = {
   CHARGERS: '/api/v1/chargers',
   CHARGER_DETAIL: (id: string) => `/api/v1/chargers/${id}`,
   CHARGER_PRICING: (id: string) => `/api/v1/chargers/${id}/pricing`,
+  CHARGER_ROTATE_CREDENTIALS: (id: string) => `/api/v1/chargers/${id}/credentials/rotate`,
+  CHARGER_ACCEPTANCE_REPORT: (id: string) => `/api/v1/chargers/${id}/acceptance-report`,
+  CHARGER_COMMISSION: (id: string) => `/api/v1/chargers/${id}/commission`,
 
   // 站点（Site）
   SITES: '/api/v1/sites',
@@ -83,8 +86,9 @@ export const STORAGE_KEYS = {
   ACCESS_TOKEN: 'access_token',
   REFRESH_TOKEN: 'refresh_token',
   CURRENT_TENANT_ID: 'current_tenant_id',
+  CURRENT_TENANT_USER_ID: 'current_tenant_user_id',
 } as const;
 
 // 刷新间隔（毫秒）
-export const REFRESH_INTERVAL = 30000; // 30 秒
+export const REFRESH_INTERVAL = 60000; // 普通运营数据 60 秒
 export const ACTIVE_SESSION_REFRESH_INTERVAL = 5000; // 活跃会话 5 秒

@@ -18,15 +18,24 @@ export interface ScreenHeaderProps {
   left?: React.ReactNode;
   right?: React.ReactNode;
   style?: StyleProp<ViewStyle>;
+  testID?: string;
+  backTestID?: string;
 }
 
-const ScreenHeader: React.FC<ScreenHeaderProps> = ({ title, onBack, left, right, style }) => {
+const ScreenHeader: React.FC<ScreenHeaderProps> = ({ title, onBack, left, right, style, testID, backTestID }) => {
   return (
-    <View style={[styles.header, style]}>
+    <View testID={testID} accessibilityLabel={title} style={[styles.header, style]}>
       <View style={styles.side}>
         {left ??
           (onBack && (
-            <TouchableOpacity style={styles.backButton} onPress={onBack} activeOpacity={0.7}>
+            <TouchableOpacity
+              testID={backTestID}
+              accessibilityLabel="Back"
+              accessibilityRole="button"
+              style={styles.backButton}
+              onPress={onBack}
+              activeOpacity={0.7}
+            >
               <Icon name="arrow-back" library="Ionicons" size={22} color={palette.ink} />
             </TouchableOpacity>
           ))}
@@ -45,12 +54,14 @@ const ScreenHeader: React.FC<ScreenHeaderProps> = ({ title, onBack, left, right,
 
 const styles = StyleSheet.create({
   header: {
-    height: 56,
+    height: 60,
     backgroundColor: palette.canvas,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: spacing.sm,
+    paddingHorizontal: spacing.md,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: palette.border,
   },
   side: {
     minWidth: 44,
@@ -63,10 +74,14 @@ const styles = StyleSheet.create({
     justifyContent: 'flex-end',
   },
   backButton: {
-    width: 44,
-    height: 44,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
     alignItems: 'center',
     justifyContent: 'center',
+    backgroundColor: palette.surface,
+    borderWidth: 1,
+    borderColor: palette.border,
   },
   titleWrap: {
     position: 'absolute',
@@ -79,7 +94,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 60,
   },
   title: {
-    fontSize: typography.label,
+    fontSize: 16,
     fontWeight: typography.semibold,
     color: palette.ink,
   },

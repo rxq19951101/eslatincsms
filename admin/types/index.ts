@@ -188,10 +188,25 @@ export interface ChargePointDetail extends ChargePoint {
   evses?: EVSE[];
   created_at?: string;
   updated_at?: string;
+  commissioning_status?: 'draft' | 'testing' | 'ready' | 'commissioned' | 'suspended';
+  acceptance_report?: AcceptanceReport | null;
+  last_acceptance_at?: string | null;
+  commissioned_at?: string | null;
+}
+
+export interface AcceptanceReport {
+  version: number;
+  generated_at: string;
+  ocpp_identity: string;
+  protocol: string;
+  passed: boolean;
+  checks: Record<string, boolean>;
+  evidence_counts: Record<string, number>;
 }
 
 export interface EVSE {
   evse_id: number;
+  physical_reference?: string;
   connector_type: string;
   max_power_kw?: number;
   status: string;
@@ -218,6 +233,9 @@ export interface SiteListItem {
 export interface SiteDetailChargePoint {
   id: string; // Internal database UUID.
   ocpp_identity?: string; // External charger identity safe for operator display.
+  display_code: string;
+  display_name?: string | null;
+  location_hint?: string | null;
   vendor?: string | null;
   model?: string | null;
   status: string;
@@ -249,10 +267,19 @@ export interface BindChargePointsRequest {
 
 export interface CreateChargePointInSiteRequest {
   id: string; // 兼容 API 字段；语义为 ocpp_identity
+  display_code: string;
+  display_name?: string;
+  location_hint?: string;
   vendor?: string;
   model?: string;
   connector_count?: number;
   connector_type?: string;
+  evses?: Array<{
+    evse_id: number;
+    physical_reference: string;
+    connector_type: string;
+    max_power_kw: number;
+  }>;
 }
 
 // 交易相关类型
@@ -275,14 +302,31 @@ export interface Alert {
   id: string; // Internal alert UUID.
   alert_type: string;
   severity: 'critical' | 'warning' | 'info';
-  charge_point_id?: string; // Internal ChargePoint UUID used for API relations.
+  charge_point_id?: string | null; // Internal ChargePoint UUID used for API relations; never display.
   ocpp_identity?: string; // External charger identity safe for operator display.
-  evse_id?: number;
+  evse_id?: string | null; // Internal EVSE UUID used for API relations; never display.
   title: string;
-  description: string;
+  description?: string | null;
   status: 'pending' | 'acknowledged' | 'resolved';
   tenant_id: string;
   metadata: Record<string, unknown>;
+  alert_code?: string | null;
+  message_params?: Record<string, unknown> | null;
+  raw_message?: string | null;
+  site?: {
+    site_code?: string | null;
+    name?: string | null;
+    address?: string | null;
+  } | null;
+  charge_point?: {
+    ocpp_identity?: string | null;
+    model?: string | null;
+    serial_number?: string | null;
+  } | null;
+  evse?: {
+    evse_id?: number | null;
+    physical_reference?: string | null;
+  } | null;
   acknowledged_by?: string;
   acknowledged_at?: string;
   resolved_at?: string;

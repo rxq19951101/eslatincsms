@@ -33,6 +33,7 @@ import UnpaidBillsScreen from '../screens/wallet/UnpaidBillsScreen';
 import HelpCenterScreen from '../screens/account/HelpCenterScreen';
 import PrivacyPolicyScreen from '../screens/account/PrivacyPolicyScreen';
 import AboutScreen from '../screens/account/AboutScreen';
+import LanguageSettingsScreen from '../screens/account/LanguageSettingsScreen';
 import { MainTabNavigator } from './MainTabNavigator';
 
 const Stack = createStackNavigator<RootStackParamList>();
@@ -69,6 +70,7 @@ export const RootNavigator = () => {
         <Stack.Screen name="ChargingHistory" component={ChargingHistoryScreen} />
         <Stack.Screen name="ChargingHistoryDetail" component={ChargingHistoryDetailScreen} />
         <Stack.Screen name="PersonalInfo" component={PersonalInfoScreen} />
+        <Stack.Screen name="Language" component={LanguageSettingsScreen} />
         <Stack.Screen name="PaymentHub" component={PaymentHubScreen} />
         <Stack.Screen name="PaymentMethods" component={PaymentMethodsScreen} />
         <Stack.Screen name="AddPayment" component={AddPaymentScreen} />

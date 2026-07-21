@@ -5,6 +5,7 @@
 import { createAsyncThunk, createSlice, PayloadAction } from '@reduxjs/toolkit';
 import type { WalletBalance, WalletTransaction } from '../../types';
 import { getWalletBalance, getWalletTransactions, topUpWallet } from '../../api/wallet';
+import { handleApiError } from '../../api/client';
 
 export interface WalletState {
   balance: WalletBalance | null;
@@ -25,7 +26,7 @@ const initialState: WalletState = {
 };
 
 function extractErrorMessage(e: any, fallback: string) {
-  return e?.response?.data?.detail || e?.response?.data?.message || e?.message || fallback;
+  return handleApiError(e).message || fallback;
 }
 
 export const fetchWalletBalance = createAsyncThunk('wallet/fetchBalance', async (_, { rejectWithValue }) => {

@@ -72,12 +72,9 @@ def issue_email_verification(db: Session, user: AppUser) -> Tuple[str, str]:
 
     sent = send_user_email(user.email, subject, text_body, html_body)
     if not sent:
-        # 无 SMTP 时仍把验证码打进日志，方便本机/隧道联调
         logger.warning(
-            "Email verification issued without SMTP delivery | email=%s | code=%s | url=%s",
+            "Email verification issued without SMTP delivery | email=%s",
             user.email,
-            code,
-            verify_url,
         )
     else:
         logger.info("Email verification issued | email=%s | smtp=ok", user.email)

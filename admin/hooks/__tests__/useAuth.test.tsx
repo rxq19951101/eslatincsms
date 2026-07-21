@@ -1,64 +1,66 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { renderHook, waitFor } from '@testing-library/react';
+import { act, renderHook, waitFor } from '@testing-library/react';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { useAuth } from '../useAuth';
-import { setTokens, clearTokens } from '@/lib/auth';
+import { clearTokens, setTokens } from '@/lib/auth';
+import { apiGet } from '@/lib/api';
+import { useAuthStore } from '@/store/authStore';
+import { useTenantStore } from '@/store/tenantStore';
+import type { AdminUser } from '@/types';
 
-// Mock next/navigation
-vi.mock('next/navigation', () => ({
-  useRouter: () => ({
-    push: vi.fn(),
-    replace: vi.fn(),
-  }),
-  usePathname: () => '/dashboard',
-}));
-
-// Mock API - 必须使用工厂函数，不能使用外部变量
 vi.mock('@/lib/api', () => ({
   apiGet: vi.fn(),
 }));
 
-// Mock auth store - 使用对象方式，在工厂函数中定义
-vi.mock('@/store/authStore', () => {
-  const mockSetUser = vi.fn();
-  const mockLogout = vi.fn();
-  let mockUser: any = null;
-  let mockIsAuthenticated = false;
-  
-  return {
-    useAuthStore: () => ({
-      get user() { return mockUser; },
-      get isAuthenticated() { return mockIsAuthenticated; },
-      setUser: mockSetUser,
-      logout: mockLogout,
-      // 提供设置方法用于测试
-      __setUser: (user: any) => { mockUser = user; },
-      __setIsAuthenticated: (val: boolean) => { mockIsAuthenticated = val; },
-      __reset: () => { mockUser = null; mockIsAuthenticated = false; },
-    }),
-  };
-});
+const user: AdminUser = {
+  id: 'admin-id',
+  username: 'admin',
+  email: 'admin@example.com',
+  is_super_admin: false,
+  default_tenant_id: 'tenant-id',
+  tenant_list: [{ id: 'tenant-id', name: 'Tenant', is_primary: true }],
+};
 
 describe('useAuth', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     clearTokens();
+    useAuthStore.getState().logout();
+    useAuthStore.getState().setHasHydrated(true);
+    useTenantStore.getState().clearTenant();
   });
 
-  it('应该在未登录时返回未认证状态', async () => {
+  it('未登录时在 hydration 完成后返回未认证状态', async () => {
     const { result } = renderHook(() => useAuth());
-    
-    // useAuth 在挂载时会检查 token，如果没有 token，不会调用 API
-    await waitFor(() => {
-      expect(result.current.isAuthenticated).toBe(false);
-    }, { timeout: 1000 });
+
+    await waitFor(() => expect(result.current.isReady).toBe(true));
+    expect(result.current.isAuthenticated).toBe(false);
+    expect(apiGet).not.toHaveBeenCalled();
   });
 
-  // 复杂的集成测试需要更完善的 mock 设置，暂时跳过
-  it.skip('应该在有 token 时验证用户', async () => {
-    // TODO: 需要更完善的 mock 设置
+  it('hydration 未完成时不判定未登录，完成后恢复持久化认证', async () => {
+    setTokens('access-token', 'refresh-token');
+    useAuthStore.getState().setUser(user);
+    useAuthStore.getState().setHasHydrated(false);
+
+    const { result } = renderHook(() => useAuth());
+
+    expect(result.current.isReady).toBe(false);
+    expect(result.current.isAuthenticated).toBe(false);
+
+    act(() => useAuthStore.getState().setHasHydrated(true));
+
+    await waitFor(() => expect(result.current.isReady).toBe(true));
+    expect(result.current.isAuthenticated).toBe(true);
+    expect(apiGet).not.toHaveBeenCalled();
   });
 
-  it.skip('应该在 token 无效时清除认证状态', async () => {
-    // TODO: 需要更完善的 mock 设置
+  it('有 token 但没有持久化用户时通过 /me 恢复认证', async () => {
+    setTokens('access-token', 'refresh-token');
+    vi.mocked(apiGet).mockResolvedValueOnce(user);
+
+    const { result } = renderHook(() => useAuth());
+
+    await waitFor(() => expect(result.current.isAuthenticated).toBe(true));
+    expect(apiGet).toHaveBeenCalledWith('/api/v1/admin/auth/me', { skipTenantId: true });
   });
 });

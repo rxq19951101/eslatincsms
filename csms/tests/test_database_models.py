@@ -4,6 +4,9 @@
 import pytest
 import uuid
 from datetime import datetime, timezone
+from sqlalchemy.dialects.postgresql import UUID
+
+from app.database.base import Base
 from app.database.models import (
     Site, ChargePoint, EVSE, EVSEStatus, Device,
     ChargingSession, DeviceEvent, Order, Invoice, Payment, PaymentOrder, Tariff
@@ -12,6 +15,16 @@ from app.database.models import (
 
 class TestDatabaseModels:
     """数据库模型测试类"""
+
+    def test_every_table_has_a_uuid_primary_key(self):
+        """所有已注册模型都必须使用内部 UUID 主键。"""
+        assert Base.metadata.tables
+        for table in Base.metadata.sorted_tables:
+            primary_keys = list(table.primary_key.columns)
+            assert primary_keys, f"{table.name} has no primary key"
+            assert all(isinstance(column.type, UUID) for column in primary_keys), (
+                f"{table.name} has a non-UUID primary key"
+            )
 
     def test_frozen_and_provider_constraints_are_in_metadata(self):
         site_checks = {constraint.name for constraint in Site.__table__.constraints}

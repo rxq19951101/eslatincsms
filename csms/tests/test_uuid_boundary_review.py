@@ -62,7 +62,7 @@ def test_uuid_shaped_ocpp_identity_is_resolved_before_internal_uuid(
 
 @pytest.mark.asyncio
 async def test_websocket_boot_dispatch_keeps_path_identity():
-    from app.main import _handle_ocpp_websocket_messages
+    from app.main import _handle_standard_ocpp_messages
 
     path_identity = "CP-PATH-IDENTITY"
     payload = {"serialNumber": "PAYLOAD-SERIAL"}
@@ -73,18 +73,15 @@ async def test_websocket_boot_dispatch_keeps_path_identity():
         ]),
         send_text=AsyncMock(),
     )
-    identity_ref = {"value": path_identity}
-
     with patch(
         "app.main.handle_ocpp_message",
         new=AsyncMock(return_value={"status": "Accepted", "currentTime": "now", "interval": 30}),
     ) as handler:
         with pytest.raises(RuntimeError, match="stop loop"):
-            await _handle_ocpp_websocket_messages(ws, identity_ref)
+            await _handle_standard_ocpp_messages(ws, path_identity, "generation-1")
 
-    assert identity_ref["value"] == path_identity
     assert handler.await_args.kwargs["charge_point_id"] == path_identity
-    assert handler.await_args.kwargs["device_serial_number"] is None
+    assert handler.await_args.kwargs["message_unique_id"] == "boot-1"
     assert handler.await_args.kwargs["payload"]["serialNumber"] == "PAYLOAD-SERIAL"
 
 

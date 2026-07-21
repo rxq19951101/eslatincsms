@@ -1,12 +1,11 @@
 import { useEffect, useState } from 'react';
-import { useRouter } from 'next/navigation';
 import { useAuthStore } from '@/store/authStore';
 import { getAccessToken, redirectToLogin } from '@/lib/auth';
 import { apiGet } from '@/lib/api';
 import { API_ENDPOINTS } from '@/lib/constants';
 import { AdminUser } from '@/types';
 import { useTenantStore } from '@/store/tenantStore';
-import { getTenantId } from '@/lib/tenant';
+import { getDefaultTenant, getTenantId } from '@/lib/tenant';
 import type { TenantRecord } from '@/types';
 
 /**
@@ -14,31 +13,34 @@ import type { TenantRecord } from '@/types';
  * 负责页面启动时验证 token 有效性
  */
 export function useAuth() {
-  const router = useRouter();
-  const { user, setUser, logout } = useAuthStore();
-  const { currentTenant, setCurrentTenant } = useTenantStore();
+  const { user, hasHydrated, setUser, logout } = useAuthStore();
+  const { currentTenant, setCurrentTenant, clearTenant } = useTenantStore();
   const [isReady, setIsReady] = useState(false);
 
   // 页面启动时验证 token
   useEffect(() => {
+    if (!hasHydrated) return;
+
+    let cancelled = false;
+
     const verifyAuth = async () => {
       // 跳过登录页面
       if (typeof window !== 'undefined' && window.location.pathname === '/login') {
-        setIsReady(true);
+        if (!cancelled) setIsReady(true);
         return;
       }
 
       const accessToken = getAccessToken();
       
       if (!accessToken) {
-        // 没有 token：标记就绪（由 useRequireAuth 决定是否跳转）
-        setIsReady(true);
+        if (user) logout();
+        if (!cancelled) setIsReady(true);
         return;
       }
 
       // 如果已有用户信息，不重复验证
       if (user) {
-        setIsReady(true);
+        if (!cancelled) setIsReady(true);
         return;
       }
 
@@ -48,13 +50,13 @@ export function useAuth() {
           skipTenantId: true, // 认证接口不需要 tenant_id
         });
         
-        setUser(userData);
+        if (!cancelled) setUser(userData);
       } catch (error) {
         // 验证失败，清除 token（但不在这里跳转，由 useRequireAuth 处理）
         console.error('Token verification failed:', error);
-        logout();
+        if (!cancelled) logout();
       } finally {
-        setIsReady(true);
+        if (!cancelled) setIsReady(true);
       }
     };
 
@@ -62,12 +64,18 @@ export function useAuth() {
     if (typeof window !== 'undefined') {
       verifyAuth();
     }
-  }, []); // 只在组件挂载时执行一次
+
+    return () => {
+      cancelled = true;
+    };
+  }, [hasHydrated, user, setUser, logout]);
 
   // 当 user 恢复/更新后，自动初始化当前租户（用于右上角展示）
   useEffect(() => {
     if (typeof window === 'undefined') return;
-    if (!user) return;
+    if (!hasHydrated || !user) return;
+    let cancelled = false;
+
     const initTenant = async () => {
       // super_admin：仍然允许“可选租户”
       // - 不选租户：用于全局聚合类接口
@@ -75,37 +83,41 @@ export function useAuth() {
       if (user.is_super_admin) {
         if (currentTenant) return;
         const tid = getTenantId(user);
+        if (!tid) return;
         try {
           const tenants = await apiGet<TenantRecord[]>(API_ENDPOINTS.TENANTS, { skipTenantId: true });
-          // 总管理员没有显式租户上下文时保持全局作用域，不能静默切到第一个租户。
-          const selected =
-            tid && tenants.find((t) => t.id === tid)
-              ? { id: tid, name: tenants.find((t) => t.id === tid)!.name, is_primary: false }
-              : null;
-          if (selected) setCurrentTenant(selected);
+          if (cancelled || useAuthStore.getState().user?.id !== user.id) return;
+          const tenant = tenants.find((item) => item.id === tid);
+          if (tenant) {
+            setCurrentTenant({ id: tenant.id, name: tenant.name, is_primary: false }, user.id);
+          } else {
+            clearTenant();
+          }
         } catch {
           // ignore: super_admin 仍可不选租户，仅写操作会在后端提示 Tenant ID required
         }
         return;
       }
 
-      // 普通租户用户：优先按 getTenantId（URL/localStorage/default）选中
+      // 普通租户用户：恢复当前账号的受控选择，否则使用有效 default/primary 租户。
       if (!currentTenant) {
         const tid = getTenantId(user);
         const selected =
           (tid && user.tenant_list?.find((t) => t.id === tid)) ||
-          user.tenant_list?.find((t) => t.is_primary) ||
-          user.tenant_list?.[0] ||
-          null;
-        if (selected) setCurrentTenant(selected);
+          getDefaultTenant(user);
+        if (selected) setCurrentTenant(selected, user.id);
       }
     };
 
     initTenant();
-  }, [user, currentTenant, setCurrentTenant]);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [hasHydrated, user, currentTenant, setCurrentTenant, clearTenant]);
 
   // 认证状态不要依赖 store 里单独存的 isAuthenticated（刷新后不一定能正确恢复），而是实时基于 token + user 计算
-  const isAuthenticated = typeof window !== 'undefined' && !!getAccessToken() && !!user;
+  const isAuthenticated = hasHydrated && typeof window !== 'undefined' && !!getAccessToken() && !!user;
 
   return {
     user,
@@ -122,7 +134,6 @@ export function useAuth() {
  */
 export function useRequireAuth() {
   const { isAuthenticated, isReady } = useAuth();
-  const router = useRouter();
 
   useEffect(() => {
     // 等认证校验完成后再决定是否跳转，避免刷新时误判“未登录”导致每次都回到登录页

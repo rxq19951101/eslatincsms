@@ -7,19 +7,29 @@ import type { ActiveChargingSession, MeterValuePoint, RemoteResponse } from '../
 import { getActiveChargingSession, getMeterValues, startChargingByScan, stopCharging } from '../../api/charging';
 import { handleApiError } from '../../api/client';
 
+export type ChargingOperation = 'start' | 'active' | 'restore' | 'meter' | 'stop';
+
+export interface ChargingFailure {
+  operation: ChargingOperation;
+  code?: string;
+  status?: number;
+}
+
 export interface ChargingState {
   qrToken: string | null;
   activeSession: ActiveChargingSession | null;
   lastStoppedSession: ActiveChargingSession | null;
   meterValues: MeterValuePoint[];
-  lastMeterId: number | null;
+  lastMeterId: string | null;
   loadingMeter: boolean;
-  meterError: string | null;
+  meterError: ChargingFailure | null;
   starting: boolean;
   stopping: boolean;
   loadingActive: boolean;
-  error: string | null;
+  error: ChargingFailure | null;
   lastRemoteResult: RemoteResponse | null;
+  recoveryChecked: boolean;
+  recovering: boolean;
 }
 
 const initialState: ChargingState = {
@@ -35,7 +45,14 @@ const initialState: ChargingState = {
   loadingActive: false,
   error: null,
   lastRemoteResult: null,
+  recoveryChecked: false,
+  recovering: false,
 };
+
+function chargingFailure(error: unknown, operation: ChargingOperation): ChargingFailure {
+  const parsed = handleApiError(error);
+  return { operation, code: parsed.code, status: parsed.status };
+}
 
 export const startCharging = createAsyncThunk(
   'charging/start',
@@ -46,62 +63,83 @@ export const startCharging = createAsyncThunk(
     try {
       const res = await startChargingByScan({ qrToken });
       return { qrToken, res };
-    } catch (e: any) {
-      return rejectWithValue(handleApiError(e).message || 'Failed to start charging');
+    } catch (e: unknown) {
+      return rejectWithValue(chargingFailure(e, 'start'));
     }
+  },
+  {
+    condition: (_, { getState }) => {
+      const state = getState() as { charging: ChargingState };
+      return !state.charging.starting;
+    },
   }
 );
 
 export const fetchActiveSession = createAsyncThunk(
   'charging/fetchActive',
-  async (qrToken: string, { rejectWithValue }) => {
+  async (qrToken: string | undefined, { rejectWithValue }) => {
     try {
       const session = await getActiveChargingSession(qrToken);
       return { qrToken, session };
-    } catch (e: any) {
-      const msg =
-        e?.response?.data?.detail ||
-        e?.response?.data?.message ||
-        e?.message ||
-        'Failed to fetch active session';
-      return rejectWithValue(msg);
+    } catch (e: unknown) {
+      return rejectWithValue(chargingFailure(e, 'active'));
     }
+  },
+  {
+    condition: (_, { getState }) => {
+      const state = getState() as { charging: ChargingState };
+      return !state.charging.loadingActive && !state.charging.recovering;
+    },
+  }
+);
+
+/** One read-only lookup after startup/login; this thunk never sends start. */
+export const restoreActiveSession = createAsyncThunk(
+  'charging/restoreActive',
+  async (_, { rejectWithValue }) => {
+    try {
+      return await getActiveChargingSession();
+    } catch (e: unknown) {
+      return rejectWithValue(chargingFailure(e, 'restore'));
+    }
+  },
+  {
+    condition: (_, { getState }) => {
+      const state = getState() as { charging: ChargingState };
+      return !state.charging.recovering && !state.charging.loadingActive;
+    },
   }
 );
 
 export const fetchMeterValuePoints = createAsyncThunk(
   'charging/fetchMeterValues',
   async (
-    { sessionId, sinceId }: { sessionId: number; sinceId?: number },
+    { sessionId, sinceId }: { sessionId: string; sinceId?: string },
     { rejectWithValue }
   ) => {
     try {
       const points = await getMeterValues({ sessionId, sinceId, limit: 50 });
       return { sessionId, points };
-    } catch (e: any) {
-      const msg =
-        e?.response?.data?.detail ||
-        e?.response?.data?.message ||
-        e?.message ||
-        'Failed to fetch meter values';
-      return rejectWithValue(msg);
+    } catch (e: unknown) {
+      return rejectWithValue(chargingFailure(e, 'meter'));
     }
+  },
+  {
+    condition: (_, { getState }) => {
+      const state = getState() as { charging: ChargingState };
+      return !state.charging.loadingMeter;
+    },
   }
 );
 
 export const stopChargingSession = createAsyncThunk(
   'charging/stop',
-  async (qrToken: string, { rejectWithValue }) => {
+  async (sessionId: string, { rejectWithValue }) => {
     try {
-      const res = await stopCharging(qrToken);
-      return { qrToken, res };
-    } catch (e: any) {
-      const msg =
-        e?.response?.data?.detail ||
-        e?.response?.data?.message ||
-        e?.message ||
-        'Failed to stop charging';
-      return rejectWithValue(msg);
+      const res = await stopCharging(sessionId);
+      return { sessionId, res };
+    } catch (e: unknown) {
+      return rejectWithValue(chargingFailure(e, 'stop'));
     }
   }
 );
@@ -132,10 +170,13 @@ const chargingSlice = createSlice({
         state.starting = false;
         state.qrToken = action.payload.qrToken;
         state.lastRemoteResult = action.payload.res;
+        if (action.payload.res.session) {
+          state.activeSession = action.payload.res.session;
+        }
       })
       .addCase(startCharging.rejected, (state, action) => {
         state.starting = false;
-        state.error = action.payload as string;
+        if (action.payload) state.error = action.payload as ChargingFailure;
       })
       // fetchActive
       .addCase(fetchActiveSession.pending, (state) => {
@@ -144,7 +185,7 @@ const chargingSlice = createSlice({
       })
       .addCase(fetchActiveSession.fulfilled, (state, action) => {
         state.loadingActive = false;
-        state.qrToken = action.payload.qrToken;
+        state.qrToken = action.payload.qrToken ?? null;
         state.activeSession = action.payload.session;
         // session 变化时清空 meterValues（避免把旧会话的数据展示出来）
         if (!action.payload.session) {
@@ -154,7 +195,23 @@ const chargingSlice = createSlice({
       })
       .addCase(fetchActiveSession.rejected, (state, action) => {
         state.loadingActive = false;
-        state.error = action.payload as string;
+        if (action.payload) state.error = action.payload as ChargingFailure;
+      })
+      // startup/login recovery (GET only)
+      .addCase(restoreActiveSession.pending, (state) => {
+        state.recovering = true;
+        state.recoveryChecked = false;
+      })
+      .addCase(restoreActiveSession.fulfilled, (state, action) => {
+        state.recovering = false;
+        state.recoveryChecked = true;
+        state.activeSession = action.payload;
+        state.qrToken = null;
+      })
+      .addCase(restoreActiveSession.rejected, (state) => {
+        state.recovering = false;
+        state.recoveryChecked = true;
+        // Recovery is best-effort: preserve the last known active entry and normal screen errors.
       })
       // meter values
       .addCase(fetchMeterValuePoints.pending, (state) => {
@@ -170,8 +227,8 @@ const chargingSlice = createSlice({
           for (const p of newPoints) {
             if (!existingIds.has(p.id)) state.meterValues.push(p);
           }
-          // 更新 lastMeterId
-          state.lastMeterId = state.meterValues.reduce((m, p) => (p.id > m ? p.id : m), state.lastMeterId || 0);
+          // 后端按时间顺序返回；UUID 不具备可用于时间排序的数值语义。
+          state.lastMeterId = newPoints[newPoints.length - 1].id;
           // 控制内存：只保留最近 300 条
           if (state.meterValues.length > 300) {
             state.meterValues = state.meterValues.slice(state.meterValues.length - 300);
@@ -180,7 +237,7 @@ const chargingSlice = createSlice({
       })
       .addCase(fetchMeterValuePoints.rejected, (state, action) => {
         state.loadingMeter = false;
-        state.meterError = action.payload as string;
+        if (action.payload) state.meterError = action.payload as ChargingFailure;
       })
       // stop
       .addCase(stopChargingSession.pending, (state) => {
@@ -191,17 +248,16 @@ const chargingSlice = createSlice({
         state.stopping = false;
         state.lastRemoteResult = action.payload.res;
         // stop 只是“请求已发送”，本地先把 activeSession 备份；真正结束靠轮询 /active 变成 null
-        if (state.qrToken === action.payload.qrToken) {
+        if (state.activeSession?.id === action.payload.sessionId) {
           state.lastStoppedSession = state.activeSession;
         }
       })
       .addCase(stopChargingSession.rejected, (state, action) => {
         state.stopping = false;
-        state.error = action.payload as string;
+        if (action.payload) state.error = action.payload as ChargingFailure;
       });
   },
 });
 
 export const { clearChargingError, resetChargingState, setChargingTarget } = chargingSlice.actions;
 export default chargingSlice.reducer;
-
