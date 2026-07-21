@@ -1,9 +1,8 @@
 /**
  * Expo 动态配置：从环境变量注入 Maps Key、Legal URL 等（EAS Build / 本地 .env）
  */
-const base = require('./app.json').expo;
-
-module.exports = () => {
+module.exports = ({ config }) => {
+  const base = config;
   const googleMapsKey = process.env.EXPO_PUBLIC_GOOGLE_MAPS_API_KEY || '';
   const apiUrl = process.env.EXPO_PUBLIC_API_URL || '';
   const privacyUrl =
