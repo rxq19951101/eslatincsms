@@ -8,6 +8,7 @@ import type { SiteSummary } from '../../api/sites';
 import Card from '../../components/ui/Card';
 import Badge, { type BadgeVariant } from '../../components/ui/Badge';
 import Screen from '../../components/ui/Screen';
+import RootTabHeader from '../../components/ui/RootTabHeader';
 import { COLORS } from '../../constants/config';
 import { useI18n } from '../../i18n';
 import type { RootStackParamList } from '../../types';
@@ -69,9 +70,7 @@ const SavedScreen = () => {
   return (
     <Screen>
       <StatusBar barStyle="dark-content" />
-      <View style={styles.header}>
-        <Text style={styles.headerTitle}>{t.saved.title}</Text>
-      </View>
+      <RootTabHeader title={t.saved.title} testID="app-saved-header" />
       {loading ? (
         <View style={styles.center}><ActivityIndicator color={COLORS.PRIMARY} /></View>
       ) : error ? (
@@ -95,8 +94,6 @@ const SavedScreen = () => {
 };
 
 const styles = StyleSheet.create({
-  header: { paddingHorizontal: 20, paddingVertical: 16 },
-  headerTitle: { fontSize: 24, fontWeight: 'bold', color: COLORS.TEXT_PRIMARY },
   list: { paddingHorizontal: 20, paddingBottom: 24 },
   card: { padding: 16, marginBottom: 12 },
   row: { flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between' },

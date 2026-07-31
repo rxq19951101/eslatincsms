@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from app.core.logging_config import get_logger
 from app.core.auth import get_current_user
 from app.database.base import get_db, SuperSessionLocal
-from app.database.models import AppUser, ChargingSession, ChargePoint, Site
+from app.database.models import AppUser, ChargingSession, ChargePoint, EVSE, Invoice, Site
 from uuid import UUID
 
 logger = get_logger("ocpp_csms")
@@ -159,6 +159,8 @@ def get_app_transaction_detail(
     if cp and cp.site:
         site_name = cp.site.name
         site_address = cp.site.address
+    evse = db.query(EVSE).filter(EVSE.id == s.evse_id).first()
+    invoice = db.query(Invoice).filter(Invoice.session_id == s.id).first()
 
     energy_kwh = None
     duration_minutes = None
@@ -183,4 +185,13 @@ def get_app_transaction_detail(
         "duration_minutes": duration_minutes,
         "site_name": site_name,
         "site_address": site_address,
+        "invoice_number": invoice.invoice_number if invoice else None,
+        "total_amount": format(invoice.total_amount, ".2f") if invoice else None,
+        "currency": "COP",
+        "billing_status": invoice.status if invoice else None,
+        "connector_number": evse.evse_id if evse else None,
+        "connector_label": evse.physical_reference if evse else None,
+        "charge_point_label": (
+            (cp.display_name or cp.display_code) if cp else None
+        ),
     }

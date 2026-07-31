@@ -38,6 +38,7 @@ export const API_ENDPOINTS = {
   
   // 交易
   TRANSACTIONS: '/api/v1/transactions',
+  TRANSACTIONS_EXPORT: '/api/v1/transactions/export',
   TRANSACTIONS_ACTIVE: '/api/v1/transactions/active',
   
   // 统计
@@ -69,7 +70,7 @@ export const API_ENDPOINTS = {
   
   // OCPP 控制
   OCPP_REMOTE_START: '/api/v1/ocpp/remote-start-transaction',
-  OCPP_REMOTE_STOP: '/api/v1/ocpp/remote-stop-transaction',
+  OCPP_REMOTE_STOP: '/api/v1/ocpp/remote-stop-session',
   OCPP_RESET: '/api/v1/ocpp/reset',
   OCPP_CHANGE_CONFIG: '/api/v1/ocpp/change-configuration',
   OCPP_GET_CONFIG: '/api/v1/ocpp/get-configuration',

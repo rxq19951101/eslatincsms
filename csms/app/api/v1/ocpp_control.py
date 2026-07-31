@@ -7,7 +7,7 @@ import asyncio
 import time
 from typing import List, Literal, Optional
 from fastapi import APIRouter, Depends, Header, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.core.exceptions import ChargerNotConnectedException
@@ -18,7 +18,14 @@ from app.core.asset_identifiers import (
 )
 from app.core.permissions import require_permission
 from app.database.base import get_db, tenant_id_context
-from app.database.models import AuditLog, ChargePoint, ChargingSession, EVSE, OutboxEvent
+from app.database.models import (
+    AuditLog,
+    ChargePoint,
+    ChargingSession,
+    EVSE,
+    EVSEStatus,
+    OutboxEvent,
+)
 from app.services.outbox_service import OutboxService
 from app.api.validation import StrictRequestModel
 import uuid
@@ -239,14 +246,27 @@ async def _execute_remote_command(db: Session, event: OutboxEvent, sender) -> "R
 
 class RemoteStartRequest(StrictRequestModel):
     charge_point_id: str = Field(..., min_length=1, max_length=64)
-    id_tag: str = Field(..., min_length=1, max_length=20)
-    connector_id: int = Field(1, ge=1, le=255)
+    connector_id: int = Field(..., ge=1, le=255)
+    operation_reason: str = Field(..., min_length=3, max_length=200)
     idempotency_key: Optional[str] = Field(None, min_length=1, max_length=255)
 
+    @field_validator("operation_reason")
+    @classmethod
+    def normalize_operation_reason(cls, value: str) -> str:
+        normalized = value.strip()
+        if len(normalized) < 3:
+            raise ValueError("operation_reason must contain at least 3 non-space characters")
+        return normalized
 
-class RemoteStopRequest(StrictRequestModel):
-    charge_point_id: str = Field(..., min_length=1, max_length=64)
-    transaction_id: int = Field(..., ge=0)
+
+class RemoteStopSessionRequest(StrictRequestModel):
+    session_id: uuid.UUID
+    operation_reason: str = Field(..., min_length=3, max_length=200)
+
+    @field_validator("operation_reason", mode="before")
+    @classmethod
+    def normalize_operation_reason(cls, value: str) -> str:
+        return value.strip() if isinstance(value, str) else value
 
 
 class ChangeConfigurationRequest(StrictRequestModel):
@@ -263,17 +283,40 @@ class GetConfigurationRequest(StrictRequestModel):
 class ResetRequest(StrictRequestModel):
     charge_point_id: str = Field(..., min_length=1, max_length=64)
     type: Literal["Soft", "Hard"]
+    operation_reason: str = Field(..., min_length=3, max_length=200)
+
+    @field_validator("operation_reason", mode="before")
+    @classmethod
+    def normalize_operation_reason(cls, value: str) -> str:
+        return value.strip() if isinstance(value, str) else value
 
 
 class UnlockConnectorRequest(StrictRequestModel):
     charge_point_id: str = Field(..., min_length=1, max_length=64)
     connector_id: int = Field(..., ge=1, le=255)
+    operation_reason: str = Field(..., min_length=3, max_length=200)
+
+    @field_validator("operation_reason", mode="before")
+    @classmethod
+    def normalize_operation_reason(cls, value: str) -> str:
+        return value.strip() if isinstance(value, str) else value
 
 
 class RemoteResponse(BaseModel):
     success: bool
     message: str
     details: Optional[dict] = None
+
+
+def _remote_start_conflict(code: str, message: str) -> HTTPException:
+    exc = HTTPException(status_code=409, detail=message)
+    exc.error_code = code
+    return exc
+
+
+def _operations_id_tag(admin) -> str:
+    admin_id_prefix = str(admin.id).replace("-", "")[:16]
+    return f"OPS-{admin_id_prefix}"
 
 
 async def send_remote_start(charge_point_identity: str, id_tag: str, connector_id: int) -> RemoteResponse:
@@ -354,59 +397,127 @@ async def remote_start(
             detail="Idempotency-Key header and idempotency_key body field must match",
         )
     command_idempotency_key = idempotency_key or req.idempotency_key
+    operations_id_tag = _operations_id_tag(admin)
     logger.info(
         f"[API] POST /api/v1/ocpp_control/remoteStart | "
         f"充电桩ID: {req.charge_point_id} | "
-        f"用户标签: {req.id_tag} | "
-        f"连接器ID: {req.connector_id}"
+        f"连接器ID: {req.connector_id} | "
+        f"运维管理员ID: {admin.id}"
     )
     cp = _scoped_charge_point(db, req.charge_point_id)
-    evse = db.query(EVSE).filter(EVSE.charge_point_id == cp.id, EVSE.evse_id == req.connector_id).first()
+    if not check_charger_connection(cp.ocpp_identity):
+        raise _remote_start_conflict(
+            "CHARGER_OFFLINE",
+            "Charge point WebSocket is offline",
+        )
+
+    evse = db.query(EVSE).filter(
+        EVSE.tenant_id == cp.tenant_id,
+        EVSE.charge_point_id == cp.id,
+        EVSE.evse_id == req.connector_id,
+    ).first()
     if not evse:
         raise HTTPException(status_code=422, detail="connector_id does not exist on this charge point")
+
+    evse_status = db.query(EVSEStatus).filter(
+        EVSEStatus.tenant_id == cp.tenant_id,
+        EVSEStatus.charge_point_id == cp.id,
+        EVSEStatus.evse_id == evse.id,
+    ).first()
+    if not evse_status or not evse_status.status or evse_status.status == "Unknown":
+        raise _remote_start_conflict(
+            "CONNECTOR_STATUS_UNKNOWN",
+            "Connector status is unknown",
+        )
+    if evse_status.status != "Available":
+        raise _remote_start_conflict(
+            "CONNECTOR_NOT_AVAILABLE",
+            "Connector is not available",
+        )
+
+    active_session = db.query(ChargingSession).filter(
+        ChargingSession.tenant_id == cp.tenant_id,
+        ChargingSession.charge_point_id == cp.id,
+        ChargingSession.evse_id == evse.id,
+        ChargingSession.status == "ongoing",
+        ChargingSession.end_time.is_(None),
+    ).first()
+    if active_session:
+        raise _remote_start_conflict(
+            "CONNECTOR_SESSION_ACTIVE",
+            "Connector already has an ongoing charging session",
+        )
+
     event, is_new = _record_remote_command(
         db, charge_point=cp, admin=admin, action="remote_start",
-        payload={"connector_id": req.connector_id, "id_tag": req.id_tag},
+        payload={
+            "operation_reason": req.operation_reason,
+            "connector_id": req.connector_id,
+            "id_tag": operations_id_tag,
+        },
         idempotency_key=command_idempotency_key,
     )
     if not is_new:
         return _replay_remote_command(event)
     return await _execute_remote_command(
-        db, event, lambda: send_remote_start(cp.ocpp_identity, req.id_tag, req.connector_id)
+        db,
+        event,
+        lambda: send_remote_start(
+            cp.ocpp_identity,
+            operations_id_tag,
+            req.connector_id,
+        ),
     )
 
 
-@router.post("/remote-stop-transaction", response_model=RemoteResponse, summary="远程停止充电")
-async def remote_stop(
-    req: RemoteStopRequest,
-    idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
+@router.post("/remote-stop-session", response_model=RemoteResponse, summary="远程停止充电会话")
+async def remote_stop_session(
+    req: RemoteStopSessionRequest,
+    idempotency_key: str = Header(..., alias="Idempotency-Key"),
     admin=Depends(require_permission("chargers.control")),
     db: Session = Depends(get_db),
 ) -> RemoteResponse:
-    """远程停止充电事务"""
+    """通过当前租户的业务会话解析并停止 OCPP 事务。"""
+    tenant_id = tenant_id_context.get()
+    if not tenant_id:
+        raise HTTPException(status_code=403, detail="Tenant ID required")
     logger.info(
-        f"[API] POST /api/v1/ocpp_control/remoteStop | "
-        f"充电桩ID: {req.charge_point_id} | "
-        f"交易ID: {req.transaction_id}"
+        f"[API] POST /api/v1/ocpp/remote-stop-session | "
+        f"会话ID: {req.session_id} | "
+        f"运维管理员ID: {admin.id}"
     )
-    cp = _scoped_charge_point(db, req.charge_point_id)
-    active_session = db.query(ChargingSession).filter(
-        ChargingSession.charge_point_id == cp.id,
-        ChargingSession.transaction_id == req.transaction_id,
-        ChargingSession.status == "ongoing",
-        ChargingSession.end_time.is_(None),
-    ).first()
-    if not active_session:
-        raise HTTPException(status_code=422, detail="transaction_id is not an active OCPP transaction for this charge point")
+    scoped_session = (
+        db.query(ChargingSession, ChargePoint)
+        .join(ChargePoint, ChargePoint.id == ChargingSession.charge_point_id)
+        .filter(
+            ChargingSession.id == req.session_id,
+            ChargingSession.tenant_id == tenant_id,
+            ChargePoint.tenant_id == tenant_id,
+        )
+        .first()
+    )
+    if not scoped_session:
+        raise HTTPException(status_code=404, detail="Charging session not found")
+
+    active_session, cp = scoped_session
+    if active_session.status != "ongoing" or active_session.end_time is not None:
+        raise HTTPException(status_code=422, detail="Charging session is not ongoing")
+
     event, is_new = _record_remote_command(
         db, charge_point=cp, admin=admin, action="remote_stop",
-        payload={"transaction_id": req.transaction_id, "session_id": active_session.id},
+        payload={
+            "operation_reason": req.operation_reason,
+            "transaction_id": active_session.transaction_id,
+            "session_id": str(active_session.id),
+        },
         idempotency_key=idempotency_key,
     )
     if not is_new:
         return _replay_remote_command(event)
     return await _execute_remote_command(
-        db, event, lambda: send_remote_stop(cp.ocpp_identity, req.transaction_id)
+        db,
+        event,
+        lambda: send_remote_stop(cp.ocpp_identity, active_session.transaction_id),
     )
 
 
@@ -512,7 +623,8 @@ async def reset_charger(
     cp = _scoped_charge_point(db, req.charge_point_id)
     event, is_new = _record_remote_command(
         db, charge_point=cp, admin=admin, action="reset",
-        payload={"type": req.type}, idempotency_key=idempotency_key,
+        payload={"operation_reason": req.operation_reason, "type": req.type},
+        idempotency_key=idempotency_key,
     )
     if not is_new:
         return _replay_remote_command(event)
@@ -545,6 +657,7 @@ async def reset_charger(
 @router.post("/unlock-connector", response_model=RemoteResponse, summary="解锁连接器")
 async def unlock_connector(
     req: UnlockConnectorRequest,
+    idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
     admin=Depends(require_permission("chargers.control")),
     db: Session = Depends(get_db),
 ) -> RemoteResponse:
@@ -555,33 +668,55 @@ async def unlock_connector(
         f"充电桩ID: {req.charge_point_id} | "
         f"连接器ID: {req.connector_id}"
     )
-    
-    # 检查连接状态（同时检查 WebSocket 和 MQTT）
-    is_connected = check_charger_connection(cp.ocpp_identity)
-    
-    if not is_connected:
-        logger.warning(f"[API] 解锁连接器失败: 充电桩 {cp.ocpp_identity} 未连接")
-        raise ChargerNotConnectedException(cp.ocpp_identity)
-    
-    if settings.enable_distributed:
-        result = await message_handler.send_to_charger(
-            cp.ocpp_identity,
-            "UnlockConnector",
-            {"connectorId": req.connector_id}
+
+    connector = db.query(EVSE).filter(
+        EVSE.tenant_id == cp.tenant_id,
+        EVSE.charge_point_id == cp.id,
+        EVSE.evse_id == req.connector_id,
+    ).first()
+    if not connector:
+        raise HTTPException(
+            status_code=422,
+            detail="connector_id does not exist on this charge point",
         )
-    else:
-        result = await message_handler.send_call(
-            cp.ocpp_identity,
-            "UnlockConnector",
-            {"connectorId": req.connector_id}
-        )
-    
-    success = result.get("success", False)
-    return RemoteResponse(
-        success=success,
-        message="解锁连接器请求已发送" if success else "解锁连接器失败",
-        details=result
+
+    event, is_new = _record_remote_command(
+        db,
+        charge_point=cp,
+        admin=admin,
+        action="unlock_connector",
+        payload={
+            "operation_reason": req.operation_reason,
+            "connector_id": req.connector_id,
+        },
+        idempotency_key=idempotency_key,
     )
+    if not is_new:
+        return _replay_remote_command(event)
+
+    async def send_unlock() -> RemoteResponse:
+        if not check_charger_connection(cp.ocpp_identity):
+            raise ChargerNotConnectedException(cp.ocpp_identity)
+        if settings.enable_distributed:
+            result = await message_handler.send_to_charger(
+                cp.ocpp_identity,
+                "UnlockConnector",
+                {"connectorId": req.connector_id},
+            )
+        else:
+            result = await message_handler.send_call(
+                cp.ocpp_identity,
+                "UnlockConnector",
+                {"connectorId": req.connector_id},
+            )
+        success = result.get("success", False)
+        return RemoteResponse(
+            success=success,
+            message="解锁连接器请求已发送" if success else "解锁连接器失败",
+            details=result,
+        )
+
+    return await _execute_remote_command(db, event, send_unlock)
 
 
 @router.get("/connected", summary="获取所有已连接的充电桩列表")

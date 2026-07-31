@@ -113,6 +113,7 @@ export interface WalletTransaction {
   created_at: string;
   charge_point_name?: string | null;
   ocpp_identity?: string | null;
+  charging_session_id?: string | null;
 }
 
 export interface PaymentMethod {

@@ -7,6 +7,7 @@ import { createStackNavigator } from '@react-navigation/stack';
 import type { RootStackParamList } from '../types';
 import { useAppSelector } from '../hooks/useRedux';
 import { navigationRef } from './navigationRef';
+import { linking } from './linking';
 
 import WelcomeScreen from '../screens/auth/WelcomeScreen';
 import EmailLoginScreen from '../screens/auth/EmailLoginScreen';
@@ -46,7 +47,7 @@ export const RootNavigator = () => {
   }
 
   return (
-    <NavigationContainer ref={navigationRef}>
+    <NavigationContainer ref={navigationRef} linking={linking}>
       <Stack.Navigator
         initialRouteName={isAuthenticated ? 'MainTabs' : 'Welcome'}
         screenOptions={{

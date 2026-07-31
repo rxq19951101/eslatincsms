@@ -342,11 +342,11 @@ async def get_site_detail_for_app(
             "connectors": [
                 {
                     "id": str(evse.id),
-                    "connector_id": evse.evse_id,
+                    "connector_number": evse.evse_id,
                     "physical_reference": (
-                        evse.physical_reference
+                        evse.physical_reference.strip()
                         if evse.physical_reference and evse.physical_reference.strip()
-                        else f"{charge_point.display_code}-{evse.evse_id}"
+                        else None
                     ),
                     "status": _display_status(status_by_evse.get(evse.id), now),
                     "connector_type": evse.connector_type,

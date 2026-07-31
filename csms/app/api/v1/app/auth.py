@@ -3,11 +3,14 @@
 # 提供注册、登录、登出、刷新token等功能
 #
 
+import html
+from urllib.parse import urlencode
+
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from fastapi.responses import HTMLResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
-from typing import Optional
+from typing import Literal, Optional
 from uuid import UUID
 from app.database.base import get_db
 from app.database.models import AppUser, ChargingSession, AppUserPaymentMethod
@@ -38,6 +41,108 @@ from app.core.api_logging import log_api_request, log_api_response, log_api_erro
 logger = get_logger("ocpp_csms")
 
 router = APIRouter()
+
+_PASSWORD_RESET_OPEN_COPY = {
+    "es": {
+        "title": "Restablece tu contraseña",
+        "intro": "Abre EsLatin para elegir una nueva contraseña.",
+        "expiry": "Por seguridad, este enlace vence 30 minutos después de solicitarlo.",
+        "button": "Abrir EsLatin",
+        "hint": "Si la aplicación no se abre, vuelve a EsLatin y solicita un enlace nuevo.",
+    },
+    "en": {
+        "title": "Reset your password",
+        "intro": "Open EsLatin to choose a new password.",
+        "expiry": "For your security, this link expires 30 minutes after it was requested.",
+        "button": "Open EsLatin",
+        "hint": "If the app does not open, return to EsLatin and request a new link.",
+    },
+    "zh": {
+        "title": "重置你的密码",
+        "intro": "打开 EsLatin 以设置新密码。",
+        "expiry": "为保障账户安全，此链接将在申请后 30 分钟失效。",
+        "button": "打开 EsLatin",
+        "hint": "如果应用未打开，请返回 EsLatin 并申请新的重置链接。",
+    },
+}
+
+
+def _password_reset_open_html(token: str, locale: str) -> str:
+    normalized_locale = locale.strip().lower() if isinstance(locale, str) else "es"
+    if normalized_locale not in _PASSWORD_RESET_OPEN_COPY:
+        normalized_locale = "es"
+    copy = _PASSWORD_RESET_OPEN_COPY[normalized_locale]
+    deep_link = f"eslatin://reset-password?{urlencode({'token': token})}"
+    safe_deep_link = html.escape(deep_link, quote=True)
+
+    return f"""<!doctype html>
+<html lang="{normalized_locale}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <meta name="robots" content="noindex,nofollow">
+  <title>{copy['title']} · EsLatin</title>
+  <style>
+    :root {{ color-scheme: light; }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+      background: #f3f6fa;
+      color: #17233c;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }}
+    main {{
+      width: min(100%, 520px);
+      overflow: hidden;
+      border-radius: 18px;
+      background: #ffffff;
+      box-shadow: 0 18px 50px rgba(23, 35, 60, 0.12);
+    }}
+    .brand {{
+      padding: 24px 30px;
+      background: #123a72;
+      color: #ffffff;
+      font-size: 28px;
+      font-weight: 750;
+      letter-spacing: 0.3px;
+    }}
+    .content {{ padding: 38px 30px 34px; }}
+    h1 {{ margin: 0 0 16px; font-size: 30px; line-height: 1.2; }}
+    p {{ margin: 0 0 16px; color: #526078; font-size: 16px; line-height: 1.6; }}
+    .expiry {{ margin-bottom: 28px; font-weight: 650; color: #303e57; }}
+    .button {{
+      display: block;
+      width: 100%;
+      padding: 15px 22px;
+      border-radius: 9px;
+      background: #e65f2b;
+      color: #ffffff;
+      font-size: 17px;
+      font-weight: 750;
+      text-align: center;
+      text-decoration: none;
+    }}
+    .hint {{ margin: 22px 0 0; font-size: 13px; color: #748097; }}
+  </style>
+</head>
+<body>
+  <main>
+    <div class="brand">EsLatin</div>
+    <section class="content">
+      <h1>{copy['title']}</h1>
+      <p>{copy['intro']}</p>
+      <p class="expiry">{copy['expiry']}</p>
+      <a class="button" href="{safe_deep_link}">{copy['button']}</a>
+      <p class="hint">{copy['hint']}</p>
+    </section>
+  </main>
+</body>
+</html>"""
 
 
 # ==================== 请求/响应模型 ====================
@@ -88,6 +193,15 @@ class VerifyEmailCodeRequest(BaseModel):
 
 class PasswordResetRequest(BaseModel):
     email: str
+    locale: Literal["es", "en", "zh"] = "es"
+
+    @field_validator("locale", mode="before")
+    @classmethod
+    def normalize_locale(cls, value):
+        if not isinstance(value, str):
+            return "es"
+        normalized = value.strip().lower()
+        return normalized if normalized in {"es", "en", "zh"} else "es"
 
 
 class ConfirmPasswordResetRequest(BaseModel):
@@ -708,8 +822,34 @@ async def request_password_reset(
             detail=f"Please wait {wait_s} seconds before requesting another reset link",
         )
 
-    issue_password_reset(db, user)
+    issue_password_reset(db, user, locale=request_data.locale)
     return {"success": True, "message": "If the email exists, a reset link was sent."}
+
+
+@router.get(
+    "/reset-password/open",
+    response_class=HTMLResponse,
+    summary="打开密码重置 App 页面",
+)
+async def open_password_reset(
+    token: str,
+    locale: str = "es",
+):
+    return HTMLResponse(
+        content=_password_reset_open_html(token, locale),
+        headers={
+            "Cache-Control": "no-store",
+            "Pragma": "no-cache",
+            "Referrer-Policy": "no-referrer",
+            "X-Robots-Tag": "noindex, nofollow",
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": (
+                "default-src 'none'; style-src 'unsafe-inline'; "
+                "base-uri 'none'; form-action 'none'; frame-ancestors 'none'; "
+                "object-src 'none'; img-src 'none'; script-src 'none'"
+            ),
+        },
+    )
 
 
 @router.post("/confirm-reset-password", summary="确认密码重置")

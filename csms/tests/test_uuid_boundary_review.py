@@ -166,8 +166,13 @@ async def test_string_charge_point_filters_resolve_identity_and_enforce_tenant(
     context_token = tenant_id_context.set(sample_tenant.id)
     try:
         transactions = list_transactions(
+            search=None,
             charge_point_id=sample_charge_point.ocpp_identity,
             status=None,
+            payment_status=None,
+            site_id=None,
+            started_from=None,
+            started_to=None,
             limit=100,
             offset=0,
             current_user_obj=admin,
@@ -216,8 +221,9 @@ async def test_string_charge_point_filters_resolve_identity_and_enforce_tenant(
     finally:
         tenant_id_context.reset(context_token)
 
-    assert transactions[0]["charge_point_id"] == str(sample_charge_point.id)
-    assert transactions[0]["ocpp_identity"] == sample_charge_point.ocpp_identity
+    transaction_item = transactions["items"][0]
+    assert "charge_point_id" not in transaction_item
+    assert transaction_item["charger"]["ocpp_identity"] == sample_charge_point.ocpp_identity
     assert orders[0]["charge_point_id"] == str(sample_charge_point.id)
     assert orders[0]["ocpp_identity"] == sample_charge_point.ocpp_identity
     assert stats["charge_point_id"] == str(sample_charge_point.id)
@@ -233,8 +239,13 @@ async def test_string_charge_point_filters_resolve_identity_and_enforce_tenant(
     try:
         with pytest.raises(HTTPException) as exc_info:
             list_transactions(
+                search=None,
                 charge_point_id=sample_charge_point.ocpp_identity,
                 status=None,
+                payment_status=None,
+                site_id=None,
+                started_from=None,
+                started_to=None,
                 limit=100,
                 offset=0,
                 current_user_obj=admin,

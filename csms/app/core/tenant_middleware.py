@@ -189,6 +189,7 @@ def is_public_auth_path(path: str) -> bool:
         "/api/v1/app/auth/resend-verification",
         "/api/v1/app/auth/verify-email",
         "/api/v1/app/auth/reset-password",
+        "/api/v1/app/auth/reset-password/open",
         "/api/v1/app/auth/confirm-reset-password",
         "/api/v1/app/wallet/payments/webhook",
         "/api/v1/app/wallet/payments/webhook-mp",

@@ -16,10 +16,21 @@ import { useAppDispatch, useAppSelector } from '../../hooks/useRedux';
 import { fetchChargingRecordDetail } from '../../store/slices/transactionsSlice';
 import ScreenHeader from '../../components/ui/ScreenHeader';
 import { localizeStatus } from '../../utils/localizeStatus';
-import { formatDateTime, publicChargerIdentity } from '../../utils/localizedDisplay';
+import { formatDateTime } from '../../utils/localizedDisplay';
 
 type R = RouteProp<RootStackParamList, 'ChargingHistoryDetail'>;
 type Nav = StackNavigationProp<RootStackParamList, 'ChargingHistoryDetail'>;
+
+const formatDecimalAmount = (amount: string, currency: string): string => {
+  const match = amount.trim().match(/^(-?)(\d+)(?:\.(\d+))?$/);
+  if (!match) return `${amount} ${currency}`;
+
+  const [, sign, integer, fraction = ''] = match;
+  const groupedInteger = integer.replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+  const decimal = fraction ? `,${fraction}` : '';
+  const symbol = currency === 'COP' ? '$' : '';
+  return `${sign}${symbol}${groupedInteger}${decimal} ${currency}`.trim();
+};
 
 const ChargingHistoryDetailScreen = () => {
   const { t, locale } = useI18n();
@@ -36,6 +47,23 @@ const ChargingHistoryDetailScreen = () => {
   }, [dispatch, id]);
 
   const d = selected && selected.id === id ? selected : null;
+  const billingStatusLabel = (status: string | null | undefined) => {
+    switch (status?.toLowerCase()) {
+      case 'paid':
+        return t.history.billingPaid;
+      case 'pending':
+        return t.history.billingPending;
+      case 'failed':
+        return t.history.billingFailed;
+      case 'refunded':
+        return t.history.billingRefunded;
+      case 'voided':
+      case 'cancelled':
+        return t.history.billingCancelled;
+      default:
+        return status || t.history.pendingSettlement;
+    }
+  };
 
   return (
     <SafeAreaView style={styles.container}>
@@ -53,17 +81,38 @@ const ChargingHistoryDetailScreen = () => {
       ) : (
         <ScrollView contentContainerStyle={{ padding: 16, paddingBottom: 24 }}>
           <View style={styles.card}>
-            <Text style={styles.title}>{d.site_name || publicChargerIdentity(d, t.common.unknown)}</Text>
+            <Text style={styles.title}>{d.site_name || t.common.unknown}</Text>
             <Text style={styles.subTitle}>{d.site_address || '—'}</Text>
+          </View>
+
+          <View style={styles.card}>
+            {d.invoice_number && <Row label={t.history.invoiceNumber} value={d.invoice_number} />}
+            <Row
+              label={t.history.finalAmount}
+              value={
+                d.total_amount
+                  ? formatDecimalAmount(d.total_amount, d.currency)
+                  : t.history.pendingSettlement
+              }
+            />
+            {d.total_amount && <Row label={t.history.currency} value={d.currency} />}
+            <Row label={t.history.billingStatus} value={billingStatusLabel(d.billing_status)} />
           </View>
 
           <View style={styles.card}>
             <Row label={t.history.status} value={localizeStatus(d.status, t)} />
             <Row label={t.history.startTime} value={formatDateTime(d.start_time, locale)} />
             <Row label={t.history.endTime} value={formatDateTime(d.end_time, locale)} />
-            <Row label={t.history.chargerId} value={publicChargerIdentity(d)} />
-            {typeof d.connector_id === 'number' && <Row label={t.history.connector} value={String(d.connector_id)} />}
-            <Row label={t.history.transaction} value={String(d.transaction_id)} />
+            <Row label={t.history.charger} value={d.charge_point_label || t.common.unknown} />
+            {(d.connector_label || typeof d.connector_number === 'number') && (
+              <Row
+                label={t.history.connector}
+                value={
+                  d.connector_label
+                  || t.history.connectorFallback.replace('{number}', String(d.connector_number))
+                }
+              />
+            )}
           </View>
 
           <View style={styles.card}>
@@ -72,8 +121,6 @@ const ChargingHistoryDetailScreen = () => {
               label={t.history.durationMin}
               value={typeof d.duration_minutes === 'number' ? d.duration_minutes.toFixed(1) : '—'}
             />
-            {typeof d.meter_start === 'number' && <Row label={t.history.meterStart} value={String(d.meter_start)} />}
-            {typeof d.meter_stop === 'number' && <Row label={t.history.meterStop} value={String(d.meter_stop)} />}
           </View>
         </ScrollView>
       )}

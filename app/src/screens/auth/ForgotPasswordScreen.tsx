@@ -27,7 +27,7 @@ type ForgotPasswordScreenNavigationProp = StackNavigationProp<
 >;
 
 const ForgotPasswordScreen = () => {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
 
   const navigation = useNavigation<ForgotPasswordScreenNavigationProp>();
   const [email, setEmail] = useState('');
@@ -48,7 +48,7 @@ const ForgotPasswordScreen = () => {
 
     setIsLoading(true);
     try {
-      await sendResetPasswordEmail(email.trim().toLowerCase());
+      await sendResetPasswordEmail(email.trim().toLowerCase(), locale);
       setEmailSent(true);
     } catch (error: any) {
       Alert.alert(t.common.error, error.message || t.auth.resetFailed);
@@ -67,10 +67,8 @@ const ForgotPasswordScreen = () => {
         <StatusBar barStyle="dark-content" />
         <View style={styles.content}>
           <View style={styles.successContainer}>
-            <Text style={styles.successTitle}>Email Sent!</Text>
-            <Text style={styles.successSubtitle}>
-              Check your email for a link to reset your password.
-            </Text>
+            <Text style={styles.successTitle}>{t.auth.resetSentTitle}</Text>
+            <Text style={styles.successSubtitle}>{t.auth.resetSentBody}</Text>
             <Button title={t.auth.backToSignIn} onPress={handleBackToLogin} size="large" />
           </View>
         </View>
@@ -86,10 +84,8 @@ const ForgotPasswordScreen = () => {
       <View style={styles.content}>
         {/* 标题 */}
         <View style={styles.header}>
-          <Text style={styles.title}>Forgot Password?</Text>
-          <Text style={styles.subtitle}>
-            Enter your email and we'll send you a link to reset your password
-          </Text>
+          <Text style={styles.title}>{t.auth.forgotTitle}</Text>
+          <Text style={styles.subtitle}>{t.auth.forgotSubtitle}</Text>
         </View>
 
         {/* 表单 */}
@@ -97,8 +93,8 @@ const ForgotPasswordScreen = () => {
           {/* 邮箱输入 */}
           <View style={styles.inputContainer}>
             <TextField
-              label="Email"
-              placeholder="your.email@example.com"
+              label={t.auth.email}
+              placeholder={t.auth.emailPlaceholder}
               value={email}
               onChangeText={setEmail}
               keyboardType="email-address"
@@ -110,7 +106,7 @@ const ForgotPasswordScreen = () => {
 
           {/* 发送按钮 */}
           <Button
-            title="Send Reset Link"
+            title={t.auth.sendReset}
             onPress={handleSendResetLink}
             disabled={isLoading}
             loading={isLoading}

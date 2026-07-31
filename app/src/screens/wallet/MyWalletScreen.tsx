@@ -15,6 +15,7 @@ import LoadingSpinner from '../../components/ui/LoadingSpinner';
 import { formatMoneyCOP, formatMoneyCOPShort } from '../../utils/formatMoney';
 import { useI18n } from '../../i18n';
 import Screen from '../../components/ui/Screen';
+import RootTabHeader from '../../components/ui/RootTabHeader';
 import { palette, spacing, typography } from '../../theme';
 import { formatDateTime, localizeWalletTransaction } from '../../utils/localizedDisplay';
 
@@ -49,10 +50,18 @@ const MyWalletScreen = () => {
   const renderTx = ({ item, index }: { item: WalletTransaction; index: number }) => {
     const color = item.amount >= 0 ? COLORS.SUCCESS : COLORS.ERROR;
     const title = localizeWalletTransaction(item, t);
+    const chargingSessionId =
+      item.type === 'charge' ? item.charging_session_id : null;
     return (
       <Card
         testID="app-wallet-transaction"
         accessibilityLabel={`${title}, ${amountText(item.amount)}`}
+        accessibilityHint={chargingSessionId ? t.wallet.viewChargeOrder : undefined}
+        onPress={
+          chargingSessionId
+            ? () => navigation.navigate('ChargingHistoryDetail', { id: chargingSessionId })
+            : undefined
+        }
         key={item.id}
         style={[styles.txRow, { marginBottom: index < transactions.length - 1 ? IOS_STYLES.SPACING.SM : 0 }]}
       >
@@ -73,9 +82,7 @@ const MyWalletScreen = () => {
     <Screen testID="app-wallet-screen" accessibilityLabel={t.wallet.title}>
       <StatusBar barStyle="dark-content" />
 
-      <View style={styles.header}>
-        <Text style={styles.headerTitle}>{t.wallet.title}</Text>
-      </View>
+      <RootTabHeader title={t.wallet.title} testID="app-wallet-header" />
 
       <Card testID="app-wallet-balance-card" accessibilityLabel={t.wallet.available} style={styles.balanceCard}>
         <Text style={styles.balanceLabel}>{t.wallet.available}</Text>
@@ -132,15 +139,6 @@ const MyWalletScreen = () => {
 };
 
 const styles = StyleSheet.create({
-  header: {
-    paddingHorizontal: 20,
-    paddingVertical: 16,
-  },
-  headerTitle: {
-    fontSize: 24,
-    fontWeight: typography.bold,
-    color: COLORS.TEXT_PRIMARY,
-  },
   balanceCard: {
     backgroundColor: COLORS.PRIMARY,
     marginHorizontal: spacing.md,

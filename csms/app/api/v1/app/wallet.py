@@ -13,13 +13,23 @@ import re
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.core.logging_config import get_logger
 from app.core.api_logging import log_api_request, log_api_response, log_api_error, log_business_operation
 from app.core.auth import get_current_user
 from app.database.base import get_db, SuperSessionLocal
-from app.database.models import AppUser, AppUserPaymentMethod, AppWalletTransaction, ChargePoint, Site, Tenant
+from app.database.models import (
+    AppUser,
+    AppUserPaymentMethod,
+    AppWalletTransaction,
+    ChargePoint,
+    ChargingSession,
+    Invoice,
+    Site,
+    Tenant,
+)
 from app.core.id_generator import generate_order_id
 
 logger = get_logger("ocpp_csms")
@@ -60,6 +70,7 @@ class WalletTransactionResponse(BaseModel):
     created_at: str
     charge_point_name: Optional[str] = None
     ocpp_identity: Optional[str] = None
+    charging_session_id: Optional[str] = None
 
 
 _UUID_TEXT = re.compile(
@@ -197,6 +208,27 @@ def list_wallet_transactions(
         query = db.query(AppWalletTransaction).filter(AppWalletTransaction.app_user_id == current_user_obj.id)
         txs = query.order_by(AppWalletTransaction.created_at.desc()).offset(offset).limit(limit).all()
 
+        invoice_ids = [t.invoice_id for t in txs if t.type == "charge" and t.invoice_id]
+        owned_session_by_invoice: Dict[UUID, UUID] = {}
+        if invoice_ids:
+            id_tag = f"APP{str(current_user_obj.id).replace('-', '')[:17]}"
+            owned_invoices = (
+                db.query(Invoice.id, Invoice.session_id)
+                .join(ChargingSession, Invoice.session_id == ChargingSession.id)
+                .filter(
+                    Invoice.id.in_(invoice_ids),
+                    or_(
+                        ChargingSession.app_user_id == current_user_obj.id,
+                        ChargingSession.user_id == str(current_user_obj.id),
+                        ChargingSession.id_tag == id_tag,
+                    ),
+                )
+                .all()
+            )
+            owned_session_by_invoice = {
+                invoice_id: session_id for invoice_id, session_id in owned_invoices
+            }
+
         # 批量取 charge_point 名称（可选）
         cp_ids = [t.charge_point_id for t in txs if t.charge_point_id]
         cp_name_map: Dict[UUID, Optional[str]] = {}
@@ -224,11 +256,16 @@ def list_wallet_transactions(
                     id=str(t.id),
                     type=t.type,
                     reference=_public_wallet_reference(t),
-                    amount=float(t.amount) if t.amount is not None else 0.0,
+                    amount=Decimal(str(t.amount)) if t.amount is not None else Decimal("0"),
                     description=t.description,
                     created_at=t.created_at.isoformat() if t.created_at else "",
                     charge_point_name=cp_name_map.get(t.charge_point_id) if t.charge_point_id else None,
                     ocpp_identity=cp_identity_map.get(t.charge_point_id) if t.charge_point_id else None,
+                    charging_session_id=(
+                        str(owned_session_by_invoice[t.invoice_id])
+                        if t.type == "charge" and t.invoice_id in owned_session_by_invoice
+                        else None
+                    ),
                 )
             )
 

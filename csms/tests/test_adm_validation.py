@@ -236,12 +236,13 @@ def test_readonly_admin_cannot_create_site(client, db_session, sample_tenant):
 
 
 def test_remote_control_auth_permission_tenant_and_real_transaction(
-    client, db_session, sample_tenant, sample_charge_point, sample_evse
+    client, db_session, sample_tenant, sample_charge_point, sample_evse,
+    sample_evse_status,
 ):
     start_payload = {
         "charge_point_id": sample_charge_point.ocpp_identity,
-        "id_tag": "ADMIN",
         "connector_id": 1,
+        "operation_reason": "Acceptance test administrator start",
     }
     client.headers.pop("Authorization", None)
     client.headers.update({"X-Tenant-Id": str(sample_tenant.id)})
@@ -276,7 +277,11 @@ def test_remote_control_auth_permission_tenant_and_real_transaction(
     assert client.post(
         "/api/v1/ocpp/unlock-connector",
         headers=reader_headers,
-        json={"charge_point_id": sample_charge_point.ocpp_identity, "connector_id": 1},
+        json={
+            "charge_point_id": sample_charge_point.ocpp_identity,
+            "connector_id": 1,
+            "operation_reason": "Acceptance test permission check",
+        },
     ).status_code == 403
 
     super_admin = AdminUser(
@@ -293,7 +298,9 @@ def test_remote_control_auth_permission_tenant_and_real_transaction(
     db_session.commit()
     client.headers.update({"X-Tenant-Id": str(other_tenant.id)})
     assert client.post("/api/v1/ocpp/reset", json={
-        "charge_point_id": sample_charge_point.ocpp_identity, "type": "Soft"
+        "charge_point_id": sample_charge_point.ocpp_identity,
+        "type": "Soft",
+        "operation_reason": "Acceptance test tenant boundary",
     }).status_code == 403
 
     client.headers.update({"X-Tenant-Id": str(sample_tenant.id)})
@@ -312,20 +319,24 @@ def test_remote_control_auth_permission_tenant_and_real_transaction(
     with patch("app.api.v1.ocpp_control.check_charger_connection", return_value=True), patch(
         "app.api.v1.ocpp_control.message_handler.send_call", new=AsyncMock(return_value={"success": True})
     ) as sender:
-        wrong = client.post("/api/v1/ocpp/remote-stop-transaction", json={
+        wrong = client.post("/api/v1/ocpp/remote-stop-session", headers={
+            "Idempotency-Key": "stop-reject-protocol-fields",
+        }, json={
+            "session_id": str(session.id),
             "charge_point_id": sample_charge_point.ocpp_identity,
-            "transaction_id": sample_evse.evse_id,
+            "transaction_id": session.transaction_id,
+            "operation_reason": "Acceptance test strict request validation",
         })
         assert wrong.status_code == 422
 
         headers = {"Idempotency-Key": "stop-88001"}
-        first = client.post("/api/v1/ocpp/remote-stop-transaction", headers=headers, json={
-            "charge_point_id": sample_charge_point.ocpp_identity,
-            "transaction_id": session.transaction_id,
+        first = client.post("/api/v1/ocpp/remote-stop-session", headers=headers, json={
+            "session_id": str(session.id),
+            "operation_reason": "Acceptance test idempotent stop",
         })
-        second = client.post("/api/v1/ocpp/remote-stop-transaction", headers=headers, json={
-            "charge_point_id": sample_charge_point.ocpp_identity,
-            "transaction_id": session.transaction_id,
+        second = client.post("/api/v1/ocpp/remote-stop-session", headers=headers, json={
+            "session_id": str(session.id),
+            "operation_reason": "Acceptance test idempotent stop",
         })
         assert first.status_code == 200
         assert second.status_code == 200

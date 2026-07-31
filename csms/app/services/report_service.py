@@ -6,6 +6,7 @@
 import csv
 import io
 import json
+from decimal import Decimal
 from typing import List, Dict, Any, Optional
 from uuid import UUID
 from datetime import datetime, timezone, timedelta
@@ -29,42 +30,49 @@ class ReportService:
         tenant_id: UUID,
         start_date: datetime,
         end_date: datetime,
-        group_by: str = "day"  # day, week, month, year
+        group_by: str = "day",  # day, week, month, year
+        site_id: Optional[UUID] = None,
     ) -> List[Dict[str, Any]]:
-        """获取收入报表"""
-        query = db.query(Invoice).filter(
+        """Return paid-invoice revenue for one tenant in a UTC half-open range."""
+        if group_by != "day":
+            return []
+
+        report_date = func.date(Invoice.issued_at)
+        query = db.query(
+            report_date.label("date"),
+            func.sum(Invoice.total_amount).label("total_revenue"),
+            func.sum(Invoice.energy_kwh).label("total_energy"),
+            func.count(Invoice.id).label("invoice_count"),
+        ).filter(
             Invoice.tenant_id == tenant_id,
             Invoice.issued_at >= start_date,
-            Invoice.issued_at <= end_date,
-            Invoice.status == "paid"
+            Invoice.issued_at < end_date,
+            Invoice.status == "paid",
         )
-        
-        if group_by == "day":
-            # 按天分组
-            results = db.query(
-                func.date(Invoice.issued_at).label("date"),
-                func.sum(Invoice.total_amount).label("total_revenue"),
-                func.sum(Invoice.energy_kwh).label("total_energy"),
-                func.count(Invoice.id).label("invoice_count")
+
+        if site_id is not None:
+            query = query.join(
+                ChargingSession,
+                ChargingSession.id == Invoice.session_id,
+            ).join(
+                ChargePoint,
+                ChargePoint.id == ChargingSession.charge_point_id,
             ).filter(
-                Invoice.tenant_id == tenant_id,
-                Invoice.issued_at >= start_date,
-                Invoice.issued_at <= end_date,
-                Invoice.status == "paid"
-            ).group_by(func.date(Invoice.issued_at)).order_by(func.date(Invoice.issued_at)).all()
-            
-            return [
-                {
-                    "date": str(r.date),
-                    "total_revenue": float(r.total_revenue or 0),
-                    "total_energy_kwh": float(r.total_energy or 0),
-                    "invoice_count": r.invoice_count
-                }
-                for r in results
-            ]
-        else:
-            # 其他分组方式（周、月、年）类似实现
-            return []
+                ChargePoint.tenant_id == tenant_id,
+                ChargePoint.site_id == site_id,
+            )
+
+        results = query.group_by(report_date).order_by(report_date).all()
+        return [
+            {
+                "date": str(row.date),
+                "total_revenue": row.total_revenue or Decimal("0"),
+                "total_energy_kwh": row.total_energy or Decimal("0"),
+                "invoice_count": int(row.invoice_count or 0),
+                "currency": "COP",
+            }
+            for row in results
+        ]
     
     @staticmethod
     def get_energy_report(
@@ -72,43 +80,48 @@ class ReportService:
         tenant_id: UUID,
         start_date: datetime,
         end_date: datetime,
-        group_by: str = "day"
+        group_by: str = "day",
+        site_id: Optional[UUID] = None,
     ) -> List[Dict[str, Any]]:
-        """获取充电量报表"""
-        # 从 ChargingSession 或 Invoice 获取充电量数据
-        query = db.query(ChargingSession).filter(
+        """Return valid completed-session energy in a UTC half-open range."""
+        if group_by != "day":
+            return []
+
+        report_date = func.date(ChargingSession.start_time)
+        query = db.query(
+            report_date.label("date"),
+            func.sum(
+                ChargingSession.meter_stop - ChargingSession.meter_start
+            ).label("total_energy_wh"),
+            func.count(ChargingSession.id).label("session_count"),
+        ).filter(
             ChargingSession.tenant_id == tenant_id,
             ChargingSession.start_time >= start_date,
-            ChargingSession.start_time <= end_date,
-            ChargingSession.status == "completed"
+            ChargingSession.start_time < end_date,
+            ChargingSession.status == "completed",
+            ChargingSession.meter_stop.isnot(None),
+            ChargingSession.meter_start.isnot(None),
+            ChargingSession.meter_stop >= ChargingSession.meter_start,
         )
-        
-        if group_by == "day":
-            results = db.query(
-                func.date(ChargingSession.start_time).label("date"),
-                func.sum(
-                    (ChargingSession.meter_stop - ChargingSession.meter_start) / 1000.0
-                ).label("total_energy_kwh"),
-                func.count(ChargingSession.id).label("session_count")
+
+        if site_id is not None:
+            query = query.join(
+                ChargePoint,
+                ChargePoint.id == ChargingSession.charge_point_id,
             ).filter(
-                ChargingSession.tenant_id == tenant_id,
-                ChargingSession.start_time >= start_date,
-                ChargingSession.start_time <= end_date,
-                ChargingSession.status == "completed",
-                ChargingSession.meter_stop.isnot(None),
-                ChargingSession.meter_start.isnot(None)
-            ).group_by(func.date(ChargingSession.start_time)).order_by(func.date(ChargingSession.start_time)).all()
-            
-            return [
-                {
-                    "date": str(r.date),
-                    "total_energy_kwh": float(r.total_energy_kwh or 0),
-                    "session_count": r.session_count
-                }
-                for r in results
-            ]
-        else:
-            return []
+                ChargePoint.tenant_id == tenant_id,
+                ChargePoint.site_id == site_id,
+            )
+
+        results = query.group_by(report_date).order_by(report_date).all()
+        return [
+            {
+                "date": str(row.date),
+                "total_energy_kwh": Decimal(row.total_energy_wh or 0) / Decimal("1000"),
+                "session_count": int(row.session_count or 0),
+            }
+            for row in results
+        ]
     
     @staticmethod
     def get_orders_report(
@@ -116,35 +129,47 @@ class ReportService:
         tenant_id: UUID,
         start_date: datetime,
         end_date: datetime,
-        group_by: str = "day"
+        group_by: str = "day",
+        site_id: Optional[UUID] = None,
     ) -> List[Dict[str, Any]]:
-        """获取订单报表"""
-        if group_by == "day":
-            results = db.query(
-                func.date(Order.created_at).label("date"),
-                func.count(Order.id).label("order_count"),
-                func.sum(
-                    case(
-                        (Order.status == "completed", 1),
-                        else_=0
-                    )
-                ).label("completed_count")
-            ).filter(
-                Order.tenant_id == tenant_id,
-                Order.created_at >= start_date,
-                Order.created_at <= end_date
-            ).group_by(func.date(Order.created_at)).order_by(func.date(Order.created_at)).all()
-            
-            return [
-                {
-                    "date": str(r.date),
-                    "order_count": r.order_count,
-                    "completed_count": int(r.completed_count or 0)
-                }
-                for r in results
-            ]
-        else:
+        """Return business-order counts in a UTC half-open range."""
+        if group_by != "day":
             return []
+
+        report_date = func.date(Order.created_at)
+        query = db.query(
+            report_date.label("date"),
+            func.count(Order.id).label("order_count"),
+            func.sum(
+                case(
+                    (Order.status == "completed", 1),
+                    else_=0,
+                )
+            ).label("completed_count"),
+        ).filter(
+            Order.tenant_id == tenant_id,
+            Order.created_at >= start_date,
+            Order.created_at < end_date,
+        )
+
+        if site_id is not None:
+            query = query.join(
+                ChargePoint,
+                ChargePoint.id == Order.charge_point_id,
+            ).filter(
+                ChargePoint.tenant_id == tenant_id,
+                ChargePoint.site_id == site_id,
+            )
+
+        results = query.group_by(report_date).order_by(report_date).all()
+        return [
+            {
+                "date": str(row.date),
+                "order_count": int(row.order_count or 0),
+                "completed_count": int(row.completed_count or 0),
+            }
+            for row in results
+        ]
     
     @staticmethod
     def get_user_statistics(
@@ -216,31 +241,49 @@ class ReportService:
     def export_report(
         db: Session,
         tenant_id: UUID,
-        report_type: str,  # revenue, energy, orders
+        report_type: str,
         start_date: datetime,
         end_date: datetime,
-        format: str = "csv"  # csv, excel, json
+        format: str = "csv",
+        site_id: Optional[UUID] = None,
     ) -> bytes:
-        """导出报表为 CSV 或 JSON。"""
-        if report_type == "revenue":
-            rows = ReportService.get_revenue_report(db, tenant_id, start_date, end_date, "day")
-        elif report_type == "energy":
-            rows = ReportService.get_energy_report(db, tenant_id, start_date, end_date, "day")
-        elif report_type == "orders":
-            rows = ReportService.get_orders_report(db, tenant_id, start_date, end_date, "day")
-        else:
-            rows = []
+        """Export one tenant report using the same filters as its query API."""
+        if format != "csv":
+            raise ValueError("Unsupported export format")
 
-        if format == "json":
-            return json.dumps(rows, ensure_ascii=False, indent=2).encode("utf-8")
+        loaders = {
+            "revenue": (
+                ReportService.get_revenue_report,
+                ["date", "total_revenue", "total_energy_kwh", "invoice_count", "currency"],
+            ),
+            "energy": (
+                ReportService.get_energy_report,
+                ["date", "total_energy_kwh", "session_count"],
+            ),
+            "orders": (
+                ReportService.get_orders_report,
+                ["date", "order_count", "completed_count"],
+            ),
+        }
+        loader_config = loaders.get(report_type)
+        if loader_config is None:
+            raise ValueError("Unsupported report type")
+
+        loader, fieldnames = loader_config
+        rows = loader(
+            db,
+            tenant_id,
+            start_date,
+            end_date,
+            "day",
+            site_id=site_id,
+        )
 
         buf = io.StringIO()
+        writer = csv.DictWriter(buf, fieldnames=fieldnames)
+        writer.writeheader()
         if rows:
-            writer = csv.DictWriter(buf, fieldnames=list(rows[0].keys()))
-            writer.writeheader()
             writer.writerows(rows)
-        else:
-            buf.write("date,total_revenue,total_energy_kwh,invoice_count\n")
         return buf.getvalue().encode("utf-8-sig")
 
     @staticmethod
@@ -265,13 +308,16 @@ class ReportService:
             return json.dumps(rows, ensure_ascii=False, indent=2, default=str).encode("utf-8")
         if format not in {"csv", "excel"}:
             raise ValueError("Unsupported export format")
+        fieldnames = {
+            "revenue": ["date", "total_revenue", "total_energy_kwh", "invoice_count"],
+            "energy": ["date", "total_energy_kwh", "session_count"],
+            "orders": ["date", "order_count", "completed_count"],
+        }[report_type]
         buf = io.StringIO()
+        writer = csv.DictWriter(buf, fieldnames=fieldnames)
+        writer.writeheader()
         if rows:
-            writer = csv.DictWriter(buf, fieldnames=list(rows[0].keys()))
-            writer.writeheader()
             writer.writerows(rows)
-        else:
-            buf.write("date,total_revenue,total_energy_kwh,invoice_count\n")
         return buf.getvalue().encode("utf-8-sig")
     
     # ==================== 超级管理员查询所有租户的方法 ====================

@@ -116,7 +116,7 @@ export const getRememberMe = async (): Promise<boolean> => {
  */
 export const isAuthenticated = async (): Promise<boolean> => {
   const accessToken = await getAccessToken();
-  return !!accessToken;
+  return !!accessToken && !isTokenExpired(accessToken);
 };
 
 /**

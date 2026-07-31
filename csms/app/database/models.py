@@ -718,6 +718,7 @@ class AppWalletTransaction(Base):
     transaction_number = Column(String(100), nullable=False, unique=True, index=True, default=lambda: _business_number("wallet"))
     app_user_id = Column(UUID(as_uuid=True), ForeignKey("app_users.id", ondelete="CASCADE"), nullable=False, index=True)
     payment_order_id = Column(UUID(as_uuid=True), ForeignKey("payment_orders.id", ondelete="SET NULL"), nullable=True, index=True)
+    invoice_id = Column(UUID(as_uuid=True), ForeignKey("invoices.id", ondelete="SET NULL"), nullable=True, unique=True, index=True)
 
     operator_tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
     charge_point_id = Column(UUID(as_uuid=True), ForeignKey("charge_points.id"), nullable=True, index=True)
@@ -732,6 +733,7 @@ class AppWalletTransaction(Base):
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False, index=True)
 
     app_user = relationship("AppUser")
+    invoice = relationship("Invoice")
     operator_tenant = relationship("Tenant")
     charge_point = relationship("ChargePoint")
 

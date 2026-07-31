@@ -6,35 +6,40 @@ from fastapi.testclient import TestClient
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 
-from app.database.models import ChargingSession, OutboxEvent, Tenant
+from app.api.v1 import ocpp_control
+from app.database.models import AuditLog, ChargingSession, OutboxEvent, Tenant
 
 
 class TestOCPPControlAPI:
     """OCPP控制API测试类"""
     
-    def test_remote_start_transaction(self, admin_client: TestClient, sample_charge_point, sample_evse):
+    def test_remote_start_transaction(
+        self, admin_client: TestClient, sample_charge_point, sample_evse, sample_evse_status
+    ):
         """测试远程启动交易"""
         payload = {
             "charge_point_id": sample_charge_point.ocpp_identity,
-            "id_tag": "TEST_USER_001",
-            "connector_id": 1
+            "connector_id": 1,
+            "operation_reason": "Acceptance test remote start",
         }
-        response = admin_client.post("/api/v1/ocpp/remote-start-transaction", json=payload)
-        # 可能返回200（成功）或503（服务不可用，如果MQTT未连接）
-        assert response.status_code in [200, 503]
-        if response.status_code == 200:
-            data = response.json()
-            assert "success" in data
+        with patch.dict(ocpp_control._remote_start_inflight, {}, clear=True), patch(
+            "app.api.v1.ocpp_control.check_charger_connection", return_value=True
+        ), patch(
+            "app.api.v1.ocpp_control.message_handler.send_call",
+            new=AsyncMock(return_value={"success": True, "status": "Accepted"}),
+        ):
+            response = admin_client.post("/api/v1/ocpp/remote-start-transaction", json=payload)
+        assert response.status_code == 200
+        assert response.json()["success"] is True
 
     def test_remote_start_accepts_body_idempotency_key_and_replays_once(
-        self, admin_client: TestClient, db_session, sample_charge_point, sample_evse
+        self, admin_client: TestClient, db_session, sample_charge_point, sample_evse,
+        sample_evse_status,
     ):
-        from app.api.v1 import ocpp_control
-
         payload = {
             "charge_point_id": sample_charge_point.ocpp_identity,
-            "id_tag": "BODY-IDEMPOTENT",
             "connector_id": sample_evse.evse_id,
+            "operation_reason": "Acceptance test idempotent start",
             "idempotency_key": "scenario-remote-start-001",
         }
         with patch.dict(ocpp_control._remote_start_inflight, {}, clear=True), patch(
@@ -54,7 +59,8 @@ class TestOCPPControlAPI:
         event = db_session.query(OutboxEvent).filter_by(
             idempotency_key="remote-command:scenario-remote-start-001"
         ).one()
-        assert event.payload["id_tag"] == "BODY-IDEMPOTENT"
+        assert event.payload["id_tag"].startswith("OPS-")
+        assert event.payload["operation_reason"] == "Acceptance test idempotent start"
 
     def test_remote_start_rejects_conflicting_header_and_body_idempotency_keys(
         self, admin_client: TestClient, db_session, sample_charge_point, sample_evse
@@ -64,8 +70,8 @@ class TestOCPPControlAPI:
             headers={"Idempotency-Key": "header-command-key"},
             json={
                 "charge_point_id": sample_charge_point.ocpp_identity,
-                "id_tag": "CONFLICT",
                 "connector_id": sample_evse.evse_id,
+                "operation_reason": "Acceptance test conflicting keys",
                 "idempotency_key": "body-command-key",
             },
         )
@@ -78,13 +84,10 @@ class TestOCPPControlAPI:
             ])
         ).count() == 0
     
-    def test_remote_stop_transaction(self, admin_client: TestClient, db_session, sample_charge_point, sample_evse):
-        """测试远程停止交易"""
-        payload = {
-            "charge_point_id": sample_charge_point.ocpp_identity,
-            "transaction_id": 12345
-        }
-        db_session.add(ChargingSession(
+    def test_remote_stop_session_resolves_protocol_fields_and_replays_once(
+        self, admin_client: TestClient, db_session, sample_charge_point, sample_evse
+    ):
+        session = ChargingSession(
             tenant_id=sample_charge_point.tenant_id,
             evse_id=sample_evse.id,
             charge_point_id=sample_charge_point.id,
@@ -92,11 +95,170 @@ class TestOCPPControlAPI:
             id_tag="TEST_USER_001",
             start_time=datetime.now(timezone.utc),
             status="ongoing",
-        ))
+        )
+        db_session.add(session)
         db_session.commit()
-        response = admin_client.post("/api/v1/ocpp/remote-stop-transaction", json=payload)
-        # 可能返回200（成功）或503（服务不可用）
-        assert response.status_code in [200, 503]
+
+        payload = {
+            "session_id": str(session.id),
+            "operation_reason": "Acceptance test remote stop",
+        }
+        headers = {"Idempotency-Key": "stop-session-12345"}
+        with patch(
+            "app.api.v1.ocpp_control.check_charger_connection", return_value=True
+        ), patch(
+            "app.api.v1.ocpp_control.message_handler.send_call",
+            new=AsyncMock(return_value={"success": True, "status": "Accepted"}),
+        ) as sender:
+            first = admin_client.post(
+                "/api/v1/ocpp/remote-stop-session", json=payload, headers=headers
+            )
+            replay = admin_client.post(
+                "/api/v1/ocpp/remote-stop-session", json=payload, headers=headers
+            )
+
+        assert first.status_code == replay.status_code == 200
+        assert first.json()["success"] is True
+        assert replay.json()["details"]["idempotent_replay"] is True
+        sender.assert_awaited_once_with(
+            sample_charge_point.ocpp_identity,
+            "RemoteStopTransaction",
+            {"transactionId": session.transaction_id},
+        )
+        event = db_session.query(OutboxEvent).filter_by(
+            idempotency_key="remote-command:stop-session-12345"
+        ).one()
+        assert event.payload["session_id"] == str(session.id)
+        assert event.payload["transaction_id"] == session.transaction_id
+        assert event.payload["operation_reason"] == "Acceptance test remote stop"
+        assert db_session.query(AuditLog).filter_by(action="ocpp.remote_stop").count() == 1
+
+    def test_remote_stop_session_requires_idempotency_key(
+        self, admin_client: TestClient, db_session, sample_charge_point, sample_evse
+    ):
+        session = ChargingSession(
+            tenant_id=sample_charge_point.tenant_id,
+            evse_id=sample_evse.id,
+            charge_point_id=sample_charge_point.id,
+            transaction_id=12346,
+            id_tag="TEST_USER_002",
+            start_time=datetime.now(timezone.utc),
+            status="ongoing",
+        )
+        db_session.add(session)
+        db_session.commit()
+
+        response = admin_client.post(
+            "/api/v1/ocpp/remote-stop-session",
+            json={
+                "session_id": str(session.id),
+                "operation_reason": "Missing idempotency key",
+            },
+        )
+
+        assert response.status_code == 422
+        assert db_session.query(OutboxEvent).count() == 0
+
+    def test_remote_stop_session_rejects_protocol_fields(
+        self, admin_client: TestClient, db_session, sample_charge_point, sample_evse
+    ):
+        session = ChargingSession(
+            tenant_id=sample_charge_point.tenant_id,
+            evse_id=sample_evse.id,
+            charge_point_id=sample_charge_point.id,
+            transaction_id=12347,
+            id_tag="TEST_USER_003",
+            start_time=datetime.now(timezone.utc),
+            status="ongoing",
+        )
+        db_session.add(session)
+        db_session.commit()
+
+        response = admin_client.post(
+            "/api/v1/ocpp/remote-stop-session",
+            headers={"Idempotency-Key": "stop-session-extra-fields"},
+            json={
+                "session_id": str(session.id),
+                "operation_reason": "Reject protocol identifiers",
+                "charge_point_id": sample_charge_point.ocpp_identity,
+                "transaction_id": session.transaction_id,
+            },
+        )
+
+        assert response.status_code == 422
+        assert db_session.query(OutboxEvent).count() == 0
+
+    def test_remote_stop_session_rejects_non_ongoing_session(
+        self, admin_client: TestClient, db_session, sample_charge_point, sample_evse
+    ):
+        session = ChargingSession(
+            tenant_id=sample_charge_point.tenant_id,
+            evse_id=sample_evse.id,
+            charge_point_id=sample_charge_point.id,
+            transaction_id=12348,
+            id_tag="TEST_USER_004",
+            start_time=datetime.now(timezone.utc),
+            end_time=datetime.now(timezone.utc),
+            status="completed",
+        )
+        db_session.add(session)
+        db_session.commit()
+
+        response = admin_client.post(
+            "/api/v1/ocpp/remote-stop-session",
+            headers={"Idempotency-Key": "stop-session-completed"},
+            json={
+                "session_id": str(session.id),
+                "operation_reason": "Completed session must not stop",
+            },
+        )
+
+        assert response.status_code == 422
+        assert db_session.query(OutboxEvent).count() == 0
+
+    def test_remote_stop_session_is_tenant_scoped(
+        self, admin_client: TestClient, db_session, sample_charge_point, sample_evse
+    ):
+        session = ChargingSession(
+            tenant_id=sample_charge_point.tenant_id,
+            evse_id=sample_evse.id,
+            charge_point_id=sample_charge_point.id,
+            transaction_id=12349,
+            id_tag="TEST_USER_005",
+            start_time=datetime.now(timezone.utc),
+            status="ongoing",
+        )
+        other_tenant = Tenant(name="Remote stop other tenant", status="active")
+        db_session.add_all([session, other_tenant])
+        db_session.commit()
+        admin_client.headers.update({"X-Tenant-Id": str(other_tenant.id)})
+
+        response = admin_client.post(
+            "/api/v1/ocpp/remote-stop-session",
+            headers={"Idempotency-Key": "stop-session-cross-tenant"},
+            json={
+                "session_id": str(session.id),
+                "operation_reason": "Cross tenant stop must fail",
+            },
+        )
+
+        assert response.status_code == 404
+        assert db_session.query(OutboxEvent).count() == 0
+
+    def test_legacy_remote_stop_transaction_route_is_removed(
+        self, admin_client: TestClient
+    ):
+        response = admin_client.post(
+            "/api/v1/ocpp/remote-stop-transaction",
+            headers={"Idempotency-Key": "legacy-stop-route"},
+            json={
+                "charge_point_id": "CP-LEGACY",
+                "transaction_id": 1,
+                "operation_reason": "Legacy route must be removed",
+            },
+        )
+
+        assert response.status_code == 404
     
     def test_change_configuration(self, admin_client: TestClient, sample_charge_point):
         """测试更改配置"""
@@ -121,16 +283,20 @@ class TestOCPPControlAPI:
         """测试重置充电桩"""
         payload = {
             "charge_point_id": sample_charge_point.ocpp_identity,
-            "type": "Hard"
+            "type": "Hard",
+            "operation_reason": "Acceptance test reset",
         }
         response = admin_client.post("/api/v1/ocpp/reset", json=payload)
         assert response.status_code in [200, 503]
     
-    def test_unlock_connector(self, admin_client: TestClient, sample_charge_point):
+    def test_unlock_connector(
+        self, admin_client: TestClient, sample_charge_point, sample_evse
+    ):
         """测试解锁连接器"""
         payload = {
             "charge_point_id": sample_charge_point.ocpp_identity,
-            "connector_id": 1
+            "connector_id": 1,
+            "operation_reason": "Acceptance test unlock",
         }
         response = admin_client.post("/api/v1/ocpp/unlock-connector", json=payload)
         assert response.status_code in [200, 503]
@@ -140,7 +306,10 @@ class TestOCPPControlAPI:
         [
             ("post", "/api/v1/ocpp/change-configuration", {"charge_point_id": "CP-1", "key": "k", "value": "v"}),
             ("post", "/api/v1/ocpp/get-configuration", {"charge_point_id": "CP-1"}),
-            ("post", "/api/v1/ocpp/unlock-connector", {"charge_point_id": "CP-1", "connector_id": 1}),
+            ("post", "/api/v1/ocpp/unlock-connector", {
+                "charge_point_id": "CP-1", "connector_id": 1,
+                "operation_reason": "Unauthenticated unlock test",
+            }),
             ("get", "/api/v1/ocpp/connected", None),
         ],
     )
@@ -175,7 +344,11 @@ class TestOCPPControlAPI:
         requests = [
             ("change-configuration", {"charge_point_id": sample_charge_point.ocpp_identity, "key": "k", "value": "v"}),
             ("get-configuration", {"charge_point_id": sample_charge_point.ocpp_identity}),
-            ("unlock-connector", {"charge_point_id": sample_charge_point.ocpp_identity, "connector_id": 1}),
+            ("unlock-connector", {
+                "charge_point_id": sample_charge_point.ocpp_identity,
+                "connector_id": 1,
+                "operation_reason": "Tenant scope unlock test",
+            }),
         ]
         for path, payload in requests:
             assert admin_client.post(f"/api/v1/ocpp/{path}", json=payload).status_code == 403
@@ -215,15 +388,18 @@ class TestOCPPControlAPI:
         assert response.status_code == 404
 
     def test_idempotent_replay_preserves_device_rejection(
-        self, admin_client, db_session, sample_charge_point, sample_evse
+        self, admin_client, db_session, sample_charge_point, sample_evse,
+        sample_evse_status,
     ):
         payload = {
             "charge_point_id": sample_charge_point.ocpp_identity,
-            "id_tag": "REJECTED",
             "connector_id": sample_evse.evse_id,
+            "operation_reason": "Acceptance test device rejection",
         }
         headers = {"Idempotency-Key": "start-device-rejected"}
-        with patch("app.api.v1.ocpp_control.check_charger_connection", return_value=True), patch(
+        with patch.dict(ocpp_control._remote_start_inflight, {}, clear=True), patch(
+            "app.api.v1.ocpp_control.check_charger_connection", return_value=True
+        ), patch(
             "app.api.v1.ocpp_control.message_handler.send_call",
             new=AsyncMock(return_value={"success": False, "status": "Rejected"}),
         ) as sender:
@@ -244,7 +420,11 @@ class TestOCPPControlAPI:
     def test_idempotent_replay_preserves_offline_failure(
         self, admin_client, db_session, sample_charge_point
     ):
-        payload = {"charge_point_id": sample_charge_point.ocpp_identity, "type": "Soft"}
+        payload = {
+            "charge_point_id": sample_charge_point.ocpp_identity,
+            "type": "Soft",
+            "operation_reason": "Acceptance test offline reset",
+        }
         headers = {"Idempotency-Key": "reset-offline"}
         with patch("app.api.v1.ocpp_control.check_charger_connection", return_value=False):
             first = admin_client.post("/api/v1/ocpp/reset", json=payload, headers=headers)
@@ -258,15 +438,18 @@ class TestOCPPControlAPI:
         assert event.status == "failed"
 
     def test_idempotent_replay_preserves_sender_exception(
-        self, admin_client, db_session, sample_charge_point, sample_evse
+        self, admin_client, db_session, sample_charge_point, sample_evse,
+        sample_evse_status,
     ):
         payload = {
             "charge_point_id": sample_charge_point.ocpp_identity,
-            "id_tag": "SEND-ERROR",
             "connector_id": sample_evse.evse_id,
+            "operation_reason": "Acceptance test transport failure",
         }
         headers = {"Idempotency-Key": "start-sender-error"}
-        with patch("app.api.v1.ocpp_control.check_charger_connection", return_value=True), patch(
+        with patch.dict(ocpp_control._remote_start_inflight, {}, clear=True), patch(
+            "app.api.v1.ocpp_control.check_charger_connection", return_value=True
+        ), patch(
             "app.api.v1.ocpp_control.message_handler.send_call",
             new=AsyncMock(side_effect=RuntimeError("transport failed")),
         ) as sender:

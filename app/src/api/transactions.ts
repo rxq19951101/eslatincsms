@@ -24,6 +24,13 @@ export interface ChargingRecord {
 export type ChargingRecordDetail = ChargingRecord & {
   meter_start?: number;
   meter_stop?: number | null;
+  invoice_number?: string | null;
+  total_amount?: string | null;
+  currency: string;
+  billing_status?: string | null;
+  connector_number?: number | null;
+  connector_label?: string | null;
+  charge_point_label?: string | null;
 };
 
 export async function getChargingRecords(params?: {

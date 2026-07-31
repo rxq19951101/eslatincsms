@@ -42,8 +42,8 @@ export interface SiteStatusCounts {
 
 export interface SiteConnector {
   id: string;
-  connector_id: number;
-  physical_reference: string;
+  connector_number: number;
+  physical_reference?: string | null;
   status: string;
   connector_type?: string | null;
   power_kw?: number | null;

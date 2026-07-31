@@ -42,9 +42,16 @@ const mockSite = {
     model: 'AC7',
     connectors: [{
       id: internalConnectorId,
-      connector_id: 1,
+      connector_number: 1,
       physical_reference: 'A01-1',
       status: 'Charging',
+      connector_type: 'Type2',
+      power_kw: 7,
+    }, {
+      id: '44444444-4444-4444-8444-444444444444',
+      connector_number: 2,
+      physical_reference: null,
+      status: 'Available',
       connector_type: 'Type2',
       power_kw: 7,
     }],
@@ -82,7 +89,8 @@ describe('StationDetailScreen public charger labels', () => {
     expect(screen.getByText('A01')).toBeTruthy();
     expect(screen.getByText('P2 / bay 42')).toBeTruthy();
     expect(screen.getByText('A01-1')).toBeTruthy();
-    expect(screen.getByText('Type 2 · 7 kW')).toBeTruthy();
+    expect(screen.getByText('Connector 2')).toBeTruthy();
+    expect(screen.getAllByText('Type 2 · 7 kW')).toHaveLength(2);
     expect(screen.getByText('Charging')).toBeTruthy();
     expect(screen.queryByText(internalChargerId)).toBeNull();
     expect(screen.queryByText(internalConnectorId)).toBeNull();

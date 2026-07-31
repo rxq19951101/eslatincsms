@@ -9,6 +9,7 @@ import { getAccessToken, getRefreshToken, saveTokens, clearTokens, isTokenExpiri
 import type { ApiError, AuthTokens } from '../types';
 import { Platform } from 'react-native';
 import { navigateToLogin } from '../navigation/navigationRef';
+import { getT } from '../i18n';
 
 // 创建Axios实例
 const apiClient: AxiosInstance = axios.create({
@@ -26,6 +27,42 @@ let failedQueue: Array<{
   resolve: (value: any) => void;
   reject: (reason: any) => void;
 }> = [];
+let sessionInvalidationHandler: (() => void) | null = null;
+let sessionInvalidationPromise: Promise<void> | null = null;
+let isSessionInvalidated = false;
+let hasResetNavigation = false;
+
+export const configureSessionInvalidationHandler = (handler: () => void) => {
+  sessionInvalidationHandler = handler;
+};
+
+const markSessionActive = () => {
+  isSessionInvalidated = false;
+  hasResetNavigation = false;
+};
+
+const invalidateLocalSession = async (): Promise<void> => {
+  if (isSessionInvalidated) {
+    await sessionInvalidationPromise;
+    return;
+  }
+
+  isSessionInvalidated = true;
+  sessionInvalidationPromise = (async () => {
+    await clearTokens();
+    sessionInvalidationHandler?.();
+    if (!hasResetNavigation) {
+      hasResetNavigation = true;
+      navigateToLogin();
+    }
+  })();
+
+  try {
+    await sessionInvalidationPromise;
+  } finally {
+    sessionInvalidationPromise = null;
+  }
+};
 
 /**
  * 处理队列中的请求
@@ -44,12 +81,10 @@ const processQueue = (error: Error | null, token: string | null = null) => {
 /**
  * 刷新访问Token
  */
-const refreshAccessToken = async (): Promise<string | null> => {
+export const refreshAccessToken = async (): Promise<string | null> => {
   try {
     const refreshToken = await getRefreshToken();
     if (!refreshToken) {
-      // 没有 refresh token：不应该在这里抛错“覆盖”原始 401
-      // 交给上层（响应拦截器）决定如何处理（通常是清理本地 token 并让调用方走重新登录）
       return null;
     }
 
@@ -66,10 +101,10 @@ const refreshAccessToken = async (): Promise<string | null> => {
       token_type: 'bearer',
     });
 
+    markSessionActive();
     return access_token;
   } catch (error) {
     console.error('Token refresh failed:', error);
-    await clearTokens();
     return null;
   }
 };
@@ -79,6 +114,7 @@ const shouldSkipTokenRefresh = (url?: string): boolean => {
   const skipUrls = [
     API_ENDPOINTS.AUTH.LOGIN_EMAIL,
     API_ENDPOINTS.AUTH.REGISTER_EMAIL,
+    API_ENDPOINTS.AUTH.SOCIAL_LOGIN,
     API_ENDPOINTS.AUTH.RESET_PASSWORD,
     API_ENDPOINTS.AUTH.CONFIRM_RESET_PASSWORD,
     API_ENDPOINTS.AUTH.VERIFY_EMAIL,
@@ -87,6 +123,15 @@ const shouldSkipTokenRefresh = (url?: string): boolean => {
     API_ENDPOINTS.AUTH.LOGOUT,
   ];
   return skipUrls.some((u) => url.includes(u));
+};
+
+const shouldMarkSessionActive = (url?: string): boolean => {
+  if (!url) return false;
+  return [
+    API_ENDPOINTS.AUTH.LOGIN_EMAIL,
+    API_ENDPOINTS.AUTH.SOCIAL_LOGIN,
+    API_ENDPOINTS.AUTH.VERIFY_EMAIL,
+  ].some((endpoint) => url.includes(endpoint));
 };
 
 /**
@@ -99,6 +144,7 @@ apiClient.interceptors.request.use(
     const skipAuthUrls = [
       API_ENDPOINTS.AUTH.LOGIN_EMAIL,
       API_ENDPOINTS.AUTH.REGISTER_EMAIL,
+      API_ENDPOINTS.AUTH.SOCIAL_LOGIN,
       API_ENDPOINTS.AUTH.RESET_PASSWORD,
       API_ENDPOINTS.AUTH.CONFIRM_RESET_PASSWORD,
       API_ENDPOINTS.AUTH.VERIFY_EMAIL,
@@ -124,13 +170,19 @@ apiClient.interceptors.request.use(
           isRefreshing = true;
           try {
             const newToken = await refreshAccessToken();
-            config.headers.Authorization = `Bearer ${newToken}`;
-            isRefreshing = false;
-            processQueue(null, newToken);
+            if (newToken) {
+              config.headers.Authorization = `Bearer ${newToken}`;
+              processQueue(null, newToken);
+            } else {
+              const refreshError = new Error('Unable to refresh access token');
+              processQueue(refreshError, null);
+              await invalidateLocalSession();
+            }
           } catch (error) {
-            isRefreshing = false;
             processQueue(error as Error, null);
-            await clearTokens();
+            await invalidateLocalSession();
+          } finally {
+            isRefreshing = false;
           }
         } else {
           config.headers.Authorization = `Bearer ${accessToken}`;
@@ -153,6 +205,9 @@ apiClient.interceptors.request.use(
  */
 apiClient.interceptors.response.use(
   (response) => {
+    if (shouldMarkSessionActive(response.config?.url)) {
+      markSessionActive();
+    }
     return response;
   },
   async (error: AxiosError<ApiError>) => {
@@ -186,23 +241,19 @@ apiClient.interceptors.response.use(
       try {
         const newToken = await refreshAccessToken();
         if (!newToken) {
-          // 刷新失败 or 没有 refresh token：清理本地 token，并把原始 401 返回给调用方
-          isRefreshing = false;
-          await clearTokens();
-          navigateToLogin();
+          processQueue(error, null);
+          await invalidateLocalSession();
           return Promise.reject(error);
         }
         originalRequest.headers.Authorization = `Bearer ${newToken}`;
         processQueue(null, newToken);
-        isRefreshing = false;
         return apiClient(originalRequest);
       } catch (refreshError) {
         processQueue(refreshError as Error, null);
-        isRefreshing = false;
-        // Token刷新失败，清除Token并跳转登录
-        await clearTokens();
-        navigateToLogin();
+        await invalidateLocalSession();
         return Promise.reject(refreshError);
+      } finally {
+        isRefreshing = false;
       }
     }
 
@@ -276,7 +327,7 @@ export function parseApiErrorPayload(data: unknown, status: number): ApiError {
   }
 
   return {
-    message: message || 'An error occurred',
+    message: message || getT().common.requestFailed,
     code: typeof envelope.code === 'string'
       ? envelope.code
       : typeof body.code === 'string'
@@ -300,7 +351,7 @@ export const handleApiError = (error: any): ApiError => {
     } else if (axiosError.request) {
       // 请求已发出但没有收到响应
       return {
-        message: 'Network error. Please check your connection.',
+        message: getT().common.networkError,
         code: 'NETWORK_ERROR',
       };
     }
@@ -308,7 +359,7 @@ export const handleApiError = (error: any): ApiError => {
   
   // 其他错误
   return {
-    message: error?.message || 'An unexpected error occurred',
+    message: error?.message || getT().common.unexpectedError,
     code: 'UNKNOWN_ERROR',
   };
 };

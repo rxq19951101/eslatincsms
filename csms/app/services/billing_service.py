@@ -289,6 +289,7 @@ class BillingService:
         wallet_tx = AppWalletTransaction(
             transaction_number=transaction_number,
             app_user_id=app_user.id,
+            invoice_id=invoice.id,
             operator_tenant_id=tenant_id,
             charge_point_id=session.charge_point_id,
             type="charge",

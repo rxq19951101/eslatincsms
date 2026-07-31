@@ -6,6 +6,7 @@ import { createAsyncThunk, createSlice, PayloadAction } from '@reduxjs/toolkit';
 import type { WalletBalance, WalletTransaction } from '../../types';
 import { getWalletBalance, getWalletTransactions, topUpWallet } from '../../api/wallet';
 import { handleApiError } from '../../api/client';
+import { getT } from '../../i18n';
 
 export interface WalletState {
   balance: WalletBalance | null;
@@ -33,7 +34,7 @@ export const fetchWalletBalance = createAsyncThunk('wallet/fetchBalance', async 
   try {
     return await getWalletBalance();
   } catch (e: any) {
-    return rejectWithValue(extractErrorMessage(e, 'Failed to fetch wallet balance'));
+    return rejectWithValue(extractErrorMessage(e, getT().wallet.loadFailed));
   }
 });
 
@@ -43,7 +44,7 @@ export const fetchWalletTransactions = createAsyncThunk(
     try {
       return await getWalletTransactions(params);
     } catch (e: any) {
-      return rejectWithValue(extractErrorMessage(e, 'Failed to fetch wallet transactions'));
+      return rejectWithValue(extractErrorMessage(e, getT().wallet.loadFailed));
     }
   }
 );
@@ -52,7 +53,7 @@ export const topUp = createAsyncThunk('wallet/topUp', async (amount: number, { r
   try {
     return await topUpWallet(amount);
   } catch (e: any) {
-    return rejectWithValue(extractErrorMessage(e, 'Failed to top up'));
+    return rejectWithValue(extractErrorMessage(e, getT().payment.createFailed));
   }
 });
 

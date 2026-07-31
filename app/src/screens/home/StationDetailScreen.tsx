@@ -14,7 +14,6 @@ import {
   StatusBar,
   RefreshControl,
   Platform,
-  Linking,
   Alert,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -42,6 +41,10 @@ import {
   getSiteAvailability,
   hasChargingWithoutAvailability,
 } from '../../utils/siteStatus';
+import {
+  hasValidNavigationCoordinates,
+  showExternalNavigationOptions,
+} from '../../utils/externalNavigation';
 
 type StationDetailRouteProp = RouteProp<RootStackParamList, 'StationDetail'>;
 type StationDetailNavProp = StackNavigationProp<RootStackParamList, 'StationDetail'>;
@@ -95,30 +98,27 @@ const StationDetailScreen = () => {
   const statusLabel = siteAvailability ? t.station[siteAvailability] : '';
   const statusBreakdown = getSiteStatusBreakdown(site?.status_counts);
 
-  const handleNavigate = async () => {
-    if (!site?.latitude || !site?.longitude) {
+  const handleNavigate = () => {
+    if (!site || !hasValidNavigationCoordinates(site.latitude, site.longitude)) {
       Alert.alert(t.station.navUnavailable, t.station.navNoCoords);
       return;
     }
-    const lat = site.latitude;
-    const lng = site.longitude;
-    const label = encodeURIComponent(site.name);
 
-    // iOS 优先 Apple Maps；Android 用 Google Maps
-    const url =
-      Platform.OS === 'ios'
-        ? `http://maps.apple.com/?daddr=${lat},${lng}&q=${label}`
-        : `https://www.google.com/maps/dir/?api=1&destination=${lat},${lng}&destination_place_id=${label}`;
-
-    try {
-      const supported = await Linking.canOpenURL(url);
-      if (!supported) throw new Error('cannot_open_url');
-      await Linking.openURL(url);
-    } catch {
-      // fallback：用通用的 Google Maps url
-      const fallback = `https://www.google.com/maps/search/?api=1&query=${lat},${lng}`;
-      await Linking.openURL(fallback);
-    }
+    showExternalNavigationOptions({
+      latitude: Number(site.latitude),
+      longitude: Number(site.longitude),
+      label: site.name,
+      copy: {
+        title: t.station.chooseNavigationApp,
+        message: t.station.chooseNavigationAppHint,
+        googleMaps: t.station.googleMaps,
+        waze: t.station.waze,
+        appleMaps: t.station.appleMaps,
+        cancel: t.common.cancel,
+        openFailedTitle: t.station.navUnavailable,
+        openFailedMessage: t.station.navOpenFailed,
+      },
+    });
   };
 
   const handleStartCharging = () => {
@@ -307,6 +307,8 @@ const StationDetailScreen = () => {
                         />
                       </View>
                       {chargePoint.connectors.map((connector) => {
+                        const connectorLabel = connector.physical_reference?.trim()
+                          || t.station.connector.replace('{number}', String(connector.connector_number));
                         const standardLabel = connectorStandardLabel(connector.connector_type || '')
                           || t.station.connectorTypeUnknown;
                         const capability = [
@@ -318,7 +320,7 @@ const StationDetailScreen = () => {
                         return (
                           <View
                             key={connector.id}
-                            testID={`app-public-connector-${connector.physical_reference}`}
+                            testID={`app-public-connector-${connector.id}`}
                             style={styles.connectorRow}
                           >
                             <View style={styles.connectorIdentity}>
@@ -326,7 +328,7 @@ const StationDetailScreen = () => {
                                 <Icon name="flash-outline" library="Ionicons" size={18} color={COLORS.PRIMARY_DARK} />
                               </View>
                               <View style={styles.connectorLeft}>
-                                <Text style={styles.connectorName}>{connector.physical_reference}</Text>
+                                <Text style={styles.connectorName}>{connectorLabel}</Text>
                                 <Text style={styles.connectorMeta}>{capability}</Text>
                               </View>
                             </View>

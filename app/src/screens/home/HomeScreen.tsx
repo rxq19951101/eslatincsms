@@ -30,7 +30,7 @@ import TextField from '../../components/ui/TextField';
 import { useI18n } from '../../i18n';
 import { SkeletonCard } from '../../components/ui/Skeleton';
 import { formatDistance } from '../../utils/formatDistance';
-import BrandLogo from '../../components/brand/BrandLogo';
+import RootTabHeader from '../../components/ui/RootTabHeader';
 import { connectorStandardLabel } from '../../utils/connectorDisplay';
 import {
   getSiteStatusBreakdown,
@@ -243,37 +243,43 @@ const HomeScreen = () => {
     <SafeAreaView style={styles.container} edges={['top']}>
       <StatusBar barStyle="dark-content" />
       
-      {/* Header */}
-      <View style={styles.header}>
-        <BrandLogo compact style={styles.headerLogo} accessibilityLabel="EsLatin" />
-        <TouchableOpacity
-          style={styles.refreshButton}
-          onPress={handleRefresh}
-          accessibilityRole="button"
-          accessibilityLabel={t.common.refresh}
-          disabled={refreshing}
-        >
-          {refreshing ? (
-            <Text style={styles.refreshPending}>···</Text>
-          ) : (
-            <Icon name="refresh" library="Ionicons" size={20} color={COLORS.TEXT_PRIMARY} />
-          )}
-        </TouchableOpacity>
-      </View>
-
-      <View style={styles.hero}>
-        <Text style={styles.headerTitle}>{t.home.title}</Text>
-        <Text style={styles.headerSubtitle}>{t.home.subtitle}</Text>
-      </View>
+      <RootTabHeader
+        title={t.home.title}
+        subtitle={t.home.subtitle}
+        showBrandMark
+        testID="app-home-header"
+        rightAction={
+          <TouchableOpacity
+            style={styles.refreshButton}
+            onPress={handleRefresh}
+            accessibilityRole="button"
+            accessibilityLabel={t.common.refresh}
+            disabled={refreshing}
+          >
+            {refreshing ? (
+              <Text style={styles.refreshPending}>···</Text>
+            ) : (
+              <Icon name="refresh" library="Ionicons" size={20} color={COLORS.TEXT_PRIMARY} />
+            )}
+          </TouchableOpacity>
+        }
+      />
 
       {/* Search Bar */}
-      <View style={styles.searchContainer}>
+      <View style={styles.searchContainer} testID="home-search-container">
         <TextField
+          testID="home-search-input"
           containerStyle={styles.searchField}
           inputStyle={styles.searchInput}
           placeholder={t.home.search}
           value={searchQuery}
           onChangeText={setSearchQuery}
+          autoComplete="off"
+          autoCorrect={false}
+          clearButtonMode="while-editing"
+          importantForAutofill="no"
+          returnKeyType="search"
+          textContentType="none"
         />
       </View>
 
@@ -383,43 +389,6 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: COLORS.BACKGROUND,
   },
-  header: {
-    width: '100%',
-    maxWidth: 960,
-    alignSelf: 'center',
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: 20,
-    paddingTop: 10,
-    paddingBottom: 4,
-  },
-  headerLogo: {
-    width: 112,
-    height: 108,
-  },
-  hero: {
-    width: '100%',
-    maxWidth: 960,
-    alignSelf: 'center',
-    paddingHorizontal: 20,
-    marginTop: -4,
-    marginBottom: 18,
-  },
-  headerTitle: {
-    fontSize: 30,
-    lineHeight: 36,
-    fontWeight: '800',
-    color: COLORS.TEXT_PRIMARY,
-    letterSpacing: -0.6,
-  },
-  headerSubtitle: {
-    marginTop: 6,
-    maxWidth: 420,
-    fontSize: 15,
-    lineHeight: 22,
-    color: COLORS.TEXT_SECONDARY,
-  },
   refreshButton: {
     width: 42,
     height: 42,
@@ -443,9 +412,12 @@ const styles = StyleSheet.create({
     paddingHorizontal: IOS_STYLES.SPACING.MD,
     marginBottom: IOS_STYLES.SPACING.MD,
   },
-  searchField: { flex: 1 },
+  searchField: {
+    width: '100%',
+  },
   searchInput: {
-    flex: 1,
+    width: '100%',
+    minHeight: 52,
     fontSize: 16,
     color: COLORS.TEXT_PRIMARY,
   },

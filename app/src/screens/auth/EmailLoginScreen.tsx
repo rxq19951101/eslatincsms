@@ -137,7 +137,7 @@ const EmailLoginScreen = () => {
               testID="app-login-email"
               accessibilityLabel={t.auth.email}
               label={t.auth.email}
-              placeholder="your.email@example.com"
+              placeholder={t.auth.emailPlaceholder}
               value={email}
               onChangeText={setEmail}
               keyboardType="email-address"
@@ -165,7 +165,7 @@ const EmailLoginScreen = () => {
               />
               <TouchableOpacity
                 testID="app-login-password-toggle"
-                accessibilityLabel={showPassword ? 'Hide password' : 'Show password'}
+                accessibilityLabel={showPassword ? t.auth.hidePassword : t.auth.showPassword}
                 accessibilityRole="button"
                 style={styles.eyeButton}
                 onPress={() => setShowPassword(!showPassword)}

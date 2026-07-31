@@ -283,19 +283,72 @@ export interface CreateChargePointInSiteRequest {
 }
 
 // 交易相关类型
-export interface Transaction {
+export interface ActiveSession {
   id: string;
-  transaction_id: string | number;
-  charge_point_id: string; // Internal ChargePoint UUID used for database relations.
-  ocpp_identity?: string; // External identity, when included by the API, for display only.
-  id_tag: string;
-  user_id?: string;
-  start_time: string;
-  end_time?: string;
-  energy_kwh?: number;
-  duration_minutes?: number;
+  user_reference?: string | null;
+  start_time?: string | null;
+  energy_kwh?: number | null;
+  power_kw?: number | null;
+  duration_minutes?: number | null;
+  estimated_cost?: string | null;
+  currency?: string | null;
+  last_meter_at?: string | null;
   status: string;
+  site?: {
+    id?: string;
+    site_code?: string | null;
+    name?: string | null;
+    address?: string | null;
+  } | null;
+  charger?: {
+    id: string;
+    display_code?: string | null;
+    display_name?: string | null;
+  } | null;
+  connector?: {
+    id: string;
+    connector_number: number;
+    physical_reference?: string | null;
+  } | null;
 }
+
+export interface ChargingRecord {
+  id: string;
+  record_number: string | null;
+  invoice_number: string | null;
+  ocpp_transaction_id: string | number | null;
+  site: {
+    site_code: string | null;
+    name: string | null;
+    address: string | null;
+  } | null;
+  charger: {
+    display_code: string | null;
+    display_name: string | null;
+    ocpp_identity: string | null;
+  } | null;
+  connector: {
+    evse_id: number | null;
+    physical_reference: string | null;
+    connector_type: string | null;
+    max_power_kw: string | null;
+  } | null;
+  user_reference: string | null;
+  start_time: string | null;
+  end_time: string | null;
+  energy_kwh: string | null;
+  duration_minutes: string | null;
+  amount: string | null;
+  currency: string | null;
+  status: string;
+  payment_status: string | null;
+  anomaly_codes: TransactionAnomalyCode[];
+}
+
+export type TransactionAnomalyCode =
+  | 'invalid_meter_delta'
+  | 'missing_end_time'
+  | 'power_exceeds_rating';
 
 // 告警相关类型
 export interface Alert {

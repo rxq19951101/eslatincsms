@@ -4,6 +4,7 @@
 
 import { createSlice, createAsyncThunk, PayloadAction } from '@reduxjs/toolkit';
 import { getChargers, getChargerById, getNearbyChargers, Charger, ChargerDetail, ChargersListParams } from '../../api/chargers';
+import { getT } from '../../i18n';
 
 export interface ChargerState {
   chargers: Charger[];
@@ -33,7 +34,7 @@ export const fetchChargers = createAsyncThunk(
       const data = await getChargers(params);
       return data;
     } catch (error: any) {
-      return rejectWithValue(error.message || 'Failed to fetch chargers');
+      return rejectWithValue(error.message || getT().home.loadFailed);
     }
   }
 );
@@ -51,7 +52,7 @@ export const fetchNearbyChargers = createAsyncThunk(
       const data = await getNearbyChargers(latitude, longitude, radius);
       return data;
     } catch (error: any) {
-      return rejectWithValue(error.message || 'Failed to fetch nearby chargers');
+      return rejectWithValue(error.message || getT().home.loadFailed);
     }
   }
 );
@@ -66,7 +67,7 @@ export const fetchChargerById = createAsyncThunk(
       const data = await getChargerById(id);
       return data;
     } catch (error: any) {
-      return rejectWithValue(error.message || 'Failed to fetch charger details');
+      return rejectWithValue(error.message || getT().station.loadFailed);
     }
   }
 );

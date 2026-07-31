@@ -9,6 +9,8 @@ import chargingReducer from './slices/chargingSlice';
 import walletReducer from './slices/walletSlice';
 import transactionsReducer from './slices/transactionsSlice';
 import siteReducer from './slices/siteSlice';
+import { invalidateLocalSession } from './slices/authSlice';
+import { configureSessionInvalidationHandler } from '../api/client';
 
 export const store = configureStore({
   reducer: {
@@ -26,6 +28,10 @@ export const store = configureStore({
         ignoredActions: ['navigation/NAVIGATE'],
       },
     }),
+});
+
+configureSessionInvalidationHandler(() => {
+  store.dispatch(invalidateLocalSession());
 });
 
 export type RootState = ReturnType<typeof store.getState>;

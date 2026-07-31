@@ -5,7 +5,8 @@
 import { createSlice, createAsyncThunk, PayloadAction } from '@reduxjs/toolkit';
 import type { User, ApiError } from '../../types';
 import * as authApi from '../../api/auth';
-import { clearTokens, getUserInfo, isAuthenticated } from '../../utils/tokenManager';
+import { refreshAccessToken } from '../../api/client';
+import { clearTokens, getAccessToken, getUserInfo, isTokenExpired } from '../../utils/tokenManager';
 
 interface AuthState {
   user: User | null;
@@ -30,15 +31,29 @@ export const initializeAuth = createAsyncThunk(
   'auth/initialize',
   async (_, { rejectWithValue }) => {
     try {
-      const authenticated = await isAuthenticated();
-      if (authenticated) {
-        const user = await getUserInfo();
-        if (user) {
-          return { user, isAuthenticated: true };
+      const accessToken = await getAccessToken();
+      if (!accessToken) {
+        await clearTokens();
+        return { user: null, isAuthenticated: false };
+      }
+
+      if (isTokenExpired(accessToken)) {
+        const refreshedToken = await refreshAccessToken();
+        if (!refreshedToken) {
+          await clearTokens();
+          return { user: null, isAuthenticated: false };
         }
       }
+
+      const user = await getUserInfo();
+      if (user) {
+        return { user, isAuthenticated: true };
+      }
+
+      await clearTokens();
       return { user: null, isAuthenticated: false };
     } catch (error) {
+      await clearTokens();
       return rejectWithValue(error);
     }
   }
@@ -148,6 +163,13 @@ const authSlice = createSlice({
       state.user = action.payload;
       state.isAuthenticated = true;
     },
+    invalidateLocalSession: (state) => {
+      state.user = null;
+      state.isAuthenticated = false;
+      state.isLoading = false;
+      state.error = null;
+      state.isInitialized = true;
+    },
   },
   extraReducers: (builder) => {
     // 初始化认证状态
@@ -162,6 +184,8 @@ const authSlice = createSlice({
         state.isLoading = false;
       })
       .addCase(initializeAuth.rejected, (state) => {
+        state.user = null;
+        state.isAuthenticated = false;
         state.isInitialized = true;
         state.isLoading = false;
       });
@@ -258,5 +282,5 @@ const authSlice = createSlice({
   },
 });
 
-export const { clearError, setUser } = authSlice.actions;
+export const { clearError, setUser, invalidateLocalSession } = authSlice.actions;
 export default authSlice.reducer;

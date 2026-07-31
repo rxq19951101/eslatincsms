@@ -9,6 +9,7 @@
 import React from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, StyleProp, ViewStyle } from 'react-native';
 import { palette, spacing, typography } from '../../theme';
+import { useI18n } from '../../i18n';
 import Icon from './Icon';
 
 export interface ScreenHeaderProps {
@@ -23,6 +24,7 @@ export interface ScreenHeaderProps {
 }
 
 const ScreenHeader: React.FC<ScreenHeaderProps> = ({ title, onBack, left, right, style, testID, backTestID }) => {
+  const { t } = useI18n();
   return (
     <View testID={testID} accessibilityLabel={title} style={[styles.header, style]}>
       <View style={styles.side}>
@@ -30,7 +32,7 @@ const ScreenHeader: React.FC<ScreenHeaderProps> = ({ title, onBack, left, right,
           (onBack && (
             <TouchableOpacity
               testID={backTestID}
-              accessibilityLabel="Back"
+              accessibilityLabel={t.common.back}
               accessibilityRole="button"
               style={styles.backButton}
               onPress={onBack}

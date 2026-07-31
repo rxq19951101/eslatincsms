@@ -9,6 +9,10 @@ import {
   StyleSheet,
   StatusBar,
   Alert,
+  Keyboard,
+  KeyboardAvoidingView,
+  Platform,
+  TouchableWithoutFeedback,
 } from 'react-native';
 import { useNavigation, useRoute, RouteProp } from '@react-navigation/native';
 import type { StackNavigationProp } from '@react-navigation/stack';
@@ -50,9 +54,10 @@ const EmailVerificationScreen = () => {
   }, [countdown]);
 
   const handleVerify = async () => {
+    Keyboard.dismiss();
     const trimmed = code.trim();
-    if (trimmed.length < 4) {
-      Alert.alert(t.common.error, t.auth.codeRequired);
+    if (!/^\d{6}$/.test(trimmed)) {
+      Alert.alert(t.common.error, t.auth.codeInvalid);
       return;
     }
     setIsVerifying(true);
@@ -90,50 +95,77 @@ const EmailVerificationScreen = () => {
     navigation.navigate('EmailLogin');
   };
 
+  const content = (
+    <KeyboardAvoidingView
+      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      style={styles.content}
+    >
+      <View style={styles.textContainer}>
+        <Text style={styles.title}>{t.auth.verifyTitle}</Text>
+        <Text style={styles.subtitle}>{t.auth.verifySentTo}</Text>
+        <Text style={styles.email}>{email}</Text>
+        <Text style={styles.instruction}>{t.auth.verifyBody}</Text>
+
+        <TextField
+          testID="email-verification-code"
+          inputStyle={styles.codeInput}
+          value={code}
+          onChangeText={(value) => setCode(value.replace(/\D/g, '').slice(0, 6))}
+          placeholder={t.auth.enterCode}
+          keyboardType="number-pad"
+          inputMode="numeric"
+          maxLength={6}
+          autoFocus={Platform.OS !== 'web'}
+          textContentType="oneTimeCode"
+          autoComplete="one-time-code"
+          returnKeyType="done"
+          onSubmitEditing={handleVerify}
+        />
+      </View>
+
+      <View style={styles.buttonsContainer}>
+        <Button
+          testID="email-verification-submit"
+          title={t.auth.verifyButton}
+          onPress={handleVerify}
+          disabled={isVerifying || code.length !== 6}
+          loading={isVerifying}
+          size="large"
+        />
+
+        <Button
+          title={
+            countdown > 0
+              ? t.auth.resendCountdown.replace('{seconds}', String(countdown))
+              : t.auth.resendEmail
+          }
+          onPress={handleResendEmail}
+          disabled={countdown > 0 || isResending}
+          loading={isResending}
+          variant="outline"
+        />
+
+        <Button title={t.auth.changeEmail} variant="text" onPress={handleChangeEmail} />
+        <Button title={t.auth.backToSignIn} variant="text" onPress={handleBackToLogin} />
+      </View>
+    </KeyboardAvoidingView>
+  );
+
   return (
     <Screen edges={['top', 'bottom']}>
       <StatusBar barStyle="dark-content" />
 
-      <View style={styles.content}>
-        <View style={styles.textContainer}>
-          <Text style={styles.title}>{t.auth.verifyTitle}</Text>
-          <Text style={styles.subtitle}>{t.auth.verifySentTo}</Text>
-          <Text style={styles.email}>{email}</Text>
-          <Text style={styles.instruction}>{t.auth.verifyBody}</Text>
-
-          <TextField
-            inputStyle={styles.codeInput}
-            value={code}
-            onChangeText={setCode}
-            placeholder={t.auth.enterCode}
-            keyboardType="number-pad"
-            maxLength={8}
-            autoFocus
-            textContentType="oneTimeCode"
-          />
-        </View>
-
-        <View style={styles.buttonsContainer}>
-          <Button
-            title={t.auth.verifyButton}
-            onPress={handleVerify}
-            disabled={isVerifying}
-            loading={isVerifying}
-            size="large"
-          />
-
-          <Button
-            title={countdown > 0 ? `${t.auth.resendEmail} (${countdown}s)` : t.auth.resendEmail}
-            onPress={handleResendEmail}
-            disabled={countdown > 0 || isResending}
-            loading={isResending}
-            variant="outline"
-          />
-
-          <Button title={t.auth.changeEmail} variant="text" onPress={handleChangeEmail} />
-          <Button title={t.auth.backToSignIn} variant="text" onPress={handleBackToLogin} />
-        </View>
-      </View>
+      {Platform.OS === 'web' ? (
+        content
+      ) : (
+        <TouchableWithoutFeedback
+          testID="email-verification-dismiss-area"
+          onPress={Keyboard.dismiss}
+          accessible={false}
+        >
+          {content}
+        </TouchableWithoutFeedback>
+      )}
     </Screen>
   );
 };

@@ -68,10 +68,10 @@ const EmailRegisterScreen = () => {
   };
 
   const getStrengthText = () => {
-    if (passwordStrength <= 1) return 'Weak';
-    if (passwordStrength <= 2) return 'Fair';
-    if (passwordStrength <= 3) return 'Good';
-    return 'Strong';
+    if (passwordStrength <= 1) return t.auth.strengthWeak;
+    if (passwordStrength <= 2) return t.auth.strengthFair;
+    if (passwordStrength <= 3) return t.auth.strengthGood;
+    return t.auth.strengthStrong;
   };
 
   const handleRegister = async () => {
@@ -159,9 +159,7 @@ const EmailRegisterScreen = () => {
         {/* 标题 */}
         <View style={styles.header}>
           <Text style={styles.title}>{t.auth.signUp}</Text>
-          <Text style={styles.subtitle}>
-            Sign up to get started with EsLatin
-          </Text>
+          <Text style={styles.subtitle}>{t.auth.signUpSubtitle}</Text>
         </View>
 
         {/* 表单 */}
@@ -170,7 +168,7 @@ const EmailRegisterScreen = () => {
           <View style={styles.inputContainer}>
             <TextField
               label={t.auth.fullName}
-              placeholder="John Doe"
+              placeholder={t.auth.fullNamePlaceholder}
               value={fullName}
               onChangeText={setFullName}
               autoCapitalize="words"
@@ -182,7 +180,7 @@ const EmailRegisterScreen = () => {
           <View style={styles.inputContainer}>
             <TextField
               label={t.auth.email}
-              placeholder="your.email@example.com"
+              placeholder={t.auth.emailPlaceholder}
               value={email}
               onChangeText={setEmail}
               keyboardType="email-address"
@@ -198,7 +196,7 @@ const EmailRegisterScreen = () => {
             <View style={styles.passwordContainer}>
               <TextField
                 inputStyle={styles.passwordInput}
-                placeholder="Enter your password"
+                placeholder={t.auth.enterPassword}
                 value={password}
                 onChangeText={setPassword}
                 secureTextEntry={!showPassword}
@@ -207,6 +205,8 @@ const EmailRegisterScreen = () => {
                 editable={!isLoading}
               />
               <TouchableOpacity
+                accessibilityLabel={showPassword ? t.auth.hidePassword : t.auth.showPassword}
+                accessibilityRole="button"
                 style={styles.eyeButton}
                 onPress={() => setShowPassword(!showPassword)}
               >
@@ -241,7 +241,7 @@ const EmailRegisterScreen = () => {
             <View style={styles.passwordContainer}>
               <TextField
                 inputStyle={styles.passwordInput}
-                placeholder="Re-enter your password"
+                placeholder={t.auth.confirmPassword}
                 value={confirmPassword}
                 onChangeText={setConfirmPassword}
                 secureTextEntry={!showConfirmPassword}
@@ -250,6 +250,8 @@ const EmailRegisterScreen = () => {
                 editable={!isLoading}
               />
               <TouchableOpacity
+                accessibilityLabel={showConfirmPassword ? t.auth.hidePassword : t.auth.showPassword}
+                accessibilityRole="button"
                 style={styles.eyeButton}
                 onPress={() => setShowConfirmPassword(!showConfirmPassword)}
               >
@@ -268,7 +270,7 @@ const EmailRegisterScreen = () => {
               {agreeToTerms && <Icon name="checkmark" size={14} color={COLORS.IOS_WHITE} />}
             </View>
             <Text style={styles.termsText}>
-              I agree to the{' '}
+              {t.auth.termsPrefix}{' '}
               <Text style={styles.termsLink}>{t.auth.termsLink}</Text>
             </Text>
           </TouchableOpacity>
@@ -284,7 +286,7 @@ const EmailRegisterScreen = () => {
 
           {/* 已有账号链接 */}
           <View style={styles.signinContainer}>
-            <Text style={styles.signinText}>Already have an account? </Text>
+            <Text style={styles.signinText}>{t.auth.hasAccount} </Text>
             <TouchableOpacity onPress={handleSignInNavigation} disabled={isLoading}>
               <Text style={styles.signinLink}>{t.auth.signIn}</Text>
             </TouchableOpacity>

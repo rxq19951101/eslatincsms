@@ -17,6 +17,7 @@ import type {
   CardData,
   MercadoPagoCardTokenResult,
 } from '../types';
+import { getT } from '../i18n';
 
 export type { UnpaidCharge } from '../types';
 
@@ -82,15 +83,15 @@ export async function createWompiPayment(req: CreatePaymentRequest): Promise<Cre
 export const PAYMENT_PROVIDER_OPTIONS: PaymentProviderOption[] = [
   {
     code: 'mercadopago',
-    name: '信用卡支付',
-    description: '由安全支付服务处理',
+    get name() { return getT().payment.cardPayment; },
+    get description() { return getT().payment.secureProviderDescription; },
     enabled: true,
     supportedTypes: ['top_up', 'charging'],
   },
   {
     code: 'wompi',
     name: 'Wompi',
-    description: '网页收银台支付',
+    get description() { return getT().payment.webCheckoutDescription; },
     enabled: true,
     supportedTypes: ['top_up', 'charging'],
   },
@@ -105,9 +106,7 @@ export const PAYMENT_PROVIDER_OPTIONS: PaymentProviderOption[] = [
  */
 export async function getCardToken(cardData: CardData): Promise<MercadoPagoCardTokenResult> {
   if (!MERCADOPAGO_PUBLIC_KEY?.trim()) {
-    throw new Error(
-      'Mercado Pago public_key 为空：请在 app/.env 设置 EXPO_PUBLIC_MERCADOPAGO_PUBLIC_KEY，或在 app.json 的 expo.extra.mercadopagoPublicKey 配置'
-    );
+    throw new Error(getT().payment.providerConfigMissing);
   }
   const response = await fetch(
     `https://api.mercadopago.com/v1/card_tokens?public_key=${encodeURIComponent(MERCADOPAGO_PUBLIC_KEY.trim())}`,
@@ -133,14 +132,14 @@ export async function getCardToken(cardData: CardData): Promise<MercadoPagoCardT
   if (!response.ok) {
     const error = await response.json().catch(() => ({}));
     throw new Error(
-      typeof error.message === 'string' ? error.message : 'Token creation failed'
+      typeof error.message === 'string' ? error.message : getT().payment.tokenCreateFailed
     );
   }
   
   const data = (await response.json()) as Record<string, unknown>;
   const tokenId = data.id;
   if (typeof tokenId !== 'string' || !tokenId) {
-    throw new Error('Token creation failed: No token ID returned');
+    throw new Error(getT().payment.tokenMissing);
   }
 
   const payment_method_id = extractPaymentMethodIdFromTokenPayload(data, panDigits);
@@ -213,7 +212,7 @@ export async function createMercadoPagoPayment(
     }
     const { message } = handleApiError(error);
     console.error('Error creating MercadoPago payment:', message);
-    throw new Error(message || '创建 Mercado Pago 支付失败');
+    throw new Error(message || getT().payment.createFailed);
   }
 }
 
@@ -229,7 +228,7 @@ export async function createPaymentByProvider(
 ): Promise<CreatePaymentResponse | MercadoPagoPaymentResponse> {
   if (provider === 'mercadopago') {
     if (!params.cardData || !params.email) {
-      throw new Error('Mercado Pago 需要卡信息和邮箱');
+      throw new Error(getT().payment.cardInfoRequired);
     }
     return createMercadoPagoPayment(
       params.amount,

@@ -1,6 +1,6 @@
 """Focused regressions for SIM-E2E-001 App API P0 failures."""
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import uuid
 import asyncio
@@ -12,12 +12,16 @@ import pytest
 from app.api.v1.app.charging import get_current_app_user as get_charging_app_user
 from app.api.v1.app.wallet import get_current_app_user as get_wallet_app_user
 from app.core.auth import create_access_token, get_password_hash
+from app.services.billing_service import BillingService
 from app.database.models import (
     AppUser,
     AppWalletTransaction,
     ChargingSession,
+    Invoice,
     PaymentOrder,
+    PricingSnapshot,
     QrToken,
+    Tariff,
 )
 
 
@@ -401,7 +405,7 @@ async def test_identical_concurrent_app_starts_share_one_ocpp_command():
 
 
 def test_wallet_transactions_serialize_charge_and_payment_ledgers(
-    client, db_session, sample_tenant, sample_site, sample_charge_point
+    client, db_session, sample_tenant, sample_site, sample_charge_point, sample_evse
 ):
     user = _create_app_user(
         db_session,
@@ -418,10 +422,60 @@ def test_wallet_transactions_serialize_charge_and_payment_ledgers(
         status="approved",
         expires_at=datetime(2099, 1, 1, tzinfo=timezone.utc),
     )
+    now = datetime.now(timezone.utc)
+    session = ChargingSession(
+        tenant_id=sample_tenant.id,
+        evse_id=sample_evse.id,
+        charge_point_id=sample_charge_point.id,
+        transaction_id=908172,
+        id_tag=f"APP{str(user.id).replace('-', '')[:17]}",
+        app_user_id=user.id,
+        start_time=now,
+        end_time=now,
+        meter_start=0,
+        meter_stop=162,
+        status="completed",
+        payment_status="paid",
+    )
+    tariff = Tariff(
+        tenant_id=sample_tenant.id,
+        site_id=sample_site.id,
+        name="P0 wallet tariff",
+        base_price_per_kwh=Decimal("2700.00"),
+        service_fee=Decimal("0.00"),
+        valid_from=now,
+        is_active=True,
+    )
+    db_session.add_all([session, tariff])
+    db_session.flush()
+    snapshot = PricingSnapshot(
+        tenant_id=sample_tenant.id,
+        tariff_id=tariff.id,
+        session_id=session.id,
+        price_per_kwh=Decimal("2700.00"),
+        service_fee=Decimal("0.00"),
+    )
+    db_session.add(snapshot)
+    db_session.flush()
+    invoice = Invoice(
+        invoice_number="INV-P0-WALLET-001",
+        tenant_id=sample_tenant.id,
+        session_id=session.id,
+        pricing_snapshot_id=snapshot.id,
+        energy_kwh=Decimal("0.162"),
+        duration_minutes=Decimal("1.70"),
+        energy_cost=Decimal("437.40"),
+        service_fee=Decimal("0.00"),
+        total_amount=Decimal("437.40"),
+        status="paid",
+    )
+    db_session.add(invoice)
+    db_session.flush()
     charging_ledger = AppWalletTransaction(
         id=uuid.uuid4(),
         transaction_number="wallet-p0-charge",
         app_user_id=user.id,
+        invoice_id=invoice.id,
         operator_tenant_id=sample_tenant.id,
         charge_point_id=sample_charge_point.id,
         type="charge",
@@ -454,8 +508,83 @@ def test_wallet_transactions_serialize_charge_and_payment_ledgers(
     assert set(by_id) == {str(charging_ledger.id), str(payment_ledger.id)}
     assert by_id[str(charging_ledger.id)]["charge_point_name"] == sample_site.name
     assert by_id[str(charging_ledger.id)]["ocpp_identity"] == sample_charge_point.ocpp_identity
+    assert by_id[str(charging_ledger.id)]["charging_session_id"] == str(session.id)
     assert by_id[str(payment_ledger.id)]["charge_point_name"] is None
+    assert by_id[str(payment_ledger.id)]["charging_session_id"] is None
     for transaction_id, transaction in by_id.items():
         assert str(uuid.UUID(transaction_id)) == transaction_id
         assert transaction["reference"]
         assert str(transaction_id) not in transaction["reference"]
+
+    detail = client.get(
+        f"/api/v1/app/transactions/{session.id}",
+        headers=_app_headers(user),
+    )
+    assert detail.status_code == 200
+    payload = detail.json()
+    assert payload["invoice_number"] == invoice.invoice_number
+    assert payload["total_amount"] == "437.40"
+    assert payload["currency"] == "COP"
+    assert payload["billing_status"] == "paid"
+    assert payload["connector_number"] == sample_evse.evse_id
+    assert payload["charge_point_label"] == sample_charge_point.display_code
+
+    other_user = _create_app_user(
+        db_session,
+        email="p0-wallet-other@example.test",
+        balance=Decimal("0.00"),
+    )
+    forbidden = client.get(
+        f"/api/v1/app/transactions/{session.id}",
+        headers=_app_headers(other_user),
+    )
+    assert forbidden.status_code == 404
+
+
+def test_billing_settlement_persists_wallet_invoice_link(
+    db_session, sample_tenant, sample_site, sample_charge_point, sample_evse
+):
+    user = _create_app_user(
+        db_session,
+        email="p0-wallet-settlement@example.test",
+        balance=Decimal("50000.00"),
+    )
+    now = datetime.now(timezone.utc)
+    session = ChargingSession(
+        tenant_id=sample_tenant.id,
+        evse_id=sample_evse.id,
+        charge_point_id=sample_charge_point.id,
+        transaction_id=908173,
+        id_tag=f"APP{str(user.id).replace('-', '')[:17]}",
+        app_user_id=user.id,
+        start_time=now - timedelta(minutes=10),
+        end_time=now,
+        meter_start=1000,
+        meter_stop=2000,
+        status="completed",
+        payment_status="pending",
+    )
+    tariff = Tariff(
+        tenant_id=sample_tenant.id,
+        site_id=sample_site.id,
+        charge_point_id=sample_charge_point.id,
+        name="P0 settlement tariff",
+        base_price_per_kwh=Decimal("2700.00"),
+        service_fee=Decimal("0.00"),
+        valid_from=now - timedelta(days=1),
+        is_active=True,
+    )
+    db_session.add_all([session, tariff])
+    db_session.commit()
+
+    result = BillingService.settle_session(db_session, session, user)
+
+    invoice_id = uuid.UUID(result.invoice_id)
+    ledger = (
+        db_session.query(AppWalletTransaction)
+        .filter(AppWalletTransaction.invoice_id == invoice_id)
+        .one()
+    )
+    assert ledger.type == "charge"
+    assert ledger.app_user_id == user.id
+    assert ledger.idempotency_key == f"charge:{session.id}"

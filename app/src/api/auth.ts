@@ -4,6 +4,7 @@
 
 import apiClient, { handleApiError } from './client';
 import { API_ENDPOINTS } from '../constants/config';
+import type { AppLocale } from '../i18n';
 import { getRefreshToken, saveTokens, saveUserInfo, clearTokens } from '../utils/tokenManager';
 import type { LoginResponse, User } from '../types';
 
@@ -100,9 +101,15 @@ export const resendVerificationEmail = async (email: string): Promise<{ success:
 /**
  * 发送重置密码邮件
  */
-export const sendResetPasswordEmail = async (email: string): Promise<{ success: boolean; message: string }> => {
+export const sendResetPasswordEmail = async (
+  email: string,
+  locale?: AppLocale
+): Promise<{ success: boolean; message: string }> => {
   try {
-    const response = await apiClient.post(API_ENDPOINTS.AUTH.RESET_PASSWORD, { email });
+    const response = await apiClient.post(API_ENDPOINTS.AUTH.RESET_PASSWORD, {
+      email,
+      ...(locale ? { locale } : {}),
+    });
     return response.data;
   } catch (error) {
     throw handleApiError(error);

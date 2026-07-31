@@ -57,33 +57,32 @@ const PaymentHubScreen = () => {
 
   return (
     <Screen>
-      <ScreenHeader title="Pagos y billetera" onBack={() => navigation.goBack()} />
+      <ScreenHeader title={t.account.payments} onBack={() => navigation.goBack()} />
 
       <ScrollView contentContainerStyle={styles.scroll}>
         <Card style={styles.balanceCard}>
-          <Text style={styles.balanceLabel}>Saldo disponible</Text>
+          <Text style={styles.balanceLabel}>{t.wallet.available}</Text>
           <Text style={styles.balanceAmount}>
             {loadingBalance && balance == null ? '—' : formatMoneyCOP(bal)}
           </Text>
           <Text style={styles.balanceHint}>
             {PAYMENT_RAILS_ENABLED
-              ? 'Montos en pesos colombianos (COP). Recargas procesadas de forma segura con Mercado Pago o Wompi.'
-              : 'Montos en COP. El pago en la app aún no está disponible; el saldo lo asigna el operador.'}
+              ? t.payment.balanceEnabledHint
+              : t.payment.balanceDisabledHint}
           </Text>
         </Card>
 
         {!PAYMENT_RAILS_ENABLED && (
           <View style={styles.demoBanner}>
             <Text style={styles.demoText}>
-              Contacte al operador o escriba a {LEGAL_URLS.supportEmail} para solicitar saldo. El cobro
-              de la carga se descuenta de la billetera al finalizar.
+              {t.payment.balanceContactHint.replace('{email}', LEGAL_URLS.supportEmail)}
             </Text>
           </View>
         )}
 
         {PAYMENT_RAILS_ENABLED && (
           <>
-            <Text style={styles.sectionTitle}>Recargar saldo</Text>
+            <Text style={styles.sectionTitle}>{t.payment.topUpBalance}</Text>
             <View style={styles.chips}>
               {TOP_UP_AMOUNTS.map((amt) => (
                 <Button
@@ -102,7 +101,7 @@ const PaymentHubScreen = () => {
               ))}
             </View>
 
-            <Text style={styles.sectionTitle}>Recarga con Wompi</Text>
+            <Text style={styles.sectionTitle}>{t.payment.topUpWompi}</Text>
             <View style={styles.chips}>
               {TOP_UP_AMOUNTS.map((amt) => (
                 <Button
@@ -120,13 +119,13 @@ const PaymentHubScreen = () => {
               <Text style={styles.demoText}>{t.payment.demoNote}</Text>
             </View>
 
-            <ListItem label="Administrar métodos de pago" onPress={() => navigation.navigate('PaymentMethods')} />
+            <ListItem label={t.payment.manageMethods} onPress={() => navigation.navigate('PaymentMethods')} />
           </>
         )}
 
         <View style={styles.links}>
-          <ListItem label="Facturas pendientes" onPress={() => navigation.navigate('UnpaidBills')} />
-          <ListItem label="Ver movimientos de billetera" onPress={() => navigation.navigate('MainTabs', { screen: 'MyWallet' })} />
+          <ListItem label={t.wallet.unpaidTitle} onPress={() => navigation.navigate('UnpaidBills')} />
+          <ListItem label={t.payment.viewWalletTransactions} onPress={() => navigation.navigate('MainTabs', { screen: 'MyWallet' })} />
         </View>
       </ScrollView>
     </Screen>

@@ -1,5 +1,3 @@
-import type { Transaction } from '@/types';
-
 export function remoteCommandConfig(idempotencyKey: string) {
   return {
     headers: {
@@ -8,36 +6,48 @@ export function remoteCommandConfig(idempotencyKey: string) {
   };
 }
 
-export function remoteStartPayload(chargePointId: string, connectorId: number, idTag = 'admin') {
+export function remoteStartPayload(
+  chargePointId: string,
+  connectorId: number,
+  operationReason: string
+) {
   return {
     charge_point_id: chargePointId,
-    id_tag: idTag,
     connector_id: connectorId,
+    operation_reason: operationReason,
   };
 }
 
-export function activeTransactionFor(
-  sessions: Transaction[] | undefined,
-  internalChargePointId: string | undefined
-): Transaction | undefined {
-  if (!internalChargePointId) return undefined;
-  return sessions?.find(
-    (session) =>
-      session.charge_point_id === internalChargePointId &&
-      session.status?.toLowerCase() === 'ongoing'
-  );
-}
-
-export function remoteStopPayload(chargePointId: string, transactionId: string | number) {
+export function remoteStopPayload(
+  sessionId: string,
+  operationReason: string
+) {
   return {
-    charge_point_id: chargePointId,
-    transaction_id: transactionId,
+    session_id: sessionId,
+    operation_reason: operationReason.trim(),
   };
 }
 
-export function resetPayload(chargePointId: string, type: 'Soft' | 'Hard') {
+export function resetPayload(
+  chargePointId: string,
+  type: 'Soft' | 'Hard',
+  operationReason: string
+) {
   return {
     charge_point_id: chargePointId,
     type,
+    operation_reason: operationReason.trim(),
+  };
+}
+
+export function unlockPayload(
+  chargePointId: string,
+  connectorId: number,
+  operationReason: string
+) {
+  return {
+    charge_point_id: chargePointId,
+    connector_id: connectorId,
+    operation_reason: operationReason.trim(),
   };
 }

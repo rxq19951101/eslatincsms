@@ -138,11 +138,22 @@ def test_app_sites_aggregate_charge_points_without_duplicates(
     assert sum(len(point["connectors"]) for point in body["charge_points"]) == 3
     assert body["charging_options"] == site["charging_options"]
     assert all("ocpp_identity" not in point for point in body["charge_points"])
+    assert sample_charge_point.ocpp_identity not in detail.text
+    assert second.ocpp_identity not in detail.text
     assert body["charge_points"][0]["display_code"] == "A01"
-    assert body["charge_points"][0]["connectors"][0]["physical_reference"] == "A01-1"
+    legacy_connector_payload = body["charge_points"][0]["connectors"][0]
+    assert legacy_connector_payload["connector_number"] == 1
+    assert legacy_connector_payload["physical_reference"] is None
+    assert "connector_id" not in legacy_connector_payload
+    assert "evse_id" not in legacy_connector_payload
     assert body["charge_points"][1]["display_code"] == "B02"
     assert body["charge_points"][1]["display_name"] == "Fast charger"
     assert body["charge_points"][1]["location_hint"] == "North entrance"
+    labeled_connector = body["charge_points"][1]["connectors"][0]
+    assert labeled_connector["connector_number"] == 1
+    assert labeled_connector["physical_reference"] == "B02-1"
+    assert "connector_id" not in labeled_connector
+    assert "evse_id" not in labeled_connector
 
 
 def test_status_counts_maps_public_status_groups():

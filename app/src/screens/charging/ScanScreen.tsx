@@ -20,9 +20,10 @@ import { COLORS } from '../../constants/config';
 import type { RootStackParamList } from '../../types';
 import { useI18n } from '../../i18n';
 import Screen from '../../components/ui/Screen';
+import RootTabHeader from '../../components/ui/RootTabHeader';
 import TextField from '../../components/ui/TextField';
 import Button from '../../components/ui/Button';
-import { radius, spacing, typography } from '../../theme';
+import { radius, spacing } from '../../theme';
 import { parseQrPayload } from '../../utils/qrPayload';
 
 type Nav = StackNavigationProp<RootStackParamList>;
@@ -53,66 +54,62 @@ const ScanScreen = () => {
   };
 
   return (
-    <Screen testID="app-scan-screen" accessibilityLabel={t.scan.title} contentStyle={styles.container}>
-      <View style={styles.header}>
-        <Text style={styles.title}>{t.scan.title}</Text>
-        <Text style={styles.subTitle}>{t.scan.subtitle}</Text>
+    <Screen testID="app-scan-screen" accessibilityLabel={t.scan.title}>
+      <RootTabHeader title={t.scan.title} subtitle={t.scan.subtitle} testID="app-scan-header" />
+      <View style={styles.container}>
+
+        {(!canUseCamera || !hasPermission) && (
+          <View style={styles.card}>
+            <Text style={styles.cardTitle}>{t.scan.manualTitle}</Text>
+            <Text style={styles.cardHint}>{hint}</Text>
+            <TextField
+              testID="app-qr-manual-input"
+              accessibilityLabel={t.scan.manualTitle}
+              value={manual}
+              onChangeText={setManual}
+              placeholder={t.scan.placeholder}
+              autoCapitalize="none"
+            />
+            <View style={styles.row}>
+              {canUseCamera && !hasPermission && (
+                <Button testID="app-camera-permission" title={t.scan.requestCamera} variant="secondary" onPress={requestPermission} style={styles.action} />
+              )}
+              <Button testID="app-qr-check-submit" title={t.scan.start} onPress={() => goToProcess(manual)} style={styles.action} />
+            </View>
+          </View>
+        )}
+
+        {/* Native camera */}
+        {canUseCamera && hasPermission && (
+          <View style={styles.cameraWrap}>
+            <CameraView
+              testID="app-qr-camera"
+              accessibilityLabel={t.scan.subtitle}
+              style={styles.camera}
+              onBarcodeScanned={(result) => {
+                if (scanned) return;
+                setScanned(true);
+                goToProcess(result.data);
+                // 给用户一个可重复扫码的入口
+                setTimeout(() => setScanned(false), 1200);
+              }}
+              barcodeScannerSettings={{
+                barcodeTypes: ['qr'],
+              }}
+            />
+            <View style={styles.overlay}>
+              <View style={styles.scanBox} />
+              <Text style={styles.overlayText}>{t.scan.subtitle}</Text>
+            </View>
+          </View>
+        )}
       </View>
-
-      {(!canUseCamera || !hasPermission) && (
-        <View style={styles.card}>
-          <Text style={styles.cardTitle}>{t.scan.manualTitle}</Text>
-          <Text style={styles.cardHint}>{hint}</Text>
-          <TextField
-            testID="app-qr-manual-input"
-            accessibilityLabel={t.scan.manualTitle}
-            value={manual}
-            onChangeText={setManual}
-            placeholder={t.scan.placeholder}
-            autoCapitalize="none"
-          />
-          <View style={styles.row}>
-            {canUseCamera && !hasPermission && (
-              <Button testID="app-camera-permission" title={t.scan.requestCamera} variant="secondary" onPress={requestPermission} style={styles.action} />
-            )}
-            <Button testID="app-qr-check-submit" title={t.scan.start} onPress={() => goToProcess(manual)} style={styles.action} />
-          </View>
-        </View>
-      )}
-
-      {/* Native camera */}
-      {canUseCamera && hasPermission && (
-        <View style={styles.cameraWrap}>
-          <CameraView
-            testID="app-qr-camera"
-            accessibilityLabel={t.scan.subtitle}
-            style={styles.camera}
-            onBarcodeScanned={(result) => {
-              if (scanned) return;
-              setScanned(true);
-              goToProcess(result.data);
-              // 给用户一个可重复扫码的入口
-              setTimeout(() => setScanned(false), 1200);
-            }}
-            barcodeScannerSettings={{
-              barcodeTypes: ['qr'],
-            }}
-          />
-          <View style={styles.overlay}>
-            <View style={styles.scanBox} />
-            <Text style={styles.overlayText}>{t.scan.subtitle}</Text>
-          </View>
-        </View>
-      )}
     </Screen>
   );
 };
 
 const styles = StyleSheet.create({
-  container: { padding: spacing.md },
-  header: { marginBottom: spacing.lg },
-  title: { fontSize: typography.title, fontWeight: typography.bold, color: COLORS.TEXT_PRIMARY },
-  subTitle: { marginTop: 6, color: COLORS.TEXT_SECONDARY, lineHeight: 20 },
+  container: { flex: 1, paddingHorizontal: spacing.md, paddingBottom: spacing.md },
 
   card: {
     backgroundColor: '#FFFFFF',

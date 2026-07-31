@@ -64,10 +64,10 @@ const ResetPasswordScreen = () => {
   };
 
   const getStrengthText = () => {
-    if (passwordStrength <= 1) return 'Weak';
-    if (passwordStrength === 2) return 'Fair';
-    if (passwordStrength === 3) return 'Good';
-    return 'Strong';
+    if (passwordStrength <= 1) return t.auth.strengthWeak;
+    if (passwordStrength === 2) return t.auth.strengthFair;
+    if (passwordStrength === 3) return t.auth.strengthGood;
+    return t.auth.strengthStrong;
   };
 
   const handleResetPassword = async () => {
@@ -99,11 +99,11 @@ const ResetPasswordScreen = () => {
     try {
       await confirmResetPassword({ token, new_password: newPassword });
       Alert.alert(
-        'Success',
-        'Your password has been reset successfully',
+        t.common.success,
+        t.auth.resetSuccess,
         [
           {
-            text: 'OK',
+            text: t.common.ok,
             onPress: () => navigation.navigate('EmailLogin'),
           },
         ]
@@ -122,21 +122,19 @@ const ResetPasswordScreen = () => {
       <View style={styles.content}>
         {/* 标题 */}
         <View style={styles.header}>
-          <Text style={styles.title}>Reset Password</Text>
-          <Text style={styles.subtitle}>
-            Enter your new password below
-          </Text>
+          <Text style={styles.title}>{t.auth.resetTitle}</Text>
+          <Text style={styles.subtitle}>{t.auth.resetSubtitle}</Text>
         </View>
 
         {/* 表单 */}
         <View style={styles.form}>
           {/* 新密码输入 */}
           <View style={styles.inputContainer}>
-            <Text style={styles.inputLabel}>New Password</Text>
+            <Text style={styles.inputLabel}>{t.auth.newPassword}</Text>
             <View style={styles.passwordContainer}>
               <TextField
                 inputStyle={styles.passwordInput}
-                placeholder="Enter new password"
+                placeholder={t.auth.newPasswordPlaceholder}
                 value={newPassword}
                 onChangeText={setNewPassword}
                 secureTextEntry={!showNewPassword}
@@ -145,6 +143,8 @@ const ResetPasswordScreen = () => {
                 editable={!isLoading}
               />
               <TouchableOpacity
+                accessibilityLabel={showNewPassword ? t.auth.hidePassword : t.auth.showPassword}
+                accessibilityRole="button"
                 style={styles.eyeButton}
                 onPress={() => setShowNewPassword(!showNewPassword)}
               >
@@ -175,11 +175,11 @@ const ResetPasswordScreen = () => {
 
           {/* 确认密码输入 */}
           <View style={styles.inputContainer}>
-            <Text style={styles.inputLabel}>Confirm New Password</Text>
+            <Text style={styles.inputLabel}>{t.auth.confirmNewPassword}</Text>
             <View style={styles.passwordContainer}>
               <TextField
                 inputStyle={styles.passwordInput}
-                placeholder="Re-enter new password"
+                placeholder={t.auth.confirmNewPasswordPlaceholder}
                 value={confirmPassword}
                 onChangeText={setConfirmPassword}
                 secureTextEntry={!showConfirmPassword}
@@ -188,6 +188,8 @@ const ResetPasswordScreen = () => {
                 editable={!isLoading}
               />
               <TouchableOpacity
+                accessibilityLabel={showConfirmPassword ? t.auth.hidePassword : t.auth.showPassword}
+                accessibilityRole="button"
                 style={styles.eyeButton}
                 onPress={() => setShowConfirmPassword(!showConfirmPassword)}
               >
@@ -198,7 +200,7 @@ const ResetPasswordScreen = () => {
 
           {/* 重置按钮 */}
           <Button
-            title="Reset Password"
+            title={t.auth.resetSubmit}
             onPress={handleResetPassword}
             disabled={isLoading}
             loading={isLoading}

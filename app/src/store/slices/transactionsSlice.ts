@@ -6,6 +6,7 @@ import { createAsyncThunk, createSlice, PayloadAction } from '@reduxjs/toolkit';
 import type { ChargingRecord, ChargingRecordDetail } from '../../api/transactions';
 import { getChargingRecordDetail, getChargingRecords } from '../../api/transactions';
 import { handleApiError } from '../../api/client';
+import { getT } from '../../i18n';
 
 export interface TransactionsState {
   items: ChargingRecord[];
@@ -33,7 +34,7 @@ export const fetchChargingRecords = createAsyncThunk(
     try {
       return await getChargingRecords(params);
     } catch (e: any) {
-      return rejectWithValue(extractErrorMessage(e, 'Failed to fetch records'));
+      return rejectWithValue(extractErrorMessage(e, getT().history.loadFailed));
     }
   }
 );
@@ -44,7 +45,7 @@ export const fetchChargingRecordDetail = createAsyncThunk(
     try {
       return await getChargingRecordDetail(id);
     } catch (e: any) {
-      return rejectWithValue(extractErrorMessage(e, 'Failed to fetch record detail'));
+      return rejectWithValue(extractErrorMessage(e, getT().history.loadFailed));
     }
   }
 );

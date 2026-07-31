@@ -6,6 +6,7 @@ import {
   type SiteSummary,
   type SitesListParams,
 } from '../../api/sites';
+import { getT } from '../../i18n';
 
 interface SiteState {
   sites: SiteSummary[];
@@ -27,7 +28,7 @@ export const fetchSites = createAsyncThunk(
     try {
       return await getSites(params);
     } catch (error: any) {
-      return rejectWithValue(error.message || 'Failed to fetch sites');
+      return rejectWithValue(error.message || getT().home.loadFailed);
     }
   }
 );
@@ -38,7 +39,7 @@ export const fetchSiteById = createAsyncThunk(
     try {
       return await getSiteById(id);
     } catch (error: any) {
-      return rejectWithValue(error.message || 'Failed to fetch site details');
+      return rejectWithValue(error.message || getT().station.loadFailed);
     }
   }
 );

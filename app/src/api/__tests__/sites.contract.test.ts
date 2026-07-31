@@ -88,7 +88,7 @@ describe('App public site contract', () => {
           model: 'AC7',
           connectors: [{
             id: '33333333-3333-4333-8333-333333333333',
-            connector_id: 1,
+            connector_number: 1,
             physical_reference: 'A01-1',
             status: 'Available',
             connector_type: 'Type2',
@@ -105,8 +105,9 @@ describe('App public site contract', () => {
       display_code: 'A01', display_name: 'North entrance', location_hint: 'P2 / bay 42',
     });
     expect(site.charge_points[0].connectors[0]).toMatchObject({
-      physical_reference: 'A01-1', connector_type: 'Type2', power_kw: 7,
+      connector_number: 1, physical_reference: 'A01-1', connector_type: 'Type2', power_kw: 7,
     });
+    expect(site.charge_points[0].connectors[0]).not.toHaveProperty('connector_id');
     expect(site.charge_points[0]).not.toHaveProperty('ocpp_identity');
   });
 });

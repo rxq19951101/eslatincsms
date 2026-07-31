@@ -321,7 +321,7 @@ const MercadoPagoPaymentScreen = () => {
                 label={t.payment.cardNumber}
                 inputStyle={styles.input}
                 error={errors.cardNumber || undefined}
-                placeholder="1234 5678 9012 3456"
+                placeholder={t.payment.cardNumber}
                 value={cardNumber}
                 onChangeText={(text) => {
                   const formatted = formatCardNumber(text.replace(/\D/g, ''));
@@ -344,7 +344,7 @@ const MercadoPagoPaymentScreen = () => {
                     label={t.payment.expMonth}
                     inputStyle={styles.input}
                     error={errors.expMonth || undefined}
-                    placeholder="MM"
+                    placeholder={t.payment.expMonth}
                     value={expMonth}
                     onChangeText={(text) => {
                       const cleaned = text.replace(/\D/g, '').slice(0, 2);
@@ -362,7 +362,7 @@ const MercadoPagoPaymentScreen = () => {
                     label={t.payment.expYear}
                     inputStyle={styles.input}
                     error={errors.expYear || undefined}
-                    placeholder="YY"
+                    placeholder={t.payment.expYear}
                     value={expYear}
                     onChangeText={(text) => {
                       const cleaned = text.replace(/\D/g, '').slice(0, 2);
@@ -380,7 +380,7 @@ const MercadoPagoPaymentScreen = () => {
                     label={t.payment.cvc}
                     inputStyle={styles.input}
                     error={errors.cvc || undefined}
-                    placeholder="123"
+                    placeholder={t.payment.cvc}
                     value={cvc}
                     onChangeText={(text) => {
                       const cleaned = text.replace(/\D/g, '').slice(0, 4);
@@ -403,7 +403,7 @@ const MercadoPagoPaymentScreen = () => {
                 label={t.payment.holderName}
                 inputStyle={styles.input}
                 error={errors.holderName || undefined}
-                placeholder="John Doe"
+                placeholder={t.payment.holderName}
                 value={holderName}
                 onChangeText={(text) => {
                   setHolderName(text);
@@ -422,7 +422,7 @@ const MercadoPagoPaymentScreen = () => {
                 label={t.payment.emailRequired}
                 inputStyle={styles.input}
                 error={errors.email || undefined}
-                placeholder="user@example.com"
+                placeholder={t.auth.emailPlaceholder}
                 value={email}
                 onChangeText={(text) => {
                   setEmail(text);

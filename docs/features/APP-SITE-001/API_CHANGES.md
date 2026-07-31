@@ -66,7 +66,8 @@ contract: frozen
       "connectors": [
         {
           "id": "EVSE UUID",
-          "connector_id": 1,
+          "connector_number": 1,
+          "physical_reference": "4A",
           "status": "Available",
           "connector_type": "Type2",
           "power_kw": 7.0
@@ -77,4 +78,4 @@ contract: frozen
 }
 ```
 
-内部 `ocpp_identity` 不作为消费者端名称，本契约不返回该字段。旧 `/api/v1/app/chargers` 接口保持兼容。
+内部 `ocpp_identity`、`evse_id` 和旧 `connector_id` 不作为消费者端字段，本契约不返回这些字段。App 使用 `physical_reference` 或国际化的 `connector_number` 作为充电枪名称。

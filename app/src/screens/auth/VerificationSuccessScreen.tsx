@@ -48,9 +48,7 @@ const VerificationSuccessScreen = () => {
         <View style={styles.textContainer}>
           <Text style={styles.title}>{t.auth.verifiedTitle}</Text>
           <Text style={styles.subtitle}>{t.auth.verifiedWait}</Text>
-          <Text style={styles.description}>
-            You will be directed to the homepage
-          </Text>
+          <Text style={styles.description}>{t.auth.verifiedRedirect}</Text>
         </View>
 
         {/* 加载指示器 */}
