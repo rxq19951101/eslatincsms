@@ -107,6 +107,59 @@ describe('charging request safety', () => {
     expect(mockedMeter).toHaveBeenCalledTimes(1);
   });
 
+  it('replaces realtime meter snapshots without using them as the database cursor', async () => {
+    mockedMeter
+      .mockResolvedValueOnce([
+        {
+          id: '44444444-4444-4444-8444-444444444444',
+          source: 'database',
+          timestamp: '2026-01-01T00:00:00Z',
+          connector_id: 1,
+          value_wh: 100,
+          energy_kwh: 0.1,
+          power_kw: 7,
+          current_a: 32,
+          voltage_v: 220,
+          soc: 20,
+        },
+        {
+          id: 'realtime:2026-01-01T00:00:05Z',
+          source: 'realtime',
+          timestamp: '2026-01-01T00:00:05Z',
+          connector_id: 1,
+          value_wh: 110,
+          energy_kwh: 0.11,
+          power_kw: 7,
+          current_a: 32,
+          voltage_v: 220,
+          soc: 21,
+        },
+      ])
+      .mockResolvedValueOnce([
+        {
+          id: 'realtime:2026-01-01T00:00:10Z',
+          source: 'realtime',
+          timestamp: '2026-01-01T00:00:10Z',
+          connector_id: 1,
+          value_wh: 120,
+          energy_kwh: 0.12,
+          power_kw: 7,
+          current_a: 32,
+          voltage_v: 220,
+          soc: 22,
+        },
+      ]);
+    const store = createStore();
+
+    await store.dispatch(fetchMeterValuePoints({ sessionId: 'session-1' }));
+    await store.dispatch(fetchMeterValuePoints({ sessionId: 'session-1' }));
+
+    const state = store.getState().charging;
+    expect(state.lastMeterId).toBe('44444444-4444-4444-8444-444444444444');
+    expect(state.meterValues.filter((point) => point.source === 'realtime')).toHaveLength(1);
+    expect(state.meterValues[state.meterValues.length - 1].value_wh).toBe(120);
+  });
+
   it('keeps the last active session and normal error state when foreground recovery fails', async () => {
     mockedActive.mockRejectedValueOnce(new Error('temporary network failure'));
     const previousState = chargingReducer(undefined, { type: 'init' });

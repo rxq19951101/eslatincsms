@@ -166,9 +166,14 @@ async def lifespan(app: FastAPI):
 
 
 # ---- App & CORS ----
+runtime_settings = get_settings()
+openapi_url = "/openapi.json" if runtime_settings.docs_url or runtime_settings.redoc_url else None
 app = FastAPI(
     title="Local OCPP 1.6J CSMS",
-    lifespan=lifespan
+    lifespan=lifespan,
+    docs_url=runtime_settings.docs_url,
+    redoc_url=runtime_settings.redoc_url,
+    openapi_url=openapi_url,
 )
 
 # 所有 HTTP/参数校验错误统一输出 {success, error} 契约。

@@ -58,8 +58,12 @@ class AdminActor(ApiActor):
             user_id = body.pop("user_id")
             return "POST", f"/api/v1/admin/app-users/{user_id}/adjust-balance", body, None
         if action in {"remote_start", "remote_stop"}:
-            suffix = "remote-start-transaction" if action == "remote_start" else "remote-stop-transaction"
-            return "POST", f"/api/v1/ocpp/{suffix}", params, None
+            suffix = "remote-start-transaction" if action == "remote_start" else "remote-stop-session"
+            body = dict(params)
+            if action == "remote_stop":
+                # remote-stop-session requires Idempotency-Key as a header only.
+                body.pop("idempotency_key", None)
+            return "POST", f"/api/v1/ocpp/{suffix}", body, None
         if action in {"ack_alert", "resolve_alert"}:
             alert_id = params["alert_id"]
             suffix = "acknowledge" if action == "ack_alert" else "resolve"

@@ -17,6 +17,10 @@ from app.database.base import tenant_id_context
 from app.database.models import DeviceEvent, Device, ChargePoint
 from app.core.asset_identifiers import get_charge_point_by_reference
 from app.services.charge_point_service import ChargePointService
+from app.services.meter_telemetry_service import (
+    MeterTelemetryDecision,
+    meter_telemetry_service,
+)
 from app.services.session_service import SessionService
 
 logger = logging.getLogger("ocpp_csms")
@@ -58,9 +62,10 @@ def sanitize_charge_point_id(charge_point_id: str) -> str:
 class OCPPMessageHandler:
     """OCPP消息处理器（使用新表结构）"""
     
-    def __init__(self):
+    def __init__(self, telemetry_service=None):
         self.charge_point_service = ChargePointService()
         self.session_service = SessionService()
+        self.telemetry_service = telemetry_service or meter_telemetry_service
 
     @classmethod
     def _begin_inbound_message(
@@ -639,6 +644,7 @@ class OCPPMessageHandler:
             should_close = True
         else:
             should_close = False
+        telemetry_decision: Optional[MeterTelemetryDecision] = None
         try:
             from app.database.models import ChargingSession
             transaction_id = payload.get("transactionId")
@@ -655,11 +661,10 @@ class OCPPMessageHandler:
                     ChargingSession.status == "ongoing"
                 ).first()
                 
-                if session:
-                    # 处理meter values
-                    # OCPP格式：meterValue是一个数组，每个元素包含connectorId和sampledValue
+                if session and meter_value:
+                    prepared_values = []
                     for index, mv in enumerate(meter_value):
-                        connector_id = mv.get("connectorId")
+                        connector_id = mv.get("connectorId", payload.get("connectorId"))
                         sampled_values = mv.get("sampledValue", [])
                         
                         # 从sampledValue中提取主要值（通常是Energy.Active.Import.Register）
@@ -675,24 +680,74 @@ class OCPPMessageHandler:
                         # 如果没有找到Energy值，尝试使用value字段
                         if value == 0:
                             value = mv.get("value", 0)
-                        
+
+                        prepared_values.append({
+                            "index": index,
+                            "connector_id": connector_id,
+                            "sampled_values": sampled_values,
+                            "timestamp": mv.get("timestamp") or now_iso(),
+                            "value": int(value),
+                        })
+
+                    latest = prepared_values[-1]
+                    message_key = message_unique_id or self._message_key("MeterValues", payload)
+                    telemetry_decision = self.telemetry_service.record_latest(
+                        tenant_id=session.tenant_id,
+                        session_id=session.id,
+                        message_key=message_key,
+                        snapshot={
+                            "id": f"realtime:{latest['timestamp']}",
+                            "session_id": str(session.id),
+                            "timestamp": latest["timestamp"],
+                            "received_at": now_iso(),
+                            "connector_id": latest["connector_id"],
+                            "value_wh": latest["value"],
+                            "sampled_value": latest["sampled_values"],
+                            "source": "realtime",
+                        },
+                    )
+                    if telemetry_decision.duplicate:
+                        return {"_outcome": "meter_replayed"}
+
+                    values_to_persist = (
+                        prepared_values
+                        if not telemetry_decision.redis_available
+                        else ([latest] if telemetry_decision.should_persist else [])
+                    )
+                    for prepared in values_to_persist:
                         self.session_service.add_meter_value(
                             db=db,
                             session_id=session.id,
-                            value=value,
-                            connector_id=connector_id,
-                            sampled_value=sampled_values if sampled_values else None,
+                            value=prepared["value"],
+                            connector_id=prepared["connector_id"],
+                            sampled_value=(
+                                prepared["sampled_values"]
+                                if prepared["sampled_values"]
+                                else None
+                            ),
                             idempotency_key=(
-                                f"ocpp:{message_unique_id}:{index}"
+                                f"ocpp:{message_unique_id}:{prepared['index']}"
                                 if message_unique_id
                                 else self._meter_idempotency_key(
-                                    charge_point_id, transaction_id, mv, index
+                                    charge_point_id,
+                                    transaction_id,
+                                    meter_value[prepared["index"]],
+                                    prepared["index"],
                                 )
                             ),
+                            commit=False,
                         )
-                    return {"_outcome": "meter_recorded"}
+                    if values_to_persist:
+                        db.commit()
+                    return {
+                        "_outcome": (
+                            "meter_recorded" if values_to_persist else "meter_buffered"
+                        )
+                    }
             return {"_outcome": "orphan_ignored"}
         except Exception as e:
+            if telemetry_decision and telemetry_decision.should_persist:
+                self.telemetry_service.release_write_claims(telemetry_decision)
             logger.error(f"[{charge_point_id}] MeterValues处理错误: {e}", exc_info=True)
             if should_close:
                 db.rollback()
@@ -754,6 +809,25 @@ class OCPPMessageHandler:
         
         db = SessionLocal()
         try:
+            # Heartbeat 本身幂等，只更新限频在线快照，不建立永久消息历史。
+            if action == "Heartbeat":
+                return await self.handle_heartbeat(
+                    charge_point_id,
+                    payload,
+                    device_serial_number,
+                    db,
+                )
+
+            # MeterValues 是高频幂等遥测；Redis 提供短期去重和实时快照，
+            # PostgreSQL 只保存分钟采样，不创建永久 OCPP 消息行。
+            if action == "MeterValues":
+                return await self.handle_meter_values(
+                    charge_point_id,
+                    payload,
+                    db,
+                    message_unique_id=message_unique_id,
+                )
+
             event, replay = self._begin_inbound_message(
                 db, charge_point_id, action, payload, message_unique_id
             )
@@ -772,10 +846,6 @@ class OCPPMessageHandler:
                 result = await handler(charge_point_id, payload, device_serial_number, db)
             elif action in ["StatusNotification", "StartTransaction"]:
                 result = await handler(charge_point_id, payload, evse_id, db)
-            elif action == "MeterValues":
-                result = await handler(
-                    charge_point_id, payload, db, message_unique_id=message_unique_id
-                )
             else:
                 result = await handler(charge_point_id, payload, db)
             self._complete_inbound_message(db, event, result)

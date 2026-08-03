@@ -10,9 +10,28 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy import or_, func
 from app.database.base import get_db, tenant_id_context
-from app.database.models import ChargePoint, Site, EVSE, EVSEStatus, OCPPMessageEvent, Tariff, QrToken
+from app.database.models import (
+    Alert,
+    AppWalletTransaction,
+    AuditLog,
+    ChargePoint,
+    ChargePointConfig,
+    ChargingSession,
+    DeviceEvent,
+    EVSE,
+    EVSEStatus,
+    Invoice,
+    MeterValue,
+    OCPPMessageEvent,
+    Order,
+    OutboxEvent,
+    Payment,
+    QrToken,
+    Site,
+    Tariff,
+)
 from app.core.logging_config import get_logger
-from app.core.permissions import get_current_admin_user
+from app.core.permissions import get_current_admin_user, require_permission
 from app.core.asset_identifiers import (
     get_charge_point_by_reference,
     get_site_by_reference,
@@ -21,6 +40,21 @@ from app.core.asset_identifiers import (
 from app.api.validation import StrictRequestModel
 from app.core.permissions import has_permission
 from app.services.role_service import MembershipRoleService
+from app.services.asset_lifecycle_service import (
+    CHARGER_DELETE_ACTION,
+    CHARGER_RESTORE_ACTION,
+    CHARGER_RETIRE_ACTION,
+    AssetNotOperationalError,
+    LifecycleReasonError,
+    add_lifecycle_audit,
+    apply_charge_point_restored_state,
+    apply_charge_point_retired_state,
+    charge_point_lifecycle_status,
+    latest_lifecycle_audit,
+    normalize_lifecycle_reason,
+    require_charge_point_operational,
+)
+from app.core.ocpp_auth import generate_ocpp_secret, hash_ocpp_secret
 from datetime import datetime, timezone
 from decimal import Decimal
 
@@ -49,6 +83,219 @@ class ChargerPricingResponse(BaseModel):
     base_price_per_kwh: Decimal
     service_fee: Decimal
     valid_from: str
+
+
+class ChargerLifecycleRequest(StrictRequestModel):
+    reason: str = Field(..., min_length=3, max_length=500)
+
+
+class PermanentDeleteChargerRequest(ChargerLifecycleRequest):
+    confirmation: str = Field(..., min_length=1, max_length=64)
+
+
+def _coded_http_exception(status_code: int, code: str, message: str, **details) -> HTTPException:
+    exc = HTTPException(
+        status_code=status_code,
+        detail={"code": code, "message": message, **details},
+    )
+    exc.error_code = code
+    return exc
+
+
+def _normalized_reason(reason: str) -> str:
+    try:
+        return normalize_lifecycle_reason(reason)
+    except LifecycleReasonError as exc:
+        raise _coded_http_exception(422, "invalid_lifecycle_reason", str(exc)) from exc
+
+
+def _require_operational_charger(charge_point: ChargePoint) -> None:
+    try:
+        require_charge_point_operational(charge_point)
+    except AssetNotOperationalError as exc:
+        raise _coded_http_exception(
+            409,
+            exc.code,
+            exc.message,
+            blockers=[],
+        ) from exc
+
+
+def _retirement_preflight(db: Session, charge_point: ChargePoint) -> dict:
+    ongoing_sessions = (
+        db.query(ChargingSession.id)
+        .filter(
+            ChargingSession.tenant_id == charge_point.tenant_id,
+            ChargingSession.charge_point_id == charge_point.id,
+            ChargingSession.status == "ongoing",
+        )
+        .all()
+    )
+    pending_commands = (
+        db.query(OutboxEvent.id)
+        .filter(
+            OutboxEvent.tenant_id == charge_point.tenant_id,
+            OutboxEvent.aggregate_type == "ChargePoint",
+            OutboxEvent.aggregate_id == str(charge_point.id),
+            OutboxEvent.status == "pending",
+        )
+        .all()
+    )
+
+    unsettled_records = []
+    unsettled_sessions = (
+        db.query(ChargingSession.id)
+        .filter(
+            ChargingSession.tenant_id == charge_point.tenant_id,
+            ChargingSession.charge_point_id == charge_point.id,
+            ChargingSession.status != "ongoing",
+            ChargingSession.payment_status.in_(("pending", "unpaid")),
+        )
+        .all()
+    )
+    unsettled_records.extend(("charging_session", row.id) for row in unsettled_sessions)
+
+    unsettled_orders = (
+        db.query(Order.id)
+        .filter(
+            Order.tenant_id == charge_point.tenant_id,
+            Order.charge_point_id == charge_point.id,
+            Order.status.in_(("pending", "authorized", "ongoing")),
+        )
+        .all()
+    )
+    unsettled_records.extend(("order", row.id) for row in unsettled_orders)
+
+    unsettled_invoices = (
+        db.query(Invoice.id)
+        .join(ChargingSession, Invoice.session_id == ChargingSession.id)
+        .filter(
+            Invoice.tenant_id == charge_point.tenant_id,
+            ChargingSession.charge_point_id == charge_point.id,
+            Invoice.status == "pending",
+        )
+        .all()
+    )
+    unsettled_records.extend(("invoice", row.id) for row in unsettled_invoices)
+
+    unsettled_payments = (
+        db.query(Payment.id)
+        .join(Invoice, Payment.invoice_id == Invoice.id)
+        .join(ChargingSession, Invoice.session_id == ChargingSession.id)
+        .filter(
+            Payment.tenant_id == charge_point.tenant_id,
+            ChargingSession.charge_point_id == charge_point.id,
+            Payment.status == "pending",
+        )
+        .all()
+    )
+    unsettled_records.extend(("payment", row.id) for row in unsettled_payments)
+
+    blockers = [
+        {"type": "ongoing_session", "resource_id": str(row.id)}
+        for row in ongoing_sessions
+    ]
+    blockers.extend(
+        {"type": "pending_remote_command", "resource_id": str(row.id)}
+        for row in pending_commands
+    )
+    blockers.extend(
+        {
+            "type": "unsettled_business",
+            "resource_type": resource_type,
+            "resource_id": str(resource_id),
+        }
+        for resource_type, resource_id in unsettled_records
+    )
+    return {
+        "charge_point_id": str(charge_point.id),
+        "lifecycle_status": charge_point_lifecycle_status(charge_point),
+        "can_retire_now": not blockers,
+        "will_wait_for_sessions": False,
+        "counts": {
+            "ongoing_sessions": len(ongoing_sessions),
+            "pending_remote_commands": len(pending_commands),
+            "unsettled_business_records": len(unsettled_records),
+        },
+        "blockers": blockers,
+    }
+
+
+def _charger_lifecycle_response(db: Session, charge_point: ChargePoint) -> dict:
+    retirement_audit = latest_lifecycle_audit(
+        db,
+        tenant_id=charge_point.tenant_id,
+        resource_type="charge_point",
+        resource_id=str(charge_point.id),
+        actions=(CHARGER_RETIRE_ACTION,),
+    )
+    retired_at = retirement_audit.created_at.isoformat() if retirement_audit else None
+    return {
+        "charge_point_id": str(charge_point.id),
+        "lifecycle_status": charge_point_lifecycle_status(charge_point),
+        "retirement_requested_at": retired_at,
+        "retired_at": retired_at,
+    }
+
+
+def _permanent_delete_blockers(db: Session, charge_point: ChargePoint) -> list[dict]:
+    blockers: list[dict] = []
+
+    def add_count(blocker_type: str, count: int) -> None:
+        if count:
+            blockers.append({"type": blocker_type, "count": count})
+
+    if charge_point.is_active is not True or charge_point.commissioning_status != "draft":
+        blockers.append({"type": "commissioning_history", "count": 1})
+    elif any(
+        (
+            charge_point.commissioned_at,
+            charge_point.last_acceptance_at,
+            charge_point.acceptance_report,
+        )
+    ):
+        blockers.append({"type": "commissioning_history", "count": 1})
+
+    if charge_point.device_id or charge_point.device_serial_number:
+        blockers.append({"type": "device_association", "count": 1})
+
+    scoped_counts = (
+        ("evse", EVSE, EVSE.charge_point_id == charge_point.id),
+        ("evse_status", EVSEStatus, EVSEStatus.charge_point_id == charge_point.id),
+        ("charging_session", ChargingSession, ChargingSession.charge_point_id == charge_point.id),
+        ("order", Order, Order.charge_point_id == charge_point.id),
+        ("tariff", Tariff, Tariff.charge_point_id == charge_point.id),
+        ("qr_token", QrToken, QrToken.charge_point_id == charge_point.id),
+        ("ocpp_message", OCPPMessageEvent, OCPPMessageEvent.charge_point_id == charge_point.id),
+        ("device_event", DeviceEvent, DeviceEvent.charge_point_id == charge_point.id),
+        ("alert", Alert, Alert.charge_point_id == charge_point.id),
+        ("configuration", ChargePointConfig, ChargePointConfig.charge_point_id == charge_point.id),
+        ("wallet_transaction", AppWalletTransaction, AppWalletTransaction.charge_point_id == charge_point.id),
+    )
+    for blocker_type, model, predicate in scoped_counts:
+        add_count(blocker_type, db.query(model).filter(predicate).count())
+
+    add_count(
+        "remote_command",
+        db.query(OutboxEvent)
+        .filter(
+            OutboxEvent.tenant_id == charge_point.tenant_id,
+            OutboxEvent.aggregate_type == "ChargePoint",
+            OutboxEvent.aggregate_id == str(charge_point.id),
+        )
+        .count(),
+    )
+    add_count(
+        "audit_log",
+        db.query(AuditLog)
+        .filter(
+            AuditLog.tenant_id == charge_point.tenant_id,
+            AuditLog.resource_type == "charge_point",
+            AuditLog.resource_id == str(charge_point.id),
+        )
+        .count(),
+    )
+    return blockers
 
 
 def _get_scoped_charge_point(db: Session, reference: str, current_user_obj) -> ChargePoint:
@@ -95,10 +342,13 @@ def list_chargers(
     # 获取租户ID（RLS会自动过滤，但为了性能也在应用层过滤）
     tenant_id = tenant_id_context.get()
     
-    query = db.query(ChargePoint)
+    query = db.query(ChargePoint).filter(
+        ChargePoint.is_active.is_(True),
+        ChargePoint.site.has(Site.is_active.is_(True)),
+    )
     
-    # 添加租户过滤（如果不是超级管理员）
-    if tenant_id and not current_user_obj.is_super_admin:
+    # 只要选择了租户，超级管理员也必须使用同一租户范围。
+    if tenant_id:
         query = query.filter(ChargePoint.tenant_id == tenant_id)
     
     # 根据筛选类型过滤
@@ -280,6 +530,18 @@ def get_charger(
         # 使用第一个 EVSE 的 connector_type 作为默认值（向后兼容）
         if evse.evse_id == 1:
             default_connector_type = evse.connector_type
+
+    retirement_audit = latest_lifecycle_audit(
+        db,
+        tenant_id=charge_point.tenant_id,
+        resource_type="charge_point",
+        resource_id=str(charge_point.id),
+        actions=(CHARGER_RETIRE_ACTION,),
+    )
+    retirement_time = retirement_audit.created_at.isoformat() if retirement_audit else None
+    retirement_reason = None
+    if retirement_audit:
+        retirement_reason = (retirement_audit.audit_metadata or {}).get("reason")
     
     return {
         "id": str(charge_point.id),
@@ -298,6 +560,15 @@ def get_charger(
         },
         "price_per_kwh": float(tariff.base_price_per_kwh) if tariff else None,
         "evses": evse_list,  # 每个 EVSE 都有自己的 connector_type
+        "lifecycle_status": charge_point_lifecycle_status(charge_point),
+        "retirement_reason": retirement_reason,
+        "retirement_requested_at": retirement_time,
+        "retired_at": retirement_time,
+        "original_site": {
+            "id": str(site.id),
+            "site_code": site.site_code,
+            "name": site.name,
+        } if site else None,
         "commissioning_status": charge_point.commissioning_status,
         "acceptance_report": charge_point.acceptance_report,
         "last_acceptance_at": charge_point.last_acceptance_at.isoformat() if charge_point.last_acceptance_at else None,
@@ -333,6 +604,12 @@ def create_charger(
         raise HTTPException(status_code=422, detail="site_id must reference an existing site")
     if site.tenant_id != tenant_id:
         raise HTTPException(status_code=403, detail="Site belongs to another tenant")
+    if site.is_active is not True:
+        raise _coded_http_exception(
+            409,
+            "site_not_operational",
+            "Cannot provision a charge point under an archived site",
+        )
     
     # 创建新充电桩
     from app.core.ocpp_auth import generate_ocpp_secret, hash_ocpp_secret
@@ -414,12 +691,20 @@ def _build_acceptance_report(db: Session, charge_point: ChargePoint) -> dict:
         ).scalar() or 0
         for action in (
             "BootNotification",
-            "Heartbeat",
             "StartTransaction",
-            "MeterValues",
             "StopTransaction",
         )
     }
+    heartbeat_seen = db.query(EVSEStatus.id).filter(
+        EVSEStatus.charge_point_id == charge_point.id,
+        EVSEStatus.last_seen.is_not(None),
+    ).first() is not None
+    meter_values_seen = db.query(MeterValue.id).join(
+        ChargingSession,
+        ChargingSession.id == MeterValue.session_id,
+    ).filter(
+        ChargingSession.charge_point_id == charge_point.id,
+    ).first() is not None
     try:
         from app.api.v1.charger_management import check_charger_connection
         connected = check_charger_connection(charge_point.ocpp_identity)
@@ -432,9 +717,9 @@ def _build_acceptance_report(db: Session, charge_point: ChargePoint) -> dict:
             item.connector_type and item.max_power_kw and item.physical_reference for item in evses
         ),
         "boot_notification": actions["BootNotification"] >= 1,
-        "heartbeat": actions["Heartbeat"] >= 1,
+        "heartbeat": heartbeat_seen,
         "remote_start_transaction": actions["StartTransaction"] >= 1,
-        "meter_values": actions["MeterValues"] >= 1,
+        "meter_values": meter_values_seen,
         "remote_stop_transaction": actions["StopTransaction"] >= 1,
         # A second accepted boot is deterministic evidence that the simulator or
         # physical charger disconnected, reconnected and booted again.
@@ -554,22 +839,195 @@ def update_charger(
     }
 
 
-@router.delete("/{charge_point_id}", summary="删除充电桩", status_code=200)
+@router.get("/{charge_point_id}/retirement-preflight", summary="充电桩退役预检")
+def get_charger_retirement_preflight(
+    charge_point_id: str,
+    current_user_obj=Depends(require_permission("chargers.read")),
+    db: Session = Depends(get_db),
+) -> dict:
+    charge_point = _get_scoped_charge_point(db, charge_point_id, current_user_obj)
+    return _retirement_preflight(db, charge_point)
+
+
+@router.post("/{charge_point_id}/retire", summary="退役充电桩")
+def retire_charger(
+    charge_point_id: str,
+    req: ChargerLifecycleRequest,
+    current_user_obj=Depends(require_permission("chargers.write")),
+    db: Session = Depends(get_db),
+) -> dict:
+    charge_point = _get_scoped_charge_point(db, charge_point_id, current_user_obj)
+    reason = _normalized_reason(req.reason)
+    if charge_point_lifecycle_status(charge_point) == "retired":
+        return _charger_lifecycle_response(db, charge_point)
+
+    preflight = _retirement_preflight(db, charge_point)
+    if not preflight["can_retire_now"]:
+        raise _coded_http_exception(
+            409,
+            "charger_retirement_blocked",
+            "Charger has active sessions, pending commands, or unsettled business records",
+            blockers=preflight["blockers"],
+        )
+
+    before_data = {
+        "lifecycle_status": charge_point_lifecycle_status(charge_point),
+        "commissioning_status": charge_point.commissioning_status,
+        "has_ocpp_credential": bool(charge_point.ocpp_auth_secret_hash),
+    }
+    apply_charge_point_retired_state(charge_point)
+    now = datetime.now(timezone.utc)
+    (
+        db.query(QrToken)
+        .filter(
+            QrToken.operator_tenant_id == charge_point.tenant_id,
+            QrToken.charge_point_id == charge_point.id,
+            QrToken.revoked_at.is_(None),
+        )
+        .update({QrToken.revoked_at: now}, synchronize_session=False)
+    )
+    add_lifecycle_audit(
+        db,
+        tenant_id=charge_point.tenant_id,
+        actor_id=current_user_obj.id,
+        action=CHARGER_RETIRE_ACTION,
+        resource_type="charge_point",
+        resource_id=str(charge_point.id),
+        reason=reason,
+        before_data=before_data,
+        after_data={
+            "lifecycle_status": "retired",
+            "commissioning_status": "suspended",
+            "has_ocpp_credential": False,
+        },
+    )
+    db.commit()
+    db.refresh(charge_point)
+    return _charger_lifecycle_response(db, charge_point)
+
+
+@router.post("/{charge_point_id}/restore", summary="恢复退役充电桩")
+def restore_charger(
+    charge_point_id: str,
+    req: ChargerLifecycleRequest,
+    current_user_obj=Depends(require_permission("chargers.write")),
+    db: Session = Depends(get_db),
+) -> dict:
+    charge_point = _get_scoped_charge_point(db, charge_point_id, current_user_obj)
+    reason = _normalized_reason(req.reason)
+    if charge_point_lifecycle_status(charge_point) != "retired":
+        previous_restore = latest_lifecycle_audit(
+            db,
+            tenant_id=charge_point.tenant_id,
+            resource_type="charge_point",
+            resource_id=str(charge_point.id),
+            actions=(CHARGER_RESTORE_ACTION,),
+        )
+        if previous_restore:
+            return {
+                "charge_point_id": str(charge_point.id),
+                "lifecycle_status": "active",
+                "commissioning_status": charge_point.commissioning_status,
+                "ocpp_identity": charge_point.ocpp_identity,
+                "ocpp_secret": None,
+                "credential_rotated": False,
+            }
+        raise _coded_http_exception(
+            409,
+            "charger_not_retired",
+            "Only a retired charger can be restored",
+            blockers=[],
+        )
+
+    before_data = {
+        "lifecycle_status": "retired",
+        "commissioning_status": charge_point.commissioning_status,
+        "has_ocpp_credential": bool(charge_point.ocpp_auth_secret_hash),
+    }
+    ocpp_secret = generate_ocpp_secret()
+    apply_charge_point_restored_state(charge_point)
+    charge_point.ocpp_auth_secret_hash = hash_ocpp_secret(ocpp_secret)
+    add_lifecycle_audit(
+        db,
+        tenant_id=charge_point.tenant_id,
+        actor_id=current_user_obj.id,
+        action=CHARGER_RESTORE_ACTION,
+        resource_type="charge_point",
+        resource_id=str(charge_point.id),
+        reason=reason,
+        before_data=before_data,
+        after_data={
+            "lifecycle_status": "active",
+            "commissioning_status": "testing",
+            "has_ocpp_credential": True,
+        },
+    )
+    db.commit()
+    db.refresh(charge_point)
+    return {
+        "charge_point_id": str(charge_point.id),
+        "lifecycle_status": "active",
+        "commissioning_status": charge_point.commissioning_status,
+        "ocpp_identity": charge_point.ocpp_identity,
+        "ocpp_secret": ocpp_secret,
+        "credential_rotated": True,
+    }
+
+
+@router.delete("/{charge_point_id}", summary="永久删除未使用的充电桩", status_code=200)
 def delete_charger(
     charge_point_id: str,
-    current_user_obj = Depends(get_current_admin_user),
+    req: PermanentDeleteChargerRequest,
+    current_user_obj=Depends(require_permission("chargers.write")),
     db: Session = Depends(get_db)
 ) -> dict:
-    """删除充电桩"""
+    """仅永久删除误创建且完全未使用的草稿充电桩。"""
     logger.info(f"[API] DELETE /api/v1/chargers/{charge_point_id}")
-    
+
     charge_point = _get_scoped_charge_point(db, charge_point_id, current_user_obj)
-    
+    reason = _normalized_reason(req.reason)
+    if req.confirmation.strip() != charge_point.ocpp_identity:
+        raise _coded_http_exception(
+            422,
+            "charger_delete_confirmation_mismatch",
+            "confirmation must match the charger OCPP identity",
+        )
+
+    blockers = _permanent_delete_blockers(db, charge_point)
+    if blockers:
+        raise _coded_http_exception(
+            409,
+            "charger_permanent_delete_blocked",
+            "Only an unused draft charger can be permanently deleted",
+            blockers=blockers,
+        )
+
+    charge_point_uuid = str(charge_point.id)
+    ocpp_identity = charge_point.ocpp_identity
+    add_lifecycle_audit(
+        db,
+        tenant_id=charge_point.tenant_id,
+        actor_id=current_user_obj.id,
+        action=CHARGER_DELETE_ACTION,
+        resource_type="charge_point",
+        resource_id=charge_point_uuid,
+        reason=reason,
+        before_data={
+            "lifecycle_status": "active",
+            "commissioning_status": charge_point.commissioning_status,
+            "ocpp_identity": ocpp_identity,
+        },
+        after_data=None,
+    )
     db.delete(charge_point)
     db.commit()
-    
+
     logger.info(f"[API] DELETE /api/v1/chargers/{charge_point_id} 成功")
-    return {"message": f"充电桩 {charge_point_id} 已删除"}
+    return {
+        "message": f"充电桩 {charge_point_id} 已永久删除",
+        "charge_point_id": charge_point_uuid,
+        "ocpp_identity": ocpp_identity,
+    }
 
 
 @router.put("/{charge_point_id}/pricing", response_model=ChargerPricingResponse, summary="更新充电桩覆盖定价（Tariff）")
@@ -741,6 +1199,7 @@ def generate_charger_qr_code(
 ) -> dict:
     """为指定connector生成二维码"""
     charge_point = _get_scoped_charge_point(db, charge_point_id, current_user_obj)
+    _require_operational_charger(charge_point)
     
     # 验证connector是否存在
     evse = db.query(EVSE).filter(
@@ -788,6 +1247,7 @@ def generate_all_charger_qr_codes(
 ) -> dict:
     """为充电桩所有connector生成二维码"""
     charge_point = _get_scoped_charge_point(db, charge_point_id, current_user_obj)
+    _require_operational_charger(charge_point)
     
     # 查询所有EVSE
     evses = db.query(EVSE).filter(EVSE.charge_point_id == charge_point.id).order_by(EVSE.evse_id).all()

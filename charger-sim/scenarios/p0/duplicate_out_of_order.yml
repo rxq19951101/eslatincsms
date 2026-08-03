@@ -31,8 +31,8 @@ steps:
     actor: admin
     action: query
     with: {path: /api/v1/transactions, query: {charge_point_id: "${seed.charge_point.ocpp_identity}"}}
-    expect: {status: 200, body: {unique_by: transaction_id}}
-    save: {before_sessions: body}
+    expect: {status: 200, body.items: {unique_by: id}}
+    save: {before_sessions: body.items}
   - id: ledger-before
     actor: app
     action: query
@@ -71,7 +71,7 @@ steps:
     with: {path: /api/v1/transactions, query: {charge_point_id: "${seed.charge_point.ocpp_identity}"}}
     expect:
       status: 200
-      body: {equals: "${before_sessions}", unique_by: transaction_id}
+      body.items: {equals: "${before_sessions}", unique_by: id}
   - id: no-metering-or-settlement-ledger
     actor: app
     action: query

@@ -9,9 +9,11 @@ import ChargingRecordsTable from '@/components/transactions/ChargingRecordsTable
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
+import { LocalizedDateInput } from '@/components/ui/localized-date-input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { apiGet } from '@/lib/api';
 import { API_ENDPOINTS, REFRESH_INTERVAL } from '@/lib/constants';
+import { isOperationalSite } from '@/lib/assetLifecycle';
 import { useI18n } from '@/lib/i18n';
 import type { ChargingRecord, PaginatedResponse, SiteListItem } from '@/types';
 
@@ -76,7 +78,7 @@ function TransactionsPageContent() {
     { keepPreviousData: true, refreshInterval: REFRESH_INTERVAL },
   );
   const { data: sites } = useSWR<SiteListItem[]>(
-    API_ENDPOINTS.SITES,
+    API_ENDPOINTS.SITES_ACTIVE,
     (url: string) => apiGet<SiteListItem[]>(url),
     { refreshInterval: REFRESH_INTERVAL },
   );
@@ -185,7 +187,7 @@ function TransactionsPageContent() {
               </SelectTrigger>
               <SelectContent className="border-slate-700 bg-slate-800">
                 <SelectItem value="all">{t('transactions.allSites')}</SelectItem>
-                {(sites || []).map((site) => (
+                {(sites || []).filter(isOperationalSite).map((site) => (
                   <SelectItem key={site.site_code} value={site.site_code}>{site.name}</SelectItem>
                 ))}
               </SelectContent>
@@ -205,26 +207,28 @@ function TransactionsPageContent() {
           </div>
 
           <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-            <label className="space-y-1 text-sm text-slate-400">
+            <div className="space-y-1 text-sm text-slate-400">
               <span>{t('transactions.startDate')}</span>
-              <Input
-                type="date"
+              <LocalizedDateInput
+                aria-label={t('transactions.startDate')}
+                testId="transactions-start-date"
                 value={startedFrom}
                 max={startedTo || undefined}
-                onChange={(event) => { setStartedFrom(event.target.value); resetPage(); }}
+                onChange={(value) => { setStartedFrom(value); resetPage(); }}
                 className="border-slate-600 bg-slate-700/50 text-slate-100"
               />
-            </label>
-            <label className="space-y-1 text-sm text-slate-400">
+            </div>
+            <div className="space-y-1 text-sm text-slate-400">
               <span>{t('transactions.endDate')}</span>
-              <Input
-                type="date"
+              <LocalizedDateInput
+                aria-label={t('transactions.endDate')}
+                testId="transactions-end-date"
                 value={startedTo}
                 min={startedFrom || undefined}
-                onChange={(event) => { setStartedTo(event.target.value); resetPage(); }}
+                onChange={(value) => { setStartedTo(value); resetPage(); }}
                 className="border-slate-600 bg-slate-700/50 text-slate-100"
               />
-            </label>
+            </div>
           </div>
           {exportError && <p role="alert" className="text-sm text-red-400">{exportError}</p>}
         </CardContent>

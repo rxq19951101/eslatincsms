@@ -7,7 +7,7 @@ from app.core.ocpp_auth import (
     verify_charge_point_pre_registered,
     verify_ocpp_api_key,
 )
-from app.database.models import OCPPMessageEvent
+from app.database.models import ChargingSession, MeterValue, OCPPMessageEvent
 
 
 def _session_with_charge_point(charge_point):
@@ -44,7 +44,7 @@ def test_production_proxy_wss_detection():
 
 
 def test_acceptance_report_requires_complete_protocol_evidence(
-    db_session, sample_charge_point, sample_evse
+    db_session, sample_charge_point, sample_evse, sample_evse_status
 ):
     from app.api.v1.chargers import _build_acceptance_report
 
@@ -74,6 +74,25 @@ def test_acceptance_report_requires_complete_protocol_evidence(
             outcome="processed",
             processed_at=datetime.now(timezone.utc),
         ))
+    sample_evse_status.last_seen = datetime.now(timezone.utc)
+    session = ChargingSession(
+        tenant_id=sample_charge_point.tenant_id,
+        charge_point_id=sample_charge_point.id,
+        evse_id=sample_evse.id,
+        transaction_id=88001,
+        id_tag="ACCEPTANCE",
+        start_time=datetime.now(timezone.utc),
+        status="ongoing",
+    )
+    db_session.add(session)
+    db_session.flush()
+    db_session.add(MeterValue(
+        tenant_id=sample_charge_point.tenant_id,
+        session_id=session.id,
+        idempotency_key="acceptance-meter",
+        timestamp=datetime.now(timezone.utc),
+        value=100,
+    ))
     db_session.commit()
 
     with patch(

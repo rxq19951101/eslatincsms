@@ -1,8 +1,16 @@
 #
 # 生产环境 Docker Compose 配置
-# 使用: docker compose -f docker-compose.prod.yml up -d
+# 使用: ./scripts/validate_prod_env.sh --first-boot
+#       docker compose --env-file .env.production -f docker-compose.prod.yml up -d --build
+# DNS 必须先将 ADMIN_DOMAIN 与 API_DOMAIN 的 A 记录指向本机。
 # 生产部署必须通过环境变量或 secret provider 注入凭据。
 #
+
+x-logging: &default-logging
+  driver: "json-file"
+  options:
+    max-size: "10m"
+    max-file: "5"
 
 services:
   db:
@@ -17,11 +25,12 @@ services:
     networks:
       - ocppnet
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ocpp_user -d ocpp"]
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
       interval: 10s
       timeout: 5s
       retries: 5
     restart: unless-stopped
+    logging: *default-logging
     deploy:
       resources:
         limits:
@@ -30,6 +39,29 @@ services:
         reservations:
           cpus: '1'
           memory: 1G
+
+  db-role-init:
+    image: postgres:15-alpine
+    environment:
+      DB_USER: ${DB_USER:?DB_USER must be set}
+      DB_NAME: ${DB_NAME:?DB_NAME must be set}
+      PGPASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set}
+    volumes:
+      - ./csms/scripts/ensure_app_super_role.sql:/opt/csms/ensure_app_super_role.sql:ro
+      - ./csms/scripts/check_app_super_role.sql:/opt/csms/check_app_super_role.sql:ro
+    command:
+      - sh
+      - -ec
+      - |
+        psql -h db -U "$${DB_USER}" -d "$${DB_NAME}" --set=ON_ERROR_STOP=1 --file=/opt/csms/ensure_app_super_role.sql
+        psql -h db -U "$${DB_USER}" -d "$${DB_NAME}" --set=ON_ERROR_STOP=1 --file=/opt/csms/check_app_super_role.sql
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - ocppnet
+    restart: "no"
+    logging: *default-logging
 
   redis:
     image: redis:7-alpine
@@ -48,6 +80,7 @@ services:
       timeout: 5s
       retries: 5
     restart: unless-stopped
+    logging: *default-logging
     deploy:
       resources:
         limits:
@@ -60,41 +93,76 @@ services:
   csms:
     build: ./csms
     container_name: ocpp-csms-prod
-    ports:
-      - "${CSMS_PORT:-9000}:9000"
+    volumes:
+      - qr_data:/data/qr
     environment:
       - ENVIRONMENT=production
       - DEBUG=false
+      - POSTGRES_USER=${DB_USER:?DB_USER must be set}
+      - POSTGRES_DB=${DB_NAME:?DB_NAME must be set}
       - DATABASE_URL=${DATABASE_URL:?DATABASE_URL must be set}
+      - SUPER_DATABASE_URL=${DATABASE_URL:?DATABASE_URL must be set}
+      - DB_POOL_SIZE=${DB_POOL_SIZE:-10}
+      - DB_MAX_OVERFLOW=${DB_MAX_OVERFLOW:-20}
+      - DB_POOL_RECYCLE=${DB_POOL_RECYCLE:-3600}
       - REDIS_URL=${REDIS_URL:?REDIS_URL must be set}
       - ENCRYPTION_KEY=${ENCRYPTION_KEY:?ENCRYPTION_KEY must be set}
       - SECRET_KEY=${SECRET_KEY:?SECRET_KEY must be set}
       - ENCRYPTION_SALT=${ENCRYPTION_SALT:?ENCRYPTION_SALT must be set}
+      - CSMS_BOOTSTRAP_SUPER_ADMIN_EMAIL=${CSMS_BOOTSTRAP_SUPER_ADMIN_EMAIL:-}
+      - CSMS_BOOTSTRAP_SUPER_ADMIN_PASSWORD=${CSMS_BOOTSTRAP_SUPER_ADMIN_PASSWORD:-}
+      - CSMS_BOOTSTRAP_TENANT_ADMIN_EMAIL=${CSMS_BOOTSTRAP_TENANT_ADMIN_EMAIL:-}
+      - CSMS_BOOTSTRAP_TENANT_ADMIN_PASSWORD=${CSMS_BOOTSTRAP_TENANT_ADMIN_PASSWORD:-}
       - OCPP_WS_REQUIRE_PRE_REGISTERED=true
-      - OCPP_API_KEYS=${OCPP_API_KEYS:?OCPP_API_KEYS must be set}
+      - ENABLE_WEBSOCKET_TRANSPORT=${ENABLE_WEBSOCKET_TRANSPORT:-true}
+      - ENABLE_MQTT_TRANSPORT=${ENABLE_MQTT_TRANSPORT:-false}
+      - ENABLE_HTTP_TRANSPORT=${ENABLE_HTTP_TRANSPORT:-false}
+      - ENABLE_DISTRIBUTED=${ENABLE_DISTRIBUTED:-false}
+      - SERVER_ID=${SERVER_ID:-}
+      - WS_PING_INTERVAL=${WS_PING_INTERVAL:-20}
+      - WS_PING_TIMEOUT=${WS_PING_TIMEOUT:-10}
+      - WS_MAX_CONNECTIONS=${WS_MAX_CONNECTIONS:-1000}
+      - HEARTBEAT_PERSIST_INTERVAL_SECONDS=${HEARTBEAT_PERSIST_INTERVAL_SECONDS:-60}
+      - METER_PERSIST_INTERVAL_SECONDS=${METER_PERSIST_INTERVAL_SECONDS:-60}
+      - METER_REALTIME_TTL_SECONDS=${METER_REALTIME_TTL_SECONDS:-86400}
+      - METER_DEDUPE_TTL_SECONDS=${METER_DEDUPE_TTL_SECONDS:-86400}
+      - CORS_ALLOW_ORIGINS=${CORS_ALLOW_ORIGINS:?CORS_ALLOW_ORIGINS must be set}
+      - PUBLIC_API_BASE_URL=${PUBLIC_API_BASE_URL:?PUBLIC_API_BASE_URL must be set}
+      - RATE_LIMIT_ENABLED=${RATE_LIMIT_ENABLED:-true}
+      - RATE_LIMIT_PER_MINUTE=${RATE_LIMIT_PER_MINUTE:-60}
+      - ENABLE_METRICS=${ENABLE_METRICS:-false}
+      - MONITORING_INTERVAL_SECONDS=${MONITORING_INTERVAL_SECONDS:-60}
+      - PAYMENT_RAILS_ENABLED=${PAYMENT_RAILS_ENABLED:-false}
+      - ALLOW_MOCK_WALLET_TOP_UP=false
+      - QR_STORAGE_DIR=/data/qr
+      - SMTP_HOST=${SMTP_HOST:-}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USER=${SMTP_USER:-}
+      - SMTP_PASSWORD=${SMTP_PASSWORD:-}
+      - SMTP_FROM=${SMTP_FROM:-}
+      - SMTP_TLS=${SMTP_TLS:-true}
+      - SMTP_SSL=${SMTP_SSL:-false}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - LOG_FORMAT=${LOG_FORMAT:-json}
       - DOCS_URL=${DOCS_URL:-None}
       - REDOC_URL=${REDOC_URL:-None}
+      - FORWARDED_ALLOW_IPS=*
     depends_on:
-      db:
-        condition: service_healthy
+      db-role-init:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9000/readyz"]
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://localhost:9000/readyz"]
       interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 20s
+      timeout: 20s
+      retries: 5
+      start_period: 60s
     networks:
       - ocppnet
     restart: unless-stopped
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
+    stop_grace_period: 30s
+    logging: *default-logging
     deploy:
       resources:
         limits:
@@ -111,38 +179,83 @@ services:
       args:
         NEXT_PUBLIC_GOOGLE_MAPS_API_KEY: ${NEXT_PUBLIC_GOOGLE_MAPS_API_KEY:-}
         NEXT_PUBLIC_GOOGLE_MAP_ID: ${NEXT_PUBLIC_GOOGLE_MAP_ID:-}
-        NEXT_PUBLIC_CSMS_HTTP: ${NEXT_PUBLIC_CSMS_HTTP:-}
-        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-}
+        NEXT_PUBLIC_CSMS_HTTP: ${NEXT_PUBLIC_CSMS_HTTP:?NEXT_PUBLIC_CSMS_HTTP must be set}
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:?NEXT_PUBLIC_API_BASE_URL must be set}
     container_name: ocpp-admin-prod
-    ports:
-      - "${ADMIN_PORT:-3000}:3000"
     environment:
-      # 前端API地址配置（必须设置！）
-      # 方式1：通过环境变量手动指定（推荐）
-      # 设置方式：export NEXT_PUBLIC_CSMS_HTTP=http://47.236.134.99:9000
-      # 或者在 .env 文件中设置：NEXT_PUBLIC_CSMS_HTTP=http://47.236.134.99:9000
-      # 方式2：如果不设置，前端会自动检测当前页面的 hostname 并使用相同 hostname + 端口 9000
-      # 例如：访问 http://47.236.134.99:3000 时，会自动使用 http://47.236.134.99:9000
-      # 注意：如果访问URL包含占位符（如 your-server-ip），会导致连接失败
-      - NEXT_PUBLIC_CSMS_HTTP=${NEXT_PUBLIC_CSMS_HTTP:-}
-      - NEXT_PUBLIC_API_BASE_URL=${NEXT_PUBLIC_API_BASE_URL:-}
-      # 禁用 Next.js 遥测（消除浏览器控制台的 127.0.0.1:7242 错误）
+      - NEXT_PUBLIC_CSMS_HTTP=${NEXT_PUBLIC_CSMS_HTTP:?NEXT_PUBLIC_CSMS_HTTP must be set}
+      - NEXT_PUBLIC_API_BASE_URL=${NEXT_PUBLIC_API_BASE_URL:?NEXT_PUBLIC_API_BASE_URL must be set}
       - NEXT_TELEMETRY_DISABLED=1
     depends_on:
-      - csms
+      csms:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://127.0.0.1:3000/login"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
     networks:
       - ocppnet
     restart: unless-stopped
+    logging: *default-logging
     deploy:
       resources:
         limits:
           cpus: '1'
           memory: 1G
 
+  proxy:
+    image: caddy:2.11-alpine
+    container_name: ocpp-proxy-prod
+    environment:
+      - ADMIN_DOMAIN=${ADMIN_DOMAIN:?ADMIN_DOMAIN must be set}
+      - API_DOMAIN=${API_DOMAIN:?API_DOMAIN must be set}
+      - ACME_EMAIL=${ACME_EMAIL:?ACME_EMAIL must be set}
+    ports:
+      - "${PROXY_BIND_ADDRESS:-0.0.0.0}:${PUBLIC_HTTP_PORT:-80}:80/tcp"
+      - "${PROXY_BIND_ADDRESS:-0.0.0.0}:${PUBLIC_HTTPS_PORT:-443}:443/tcp"
+      - "${PROXY_BIND_ADDRESS:-0.0.0.0}:${PUBLIC_HTTPS_PORT:-443}:443/udp"
+    volumes:
+      - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      admin:
+        condition: service_healthy
+      csms:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "caddy", "validate", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    networks:
+      - ocppnet
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+
 volumes:
   postgres_data:
     driver: local
   redis_data:
+    driver: local
+  qr_data:
+    driver: local
+  caddy_data:
+    driver: local
+  caddy_config:
     driver: local
 
 networks:

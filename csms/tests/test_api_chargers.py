@@ -185,11 +185,18 @@ class TestChargersAPI:
         data = response.json()
         assert data["vendor"] == "更新厂商"
     
-    def test_delete_charger(self, admin_client: TestClient, sample_charge_point):
-        """测试删除充电桩"""
-        response = admin_client.delete(f"/api/v1/chargers/{sample_charge_point.id}")
-        assert response.status_code == 200
-        
-        # 验证已删除
+    def test_delete_charger_rejects_used_asset(self, admin_client: TestClient, sample_charge_point):
+        """绑定过设备的充电桩不能永久删除。"""
+        response = admin_client.request(
+            "DELETE",
+            f"/api/v1/chargers/{sample_charge_point.id}",
+            json={
+                "confirmation": sample_charge_point.ocpp_identity,
+                "reason": "Created by mistake",
+            },
+        )
+        assert response.status_code == 409
+        assert response.json()["error"]["code"] == "charger_permanent_delete_blocked"
+
         response = admin_client.get(f"/api/v1/chargers/{sample_charge_point.id}")
-        assert response.status_code == 404
+        assert response.status_code == 200

@@ -3,7 +3,7 @@
 # 使用pydantic-settings进行配置验证和管理
 #
 
-from pydantic import model_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import List, Optional
 from functools import lru_cache
@@ -70,6 +70,10 @@ class Settings(BaseSettings):
     
     # OCPP配置
     ocpp_heartbeat_interval: int = 30
+    heartbeat_persist_interval_seconds: int = 60
+    meter_persist_interval_seconds: int = 60
+    meter_realtime_ttl_seconds: int = 86400
+    meter_dedupe_ttl_seconds: int = 86400
     ocpp_message_timeout: int = 5
     ocpp_max_retries: int = 3
     
@@ -86,6 +90,13 @@ class Settings(BaseSettings):
     api_v1_prefix: str = "/api/v1"
     docs_url: Optional[str] = "/docs"
     redoc_url: Optional[str] = "/redoc"
+
+    @field_validator("docs_url", "redoc_url", mode="before")
+    @classmethod
+    def normalize_optional_documentation_url(cls, value):
+        if isinstance(value, str) and value.strip().lower() in {"", "none", "null", "false", "off"}:
+            return None
+        return value
     
     # 速率限制
     rate_limit_enabled: bool = True

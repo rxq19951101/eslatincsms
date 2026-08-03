@@ -24,14 +24,18 @@ def verify_charge_point_pre_registered(charge_point_id: str) -> bool:
         return False
     try:
         from app.database.base import SuperSessionLocal
-        from app.database.models import ChargePoint
+        from app.database.models import ChargePoint, Site
 
         # Pre-registration is a system lookup by transport identity, before a
         # tenant can be derived from the registered asset.
         db = SuperSessionLocal()
         try:
             return (
-                db.query(ChargePoint.id).filter(ChargePoint.ocpp_identity == charge_point_id).first()
+                db.query(ChargePoint.id).filter(
+                    ChargePoint.ocpp_identity == charge_point_id,
+                    ChargePoint.is_active.is_(True),
+                    ChargePoint.site.has(Site.is_active.is_(True)),
+                ).first()
                 is not None
             )
         finally:
@@ -74,13 +78,14 @@ def verify_ocpp_device_credential(charge_point_id: str, headers: dict) -> bool:
         return False
     try:
         from app.database.base import SuperSessionLocal
-        from app.database.models import ChargePoint
+        from app.database.models import ChargePoint, Site
 
         db = SuperSessionLocal()
         try:
             charge_point = db.query(ChargePoint).filter(
                 ChargePoint.ocpp_identity == charge_point_id,
                 ChargePoint.is_active == True,  # noqa: E712
+                ChargePoint.site.has(Site.is_active.is_(True)),
             ).first()
             if not charge_point or not charge_point.ocpp_auth_secret_hash:
                 return False
@@ -95,6 +100,26 @@ def verify_ocpp_device_credential(charge_point_id: str, headers: dict) -> bool:
         return False
 
 
+def _charge_point_has_device_credential(charge_point_id: str) -> bool:
+    try:
+        from app.database.base import SuperSessionLocal
+        from app.database.models import ChargePoint, Site
+
+        db = SuperSessionLocal()
+        try:
+            return db.query(ChargePoint.id).filter(
+                ChargePoint.ocpp_identity == charge_point_id,
+                ChargePoint.is_active.is_(True),
+                ChargePoint.site.has(Site.is_active.is_(True)),
+                ChargePoint.ocpp_auth_secret_hash.isnot(None),
+            ).first() is not None
+        finally:
+            db.close()
+    except Exception as exc:
+        logger.error("OCPP credential presence lookup failed identity=%s: %s", charge_point_id, exc)
+        return True
+
+
 def is_secure_ocpp_websocket(headers: dict, scheme: str) -> bool:
     forwarded = str(headers.get("x-forwarded-proto") or headers.get("X-Forwarded-Proto") or "")
     effective_scheme = forwarded.split(",", 1)[0].strip().lower() or scheme.lower()
@@ -105,8 +130,18 @@ def verify_ocpp_api_key(headers: dict, charge_point_id: Optional[str] = None) ->
     """
     API Key 校验。生产环境必须配置并匹配 OCPP_API_KEYS。
     """
-    if charge_point_id and verify_ocpp_device_credential(charge_point_id, headers):
-        return True
+    if charge_point_id:
+        # Lifecycle eligibility is mandatory even when pre-registration is
+        # disabled at the transport layer or a non-production migration key is
+        # configured. A retired charger/archived site must fail closed.
+        if not verify_charge_point_pre_registered(charge_point_id):
+            return False
+        if verify_ocpp_device_credential(charge_point_id, headers):
+            return True
+        # Once a per-device credential exists, a wrong presented value must
+        # never fall through to a development/global migration key.
+        if _charge_point_has_device_credential(charge_point_id):
+            return False
 
     keys_env = os.getenv("OCPP_API_KEYS", "").strip()
     if not keys_env:

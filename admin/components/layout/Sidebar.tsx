@@ -18,6 +18,7 @@ import {
   X,
   CreditCard,
   Activity,
+  Archive,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useAuthStore } from '@/store/authStore';
@@ -25,9 +26,19 @@ import { usePermissions, hasPermission } from '@/hooks/usePermissions';
 import { useI18n } from '@/lib/i18n';
 import Image from 'next/image';
 
-const navigation = [
+interface NavigationItem {
+  key: string;
+  href: string;
+  icon: typeof LayoutDashboard;
+  permission?: string;
+  anyPermissions?: string[];
+  superAdminOnly?: boolean;
+}
+
+const navigation: NavigationItem[] = [
   { key: 'dashboard', href: '/', icon: LayoutDashboard },
   { key: 'sites', href: '/sites', icon: Zap, permission: 'sites.read' },
+  { key: 'assetArchive', href: '/asset-archive', icon: Archive, anyPermissions: ['sites.read', 'chargers.read'] },
   { key: 'transactions', href: '/transactions', icon: FileText, permission: 'transactions.read' },
   { key: 'sessions', href: '/sessions', icon: Activity, permission: 'transactions.read' },
   { key: 'payments', href: '/payments', icon: CreditCard, superAdminOnly: true },
@@ -47,6 +58,11 @@ export function Sidebar() {
   const { t } = useI18n();
   const visibleNavigation = navigation.filter((item) => {
     if (item.superAdminOnly) return !!user?.is_super_admin;
+    if (item.anyPermissions) {
+      return !!user?.is_super_admin
+        || isLoading
+        || item.anyPermissions.some((permission) => hasPermission(permissions, permission));
+    }
     if (!item.permission || user?.is_super_admin || isLoading) return true;
     return hasPermission(permissions, item.permission);
   });

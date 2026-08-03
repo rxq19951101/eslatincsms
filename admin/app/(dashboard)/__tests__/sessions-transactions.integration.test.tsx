@@ -70,7 +70,7 @@ vi.mock('swr', () => ({
   default: (key: string) => ({
     data: key.endsWith('/active')
       ? activeSessions
-      : key === '/api/v1/sites'
+      : key === '/api/v1/sites?lifecycle_status=active'
         ? []
         : key.startsWith('/api/v1/transactions?')
           ? chargingRecords

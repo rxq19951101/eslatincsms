@@ -21,6 +21,7 @@ import { createMoneyFormatter, DEFAULT_CURRENCY, normalizeCurrency } from '@/lib
 import { normalizeDashboardChargePointMetrics } from '@/lib/localization';
 import { useAuthStore } from '@/store/authStore';
 import { hasPermission, usePermissions } from '@/hooks/usePermissions';
+import { isOperationalSite } from '@/lib/assetLifecycle';
 
 const fetcher = <T,>(url: string) => apiGet<T>(url);
 
@@ -49,7 +50,7 @@ export default function DashboardPage() {
   const formatMoney = useMemo(() => createMoneyFormatter(locale, currency), [currency, locale]);
 
   // 站点列表（用于下拉选择）
-  const { data: sites } = useSWR<SiteListItem[]>(API_ENDPOINTS.SITES, fetcher, {
+  const { data: sites } = useSWR<SiteListItem[]>(API_ENDPOINTS.SITES_ACTIVE, fetcher, {
     refreshInterval: REFRESH_INTERVAL,
   });
 
@@ -85,10 +86,12 @@ export default function DashboardPage() {
     }
   );
 
+  const operationalSites = useMemo(() => (sites || []).filter(isOperationalSite), [sites]);
+
   const selectedSite = useMemo(() => {
     if (selectedSiteId === 'all') return null;
-    return (sites || []).find((s) => s.id === selectedSiteId) || null;
-  }, [selectedSiteId, sites]);
+    return operationalSites.find((s) => s.id === selectedSiteId) || null;
+  }, [operationalSites, selectedSiteId]);
 
   const selectedSiteStat = useMemo(() => {
     if (selectedSiteId === 'all') return null;
@@ -262,7 +265,7 @@ export default function DashboardPage() {
             </SelectTrigger>
             <SelectContent className="bg-slate-800 border-slate-700">
               <SelectItem value="all">{t('全部站点（租户汇总）')}</SelectItem>
-              {(sites || []).map((s) => (
+              {operationalSites.map((s) => (
                 <SelectItem key={s.id} value={s.id}>
                   {s.name}
                 </SelectItem>

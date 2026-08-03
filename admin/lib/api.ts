@@ -324,8 +324,16 @@ export function apiPut<T = unknown>(
 /**
  * DELETE 请求
  */
-export function apiDelete<T = unknown>(endpoint: string, config?: RequestConfig): Promise<T> {
-  return apiRequest<T>(endpoint, { ...config, method: 'DELETE' });
+export function apiDelete<T = unknown>(
+  endpoint: string,
+  data?: unknown,
+  config?: RequestConfig
+): Promise<T> {
+  return apiRequest<T>(endpoint, {
+    ...config,
+    method: 'DELETE',
+    body: data ? JSON.stringify(data) : undefined,
+  });
 }
 
 /**

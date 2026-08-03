@@ -23,6 +23,7 @@ import { Building2, MapPin, Plus } from 'lucide-react';
 import GooglePlacesAutocomplete from '@/components/sites/GooglePlacesAutocomplete';
 import { useI18n } from '@/lib/i18n';
 import { matchesSearchQuery } from '@/lib/search';
+import { isOperationalSite, operationalChargePointCount } from '@/lib/assetLifecycle';
 import {
   apiErrorMessageKey,
   apiFieldErrors,
@@ -65,13 +66,13 @@ export default function SitesPage() {
   const [operatingHours, setOperatingHours] = useState('');
 
   const { data: sites, error, isLoading, mutate } = useSWR<SiteListItem[]>(
-    API_ENDPOINTS.SITES,
+    API_ENDPOINTS.SITES_ACTIVE,
     fetcher,
     { refreshInterval: 30000 }
   );
 
   const filtered = useMemo(() => {
-    const list = sites || [];
+    const list = (sites || []).filter(isOperationalSite);
     return list.filter((site) => matchesSearchQuery(searchQuery, [site.name, site.address]));
   }, [sites, searchQuery]);
 
@@ -209,7 +210,7 @@ export default function SitesPage() {
                           {s.address}
                         </div>
                       </td>
-                      <td className="py-3 px-4 text-slate-300">{s.charge_points_count}</td>
+                      <td className="py-3 px-4 text-slate-300">{operationalChargePointCount(s)}</td>
                       <td className="py-3 px-4 text-slate-300">{s.online_charge_points_count ?? 0}</td>
                       <td className="py-3 px-4 text-right">
                         <Button

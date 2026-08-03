@@ -43,8 +43,8 @@ steps:
     action: remote_start
     with:
       charge_point_id: ${seed.charge_point.ocpp_identity}
-      id_tag: ACCEPTANCE-TAG
       connector_id: 1
+      operation_reason: SIM E2E acceptance remote start
       idempotency_key: "${run_id}:acceptance-start"
     expect: {status: 200, body.success: true}
   - {id: start-propagation, actor: system, action: await, with: {seconds: 1}}
@@ -56,14 +56,16 @@ steps:
       path: /api/v1/transactions
       query: {charge_point_id: "${seed.charge_point.ocpp_identity}", status: ongoing}
     retry: 5
-    expect: {status: 200, body: {min_count: 1}}
-    save: {transaction_id: body.0.transaction_id}
+    expect: {status: 200, body.items: {min_count: 1}}
+    save:
+      session_id: body.items.0.id
   - id: remote-stop
     actor: admin
     action: remote_stop
     with:
-      charge_point_id: ${seed.charge_point.ocpp_identity}
-      transaction_id: ${transaction_id}
+      session_id: ${session_id}
+      operation_reason: SIM E2E acceptance remote stop
+      idempotency_key: "${run_id}:acceptance-stop"
     expect: {status: 200, body.success: true}
   - {id: stop-propagation, actor: system, action: await, with: {seconds: 1}}
   - {id: reconnect, actor: charger, action: reconnect, with: {delay: 0.2}, expect: {status: connected}}

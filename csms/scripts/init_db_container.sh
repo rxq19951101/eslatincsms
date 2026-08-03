@@ -54,6 +54,16 @@ cd /app
 alembic upgrade head
 echo "✓ 数据库 schema 已升级到 Alembic head"
 
+# 生产运行时依赖 app_super；角色由 Compose 的 db-role-init 预先创建，
+# schema 完成后在这里校验所有表和序列授权，失败时禁止应用带病启动。
+if [ "${ENVIRONMENT:-development}" = "production" ]; then
+    echo "校验生产 app_super 角色与 schema 权限..."
+    psql "${DATABASE_URL:?DATABASE_URL must be set}" \
+        --set=ON_ERROR_STOP=1 \
+        --file=/app/scripts/check_app_super_role.sql
+    echo "✓ app_super 角色与 schema 权限校验通过"
+fi
+
 # 检查是否需要创建初始数据
 echo ""
 echo "检查是否需要创建初始数据..."

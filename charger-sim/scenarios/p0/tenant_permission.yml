@@ -48,8 +48,8 @@ steps:
     action: remote_start
     with:
       charge_point_id: ${seed.tenant_b.charge_point.ocpp_identity}
-      id_tag: CROSS-TENANT
       connector_id: 1
+      operation_reason: SIM E2E cross tenant rejection
     expect: {status: 403, body.error.status_code: 403}
   - {id: readonly-login, actor: readonly_admin, action: login, expect: {status: 200}}
   - id: readonly-write

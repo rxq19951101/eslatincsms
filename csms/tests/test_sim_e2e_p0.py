@@ -535,6 +535,7 @@ def test_seed_is_environment_guarded_idempotent_and_non_sensitive(
     ).count() == 1
     operator_role = db_session.get(Role, seed_sim_e2e.stable_id("role"))
     assert "alerts.write" in operator_role.permissions
+    assert "transactions.read" in operator_role.permissions
     assert "alerts.manage" not in operator_role.permissions
     assert db_session.query(ChargingSession).filter_by(
         id=uuid.UUID(first["fixtures"]["ownership_session"]["id"])

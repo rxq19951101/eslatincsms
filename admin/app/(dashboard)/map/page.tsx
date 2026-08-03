@@ -9,6 +9,7 @@ import { apiGet } from '@/lib/api';
 import { API_ENDPOINTS } from '@/lib/constants';
 import type { SiteListItem } from '@/types';
 import { useI18n } from '@/lib/i18n';
+import { isOperationalSite, operationalChargePointCount } from '@/lib/assetLifecycle';
 
 const hasUsableCoordinates = (lat: number, lng: number) =>
   Number.isFinite(lat) && Number.isFinite(lng) && Math.abs(lat) <= 90 && Math.abs(lng) <= 180 && !(lat === 0 && lng === 0);
@@ -31,18 +32,19 @@ const fetcher = (url: string) => apiGet<SiteListItem[]>(url);
 
 export default function MapPage() {
   const { t } = useI18n();
-  const { data: sites, isLoading } = useSWR(API_ENDPOINTS.SITES, fetcher, {
+  const { data: sites, isLoading } = useSWR(API_ENDPOINTS.SITES_ACTIVE, fetcher, {
     refreshInterval: 30000,
   });
 
   const markers = useMemo(
     () =>
       (sites || [])
+        .filter(isOperationalSite)
         .filter((s) => hasUsableCoordinates(s.latitude, s.longitude))
         .map((s) => ({
           lat: s.latitude,
           lng: s.longitude,
-          title: `${t(s.name)} (${s.charge_points_count} ${t('充电桩')})`,
+          title: `${t(s.name)} (${operationalChargePointCount(s)} ${t('充电桩')})`,
         })),
     [sites, t]
   );

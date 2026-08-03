@@ -88,7 +88,14 @@ class TestOCPPMessageHandler:
         assert event.charge_point_id == sample_charge_point.id
     
     @pytest.mark.asyncio
-    async def test_handle_heartbeat(self, handler: OCPPMessageHandler, db_session, sample_charge_point, sample_device):
+    async def test_handle_heartbeat(
+        self,
+        handler: OCPPMessageHandler,
+        db_session,
+        sample_charge_point,
+        sample_device,
+        sample_evse_status,
+    ):
         """测试处理Heartbeat"""
         response = await handler.handle_heartbeat(
             charge_point_id=sample_charge_point.ocpp_identity,
@@ -99,12 +106,15 @@ class TestOCPPMessageHandler:
         
         assert "currentTime" in response
         
-        # 检查是否创建了DeviceEvent
+        db_session.refresh(sample_evse_status)
+        assert sample_evse_status.last_seen is not None
+
+        # 正常心跳只更新在线快照，不创建永久事件。
         event = db_session.query(DeviceEvent).filter(
             DeviceEvent.charge_point_id == sample_charge_point.id,
             DeviceEvent.event_type == "heartbeat"
         ).first()
-        assert event is not None
+        assert event is None
     
     @pytest.mark.asyncio
     async def test_handle_status_notification_new(

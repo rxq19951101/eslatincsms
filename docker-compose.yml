@@ -120,12 +120,35 @@ services:
       - ocppnet
     restart: unless-stopped
 
+  sim-e2e-seed:
+    profiles: ["simulator", "e2e"]
+    build: ./csms
+    entrypoint: ["python", "scripts/seed_sim_e2e.py"]
+    environment:
+      - ENVIRONMENT=development
+      - DATABASE_URL=postgresql://ocpp_user:${POSTGRES_PASSWORD}@db:5432/ocpp
+      - REDIS_URL=redis://redis:6379/0
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY}
+      - SECRET_KEY=${SECRET_KEY}
+      - SIM_E2E_ADMIN_PASSWORD=${SIM_E2E_ADMIN_PASSWORD}
+      - SIM_E2E_APP_PASSWORD=${SIM_E2E_APP_PASSWORD}
+      - SIM_E2E_READONLY_PASSWORD=${SIM_E2E_READONLY_PASSWORD}
+    depends_on:
+      csms:
+        condition: service_healthy
+    networks:
+      - ocppnet
+    restart: "no"
+
   charger-sim:
     profiles: ["simulator"]
     build: ./charger-sim
     container_name: ocpp-charger-sim
     depends_on:
-      - csms
+      csms:
+        condition: service_healthy
+      sim-e2e-seed:
+        condition: service_completed_successfully
     networks:
       - ocppnet
     command:
@@ -190,7 +213,10 @@ services:
     build: ./charger-sim
     container_name: ocpp-charger-scenario
     depends_on:
-      - csms
+      csms:
+        condition: service_healthy
+      sim-e2e-seed:
+        condition: service_completed_successfully
     networks:
       - ocppnet
     environment:

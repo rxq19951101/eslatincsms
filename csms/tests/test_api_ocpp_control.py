@@ -32,6 +32,39 @@ class TestOCPPControlAPI:
         assert response.status_code == 200
         assert response.json()["success"] is True
 
+    @pytest.mark.parametrize(
+        ("retire_charger", "archive_site", "expected_code"),
+        [
+            (True, False, "charger_not_operational"),
+            (False, True, "site_not_operational"),
+        ],
+    )
+    def test_remote_start_rejects_non_operational_asset(
+        self,
+        admin_client,
+        db_session,
+        sample_site,
+        sample_charge_point,
+        retire_charger,
+        archive_site,
+        expected_code,
+    ):
+        sample_charge_point.is_active = not retire_charger
+        sample_site.is_active = not archive_site
+        db_session.commit()
+
+        response = admin_client.post(
+            "/api/v1/ocpp/remote-start-transaction",
+            json={
+                "charge_point_id": sample_charge_point.ocpp_identity,
+                "connector_id": 1,
+                "operation_reason": "Lifecycle gate test",
+            },
+        )
+
+        assert response.status_code == 409
+        assert response.json()["error"]["code"] == expected_code
+
     def test_remote_start_accepts_body_idempotency_key_and_replays_once(
         self, admin_client: TestClient, db_session, sample_charge_point, sample_evse,
         sample_evse_status,
@@ -49,6 +82,17 @@ class TestOCPPControlAPI:
             new=AsyncMock(return_value={"success": True, "status": "Accepted"}),
         ) as sender:
             first = admin_client.post("/api/v1/ocpp/remote-start-transaction", json=payload)
+            sample_evse_status.status = "Charging"
+            db_session.add(ChargingSession(
+                tenant_id=sample_charge_point.tenant_id,
+                evse_id=sample_evse.id,
+                charge_point_id=sample_charge_point.id,
+                transaction_id=22345,
+                id_tag="TEST_REMOTE_START_REPLAY",
+                start_time=datetime.now(timezone.utc),
+                status="ongoing",
+            ))
+            db_session.commit()
             replay = admin_client.post("/api/v1/ocpp/remote-start-transaction", json=payload)
 
         assert first.status_code == replay.status_code == 200
@@ -61,6 +105,83 @@ class TestOCPPControlAPI:
         ).one()
         assert event.payload["id_tag"].startswith("OPS-")
         assert event.payload["operation_reason"] == "Acceptance test idempotent start"
+
+    @pytest.mark.parametrize(
+        "changed_fields",
+        [
+            {"connector_id": 2},
+            {"operation_reason": "Different remote start reason"},
+        ],
+    )
+    def test_remote_start_rejects_idempotency_key_reused_with_different_parameters(
+        self, admin_client: TestClient, sample_charge_point, sample_evse,
+        sample_evse_status, changed_fields,
+    ):
+        payload = {
+            "charge_point_id": sample_charge_point.ocpp_identity,
+            "connector_id": sample_evse.evse_id,
+            "operation_reason": "Original remote start reason",
+        }
+        headers = {"Idempotency-Key": "remote-start-parameter-binding"}
+        with patch.dict(ocpp_control._remote_start_inflight, {}, clear=True), patch(
+            "app.api.v1.ocpp_control.check_charger_connection", return_value=True
+        ), patch(
+            "app.api.v1.ocpp_control.message_handler.send_call",
+            new=AsyncMock(return_value={"success": True, "status": "Accepted"}),
+        ) as sender:
+            first = admin_client.post(
+                "/api/v1/ocpp/remote-start-transaction", json=payload, headers=headers
+            )
+            changed_payload = {**payload, **changed_fields}
+            reused = admin_client.post(
+                "/api/v1/ocpp/remote-start-transaction", json=changed_payload, headers=headers
+            )
+
+        assert first.status_code == 200
+        assert reused.status_code == 409
+        assert reused.json()["error"]["code"] == "IDEMPOTENCY_KEY_REUSED"
+        sender.assert_awaited_once()
+
+    def test_remote_start_rejects_idempotency_key_reused_for_another_charge_point(
+        self, admin_client: TestClient, db_session, sample_charge_point, sample_evse,
+        sample_evse_status,
+    ):
+        other_charge_point = type(sample_charge_point)(
+            id="CP-TEST-002",
+            tenant_id=sample_charge_point.tenant_id,
+            site_id=sample_charge_point.site_id,
+            display_code="B01",
+            vendor="测试厂商",
+            model="测试型号",
+            is_active=True,
+        )
+        db_session.add(other_charge_point)
+        db_session.commit()
+        payload = {
+            "charge_point_id": sample_charge_point.ocpp_identity,
+            "connector_id": sample_evse.evse_id,
+            "operation_reason": "Original charge point binding",
+        }
+        headers = {"Idempotency-Key": "remote-start-charge-point-binding"}
+        with patch.dict(ocpp_control._remote_start_inflight, {}, clear=True), patch(
+            "app.api.v1.ocpp_control.check_charger_connection", return_value=True
+        ), patch(
+            "app.api.v1.ocpp_control.message_handler.send_call",
+            new=AsyncMock(return_value={"success": True, "status": "Accepted"}),
+        ) as sender:
+            first = admin_client.post(
+                "/api/v1/ocpp/remote-start-transaction", json=payload, headers=headers
+            )
+            reused = admin_client.post(
+                "/api/v1/ocpp/remote-start-transaction",
+                json={**payload, "charge_point_id": other_charge_point.ocpp_identity},
+                headers=headers,
+            )
+
+        assert first.status_code == 200
+        assert reused.status_code == 409
+        assert reused.json()["error"]["code"] == "IDEMPOTENCY_KEY_REUSED"
+        sender.assert_awaited_once()
 
     def test_remote_start_rejects_conflicting_header_and_body_idempotency_keys(
         self, admin_client: TestClient, db_session, sample_charge_point, sample_evse

@@ -82,8 +82,17 @@ class NotificationService:
             msg["From"] = from_addr
             msg["To"] = ", ".join(to_addrs)
 
-            with smtplib.SMTP(host, port, timeout=15) as server:
-                if os.getenv("SMTP_TLS", "true").lower() in ("true", "1", "yes"):
+            use_ssl = (
+                os.getenv("SMTP_SSL", "").lower() in ("true", "1", "yes")
+                or port == 465
+            )
+            use_tls = (
+                os.getenv("SMTP_TLS", "true").lower() in ("true", "1", "yes")
+                and not use_ssl
+            )
+            smtp_class = smtplib.SMTP_SSL if use_ssl else smtplib.SMTP
+            with smtp_class(host, port, timeout=15) as server:
+                if use_tls:
                     server.starttls()
                 if user and password:
                     server.login(user, password)

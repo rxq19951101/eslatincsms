@@ -4,10 +4,11 @@ import { useMemo, useState } from 'react';
 import useSWR from 'swr';
 import { apiGet } from '@/lib/api';
 import { API_ENDPOINTS } from '@/lib/constants';
+import { isOperationalSite } from '@/lib/assetLifecycle';
 import type { SiteListItem, TrendDataPoint } from '@/types';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Input } from '@/components/ui/input';
+import { LocalizedDateInput } from '@/components/ui/localized-date-input';
 import { Label } from '@/components/ui/label';
 import { Button } from '@/components/ui/button';
 import { Download, RefreshCw } from 'lucide-react';
@@ -156,7 +157,7 @@ export default function StatisticsPage() {
   }, [customRangeIsValid, endDate, range, siteId, startDate]);
 
   const { data: sites, error: sitesError, isLoading: sitesLoading, mutate: retrySites } = useSWR<SiteListItem[]>(
-    API_ENDPOINTS.SITES,
+    API_ENDPOINTS.SITES_ACTIVE,
     fetcher
   );
 
@@ -277,21 +278,25 @@ export default function StatisticsPage() {
               <>
                 <div className="space-y-2">
                   <Label htmlFor="report-start-date">{t('reports.startDate')}</Label>
-                  <Input
+                  <LocalizedDateInput
                     id="report-start-date"
-                    type="date"
+                    aria-label={t('reports.startDate')}
+                    testId="reports-start-date"
                     value={startDate}
-                    onChange={(event) => setStartDate(event.target.value)}
+                    max={endDate || undefined}
+                    onChange={setStartDate}
                     className="bg-slate-900/60 border-slate-700"
                   />
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="report-end-date">{t('reports.endDate')}</Label>
-                  <Input
+                  <LocalizedDateInput
                     id="report-end-date"
-                    type="date"
+                    aria-label={t('reports.endDate')}
+                    testId="reports-end-date"
                     value={endDate}
-                    onChange={(event) => setEndDate(event.target.value)}
+                    min={startDate || undefined}
+                    onChange={setEndDate}
                     className="bg-slate-900/60 border-slate-700"
                   />
                 </div>
@@ -306,7 +311,7 @@ export default function StatisticsPage() {
                 </SelectTrigger>
                 <SelectContent className="bg-slate-800 border-slate-700">
                   <SelectItem value="all">{t('reports.allSites')}</SelectItem>
-                  {(sites ?? []).map((site) => (
+                  {(sites ?? []).filter(isOperationalSite).map((site) => (
                     <SelectItem key={site.id} value={site.id}>{site.name}</SelectItem>
                   ))}
                 </SelectContent>

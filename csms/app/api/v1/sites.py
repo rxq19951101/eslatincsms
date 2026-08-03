@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-from sqlalchemy import func, or_
+from sqlalchemy import func, literal, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -18,7 +18,20 @@ from app.core.asset_identifiers import OCPP_IDENTITY_PATTERN, get_charge_point_b
 from app.core.logging_config import get_logger
 from app.core.permissions import get_current_admin_user, require_permission
 from app.database.base import get_db, tenant_id_context
-from app.database.models import ChargePoint, EVSE, EVSEStatus, Site, Tariff
+from app.database.models import (
+    AppUserFavoriteSite,
+    AuditLog,
+    ChargePoint,
+    ChargingSession,
+    EVSE,
+    EVSEStatus,
+    Invoice,
+    Order,
+    OutboxEvent,
+    Payment,
+    Site,
+    Tariff,
+)
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from app.api.validation import OperatingHours, SiteCoordinatesMixin, StrictRequestModel, TrimmedAddress, TrimmedSiteName
@@ -27,6 +40,19 @@ from app.api.validation import OperatingHours, SiteCoordinatesMixin, StrictReque
 ONLINE_THRESHOLD_SECONDS = 300
 from app.core.permissions import has_permission
 from app.services.role_service import MembershipRoleService
+from app.services.asset_lifecycle_service import (
+    SITE_ARCHIVE_ACTION,
+    SITE_DELETE_ACTION,
+    SITE_RESTORE_ACTION,
+    CHARGER_MOVE_ACTION,
+    LifecycleReasonError,
+    add_lifecycle_audit,
+    apply_site_archived_state,
+    apply_site_restored_state,
+    latest_lifecycle_audit,
+    normalize_lifecycle_reason,
+    site_lifecycle_status,
+)
 
 logger = get_logger("ocpp_csms")
 
@@ -63,6 +89,12 @@ class SiteListItem(BaseModel):
     domain: Optional[str]
     charge_points_count: int
     online_charge_points_count: int
+    lifecycle_status: Literal["active", "archived"]
+    archived_at: Optional[str] = None
+    archive_reason: Optional[str] = None
+    active_charge_points_count: int
+    retiring_charge_points_count: int = 0
+    retired_charge_points_count: int
     created_at: str
     updated_at: str
 
@@ -79,6 +111,7 @@ class SiteDetailChargePoint(BaseModel):
     last_seen: Optional[str]
     site_id: str
     site_name: Optional[str] = None
+    lifecycle_status: Literal["active", "retired"] = "active"
 
 
 class SiteDetailResponse(BaseModel):
@@ -93,6 +126,12 @@ class SiteDetailResponse(BaseModel):
     domain: Optional[str]
     price_per_kwh: Optional[float] = None
     charge_points: List[SiteDetailChargePoint]
+    lifecycle_status: Literal["active", "archived"]
+    archived_at: Optional[str] = None
+    archive_reason: Optional[str] = None
+    active_charge_points_count: int
+    retiring_charge_points_count: int = 0
+    retired_charge_points_count: int
     created_at: str
     updated_at: str
 
@@ -110,6 +149,54 @@ class SitePricingResponse(BaseModel):
     base_price_per_kwh: Decimal
     service_fee: Decimal
     valid_from: str
+
+
+class SiteLifecycleRequest(StrictRequestModel):
+    reason: str = Field(..., min_length=3, max_length=500)
+
+
+class PermanentDeleteSiteRequest(SiteLifecycleRequest):
+    confirmation: str = Field(..., min_length=1, max_length=100)
+
+
+def _coded_http_exception(status_code: int, code: str, message: str, **details) -> HTTPException:
+    exc = HTTPException(
+        status_code=status_code,
+        detail={"code": code, "message": message, **details},
+    )
+    exc.error_code = code
+    return exc
+
+
+def _normalized_reason(reason: str) -> str:
+    try:
+        return normalize_lifecycle_reason(reason)
+    except LifecycleReasonError as exc:
+        raise _coded_http_exception(422, "invalid_lifecycle_reason", str(exc)) from exc
+
+
+def _site_archive_audit(db: Session, site: Site):
+    if site_lifecycle_status(site) != "archived":
+        return None
+    return latest_lifecycle_audit(
+        db,
+        tenant_id=site.tenant_id,
+        resource_type="site",
+        resource_id=str(site.id),
+        actions=(SITE_ARCHIVE_ACTION,),
+    )
+
+
+def _site_lifecycle_fields(db: Session, site: Site) -> dict:
+    archive_audit = _site_archive_audit(db, site)
+    return {
+        "lifecycle_status": site_lifecycle_status(site),
+        "archived_at": archive_audit.created_at.isoformat() if archive_audit else None,
+        "archive_reason": (
+            (archive_audit.audit_metadata or {}).get("reason")
+            if archive_audit else None
+        ),
+    }
 
 
 def _require_tenant_id_for_create(current_user_obj) -> Optional[str]:
@@ -135,12 +222,238 @@ def _get_scoped_site(db: Session, reference: str, current_user_obj) -> Site:
     return site
 
 
+def _site_archive_preflight(db: Session, site: Site) -> dict:
+    active_charge_points = (
+        db.query(ChargePoint.id, ChargePoint.display_code)
+        .filter(
+            ChargePoint.tenant_id == site.tenant_id,
+            ChargePoint.site_id == site.id,
+            ChargePoint.is_active.is_(True),
+        )
+        .all()
+    )
+    retired_charge_points = (
+        db.query(ChargePoint.id)
+        .filter(
+            ChargePoint.tenant_id == site.tenant_id,
+            ChargePoint.site_id == site.id,
+            ChargePoint.is_active.is_(False),
+        )
+        .all()
+    )
+    ongoing_sessions = (
+        db.query(ChargingSession.id)
+        .join(ChargePoint, ChargingSession.charge_point_id == ChargePoint.id)
+        .filter(
+            ChargingSession.tenant_id == site.tenant_id,
+            ChargePoint.site_id == site.id,
+            ChargingSession.status == "ongoing",
+        )
+        .all()
+    )
+
+    unsettled_records = []
+    unsettled_sessions = (
+        db.query(ChargingSession.id)
+        .join(ChargePoint, ChargingSession.charge_point_id == ChargePoint.id)
+        .filter(
+            ChargingSession.tenant_id == site.tenant_id,
+            ChargePoint.site_id == site.id,
+            ChargingSession.status != "ongoing",
+            ChargingSession.payment_status.in_(("pending", "unpaid")),
+        )
+        .all()
+    )
+    unsettled_records.extend(("charging_session", row.id) for row in unsettled_sessions)
+
+    unsettled_orders = (
+        db.query(Order.id)
+        .join(ChargePoint, Order.charge_point_id == ChargePoint.id)
+        .filter(
+            Order.tenant_id == site.tenant_id,
+            ChargePoint.site_id == site.id,
+            Order.status.in_(("pending", "authorized", "ongoing")),
+        )
+        .all()
+    )
+    unsettled_records.extend(("order", row.id) for row in unsettled_orders)
+
+    unsettled_invoices = (
+        db.query(Invoice.id)
+        .join(ChargingSession, Invoice.session_id == ChargingSession.id)
+        .join(ChargePoint, ChargingSession.charge_point_id == ChargePoint.id)
+        .filter(
+            Invoice.tenant_id == site.tenant_id,
+            ChargePoint.site_id == site.id,
+            Invoice.status == "pending",
+        )
+        .all()
+    )
+    unsettled_records.extend(("invoice", row.id) for row in unsettled_invoices)
+
+    unsettled_payments = (
+        db.query(Payment.id)
+        .join(Invoice, Payment.invoice_id == Invoice.id)
+        .join(ChargingSession, Invoice.session_id == ChargingSession.id)
+        .join(ChargePoint, ChargingSession.charge_point_id == ChargePoint.id)
+        .filter(
+            Payment.tenant_id == site.tenant_id,
+            ChargePoint.site_id == site.id,
+            Payment.status == "pending",
+        )
+        .all()
+    )
+    unsettled_records.extend(("payment", row.id) for row in unsettled_payments)
+
+    blockers = [
+        {
+            "type": "active_charge_point",
+            "resource_id": str(row.id),
+            "display_code": row.display_code,
+        }
+        for row in active_charge_points
+    ]
+    blockers.extend(
+        {"type": "ongoing_session", "resource_id": str(row.id)}
+        for row in ongoing_sessions
+    )
+    blockers.extend(
+        {
+            "type": "unsettled_business",
+            "resource_type": resource_type,
+            "resource_id": str(resource_id),
+        }
+        for resource_type, resource_id in unsettled_records
+    )
+    return {
+        "site_id": str(site.id),
+        "lifecycle_status": site_lifecycle_status(site),
+        "can_archive_now": not blockers,
+        "counts": {
+            "active_charge_points": len(active_charge_points),
+            "retiring_charge_points": 0,
+            "retired_charge_points": len(retired_charge_points),
+            "ongoing_sessions": len(ongoing_sessions),
+            "unsettled_business_records": len(unsettled_records),
+        },
+        "blockers": blockers,
+    }
+
+
+def _site_lifecycle_response(db: Session, site: Site) -> dict:
+    fields = _site_lifecycle_fields(db, site)
+    return {
+        "site_id": str(site.id),
+        "lifecycle_status": fields["lifecycle_status"],
+        "archived_at": fields["archived_at"],
+        "archive_reason": fields["archive_reason"],
+    }
+
+
+def _site_permanent_delete_blockers(db: Session, site: Site) -> list[dict]:
+    blockers: list[dict] = []
+
+    def add_count(blocker_type: str, count: int) -> None:
+        if count:
+            blockers.append({"type": blocker_type, "count": count})
+
+    if site.is_active is not True:
+        blockers.append({"type": "lifecycle_history", "count": 1})
+    add_count(
+        "charge_point",
+        db.query(ChargePoint).filter(ChargePoint.site_id == site.id).count(),
+    )
+    add_count(
+        "tariff",
+        db.query(Tariff).filter(Tariff.site_id == site.id).count(),
+    )
+    add_count(
+        "favorite",
+        db.query(AppUserFavoriteSite).filter(AppUserFavoriteSite.site_id == site.id).count(),
+    )
+    add_count(
+        "audit_log",
+        db.query(AuditLog)
+        .filter(
+            AuditLog.tenant_id == site.tenant_id,
+            AuditLog.resource_type == "site",
+            AuditLog.resource_id == str(site.id),
+        )
+        .count(),
+    )
+    return blockers
+
+
+def _charge_point_move_blockers(db: Session, charge_point: ChargePoint) -> list[dict]:
+    blockers: list[dict] = []
+    if charge_point.is_active is not True:
+        blockers.append(
+            {
+                "type": "charger_not_operational",
+                "resource_id": str(charge_point.id),
+            }
+        )
+
+    sessions = (
+        db.query(ChargingSession.id, ChargingSession.status)
+        .filter(
+            ChargingSession.tenant_id == charge_point.tenant_id,
+            ChargingSession.charge_point_id == charge_point.id,
+        )
+        .all()
+    )
+    blockers.extend(
+        {
+            "type": (
+                "ongoing_session"
+                if row.status == "ongoing"
+                else "charging_session_history"
+            ),
+            "resource_id": str(row.id),
+        }
+        for row in sessions
+    )
+
+    orders = (
+        db.query(Order.id)
+        .filter(
+            Order.tenant_id == charge_point.tenant_id,
+            Order.charge_point_id == charge_point.id,
+        )
+        .all()
+    )
+    blockers.extend(
+        {"type": "order_history", "resource_id": str(row.id)}
+        for row in orders
+    )
+
+    pending_commands = (
+        db.query(OutboxEvent.id)
+        .filter(
+            OutboxEvent.tenant_id == charge_point.tenant_id,
+            OutboxEvent.aggregate_type == "ChargePoint",
+            OutboxEvent.aggregate_id == str(charge_point.id),
+            OutboxEvent.status == "pending",
+        )
+        .all()
+    )
+    blockers.extend(
+        {"type": "pending_remote_command", "resource_id": str(row.id)}
+        for row in pending_commands
+    )
+    return blockers
+
+
 @router.get("", response_model=List[SiteListItem], summary="获取站点列表")
 def list_sites(
     q: Optional[str] = Query(None, description="搜索：站点名称/地址/ID"),
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=1000),
-    include_inactive: bool = Query(True, description="是否包含未启用站点"),
+    include_inactive: bool = Query(False, description="是否包含已归档/未启用站点"),
+    lifecycle_status: Optional[Literal["active", "archived"]] = Query(
+        None,
+        description="生命周期筛选",
+    ),
     current_user_obj=Depends(get_current_admin_user),
     db: Session = Depends(get_db),
 ) -> List[SiteListItem]:
@@ -152,7 +465,11 @@ def list_sites(
     if tenant_id:
         base = base.filter(Site.tenant_id == tenant_id)
 
-    if not include_inactive:
+    if lifecycle_status == "active":
+        base = base.filter(Site.is_active.is_(True))
+    elif lifecycle_status == "archived":
+        base = base.filter(Site.is_active.is_(False))
+    elif not include_inactive:
         base = base.filter(Site.is_active == True)  # noqa: E712
 
     if q:
@@ -162,6 +479,16 @@ def list_sites(
     # 统计：每站点的充电桩数量
     cp_count_sq = (
         db.query(ChargePoint.site_id.label("site_id"), func.count(ChargePoint.id).label("cp_count"))
+        .filter(ChargePoint.is_active.is_(True))
+        .group_by(ChargePoint.site_id)
+        .subquery()
+    )
+    retired_cp_count_sq = (
+        db.query(
+            ChargePoint.site_id.label("site_id"),
+            func.count(ChargePoint.id).label("retired_cp_count"),
+        )
+        .filter(ChargePoint.is_active.is_(False))
         .group_by(ChargePoint.site_id)
         .subquery()
     )
@@ -173,23 +500,64 @@ def list_sites(
             func.count(func.distinct(ChargePoint.id)).label("online_cp_count"),
         )
         .join(EVSEStatus, EVSEStatus.charge_point_id == ChargePoint.id)
-        .filter(EVSEStatus.last_seen >= online_threshold)
+        .filter(
+            ChargePoint.is_active.is_(True),
+            EVSEStatus.last_seen >= online_threshold,
+            or_(EVSEStatus.status.is_(None), EVSEStatus.status != "Offline"),
+        )
         .group_by(ChargePoint.site_id)
         .subquery()
     )
 
     rows = (
         base.outerjoin(cp_count_sq, cp_count_sq.c.site_id == Site.id)
+        .outerjoin(retired_cp_count_sq, retired_cp_count_sq.c.site_id == Site.id)
         .outerjoin(online_cp_sq, online_cp_sq.c.site_id == Site.id)
         .order_by(Site.created_at.desc())
         .offset(skip)
         .limit(limit)
-        .with_entities(Site, cp_count_sq.c.cp_count, online_cp_sq.c.online_cp_count)
+        .with_entities(
+            Site,
+            cp_count_sq.c.cp_count,
+            retired_cp_count_sq.c.retired_cp_count,
+            online_cp_sq.c.online_cp_count,
+        )
         .all()
     )
 
+    archived_resource_ids = [
+        str(site.id)
+        for site, _cp_count, _retired_cp_count, _online_cp_count in rows
+        if site.is_active is False
+    ]
+    archive_audit_map = {}
+    if archived_resource_ids:
+        archive_audits = (
+            db.query(AuditLog)
+            .filter(
+                AuditLog.resource_type == "site",
+                AuditLog.resource_id.in_(archived_resource_ids),
+                AuditLog.action == SITE_ARCHIVE_ACTION,
+            )
+            .order_by(AuditLog.created_at.desc(), AuditLog.id.desc())
+            .all()
+        )
+        for audit in archive_audits:
+            archive_audit_map.setdefault(audit.resource_id, audit)
+
     result: List[SiteListItem] = []
-    for site, cp_count, online_cp_count in rows:
+    for site, cp_count, retired_cp_count, online_cp_count in rows:
+        archive_audit = archive_audit_map.get(str(site.id))
+        lifecycle_fields = {
+            "lifecycle_status": site_lifecycle_status(site),
+            "archived_at": (
+                archive_audit.created_at.isoformat() if archive_audit else None
+            ),
+            "archive_reason": (
+                (archive_audit.audit_metadata or {}).get("reason")
+                if archive_audit else None
+            ),
+        }
         # domain 目前不在 Site 表中；为了不影响 DB schema，这里仅从 settings/operating_hours 等扩展字段不读取。
         result.append(
             SiteListItem(
@@ -204,6 +572,12 @@ def list_sites(
                 domain=None,
                 charge_points_count=int(cp_count or 0),
                 online_charge_points_count=int(online_cp_count or 0),
+                lifecycle_status=lifecycle_fields["lifecycle_status"],
+                archived_at=lifecycle_fields["archived_at"],
+                archive_reason=lifecycle_fields["archive_reason"],
+                active_charge_points_count=int(cp_count or 0),
+                retiring_charge_points_count=0,
+                retired_charge_points_count=int(retired_cp_count or 0),
                 created_at=site.created_at.isoformat() if site.created_at else "",
                 updated_at=site.updated_at.isoformat() if site.updated_at else "",
             )
@@ -218,6 +592,12 @@ def create_site(
     db: Session = Depends(get_db),
 ) -> SiteDetailResponse:
     _require_tenant_id_for_create(current_user_obj)
+    if req.is_active is not True:
+        raise _coded_http_exception(
+            422,
+            "site_lifecycle_endpoint_required",
+            "New sites must be active; use the archive endpoint after creation",
+        )
     tenant_id = tenant_id_context.get()
     assert tenant_id is not None
 
@@ -251,6 +631,12 @@ def create_site(
         domain=None,
         price_per_kwh=None,
         charge_points=[],
+        lifecycle_status="active",
+        archived_at=None,
+        archive_reason=None,
+        active_charge_points_count=0,
+        retiring_charge_points_count=0,
+        retired_charge_points_count=0,
         created_at=site.created_at.isoformat() if site.created_at else "",
         updated_at=site.updated_at.isoformat() if site.updated_at else "",
     )
@@ -280,7 +666,10 @@ def get_site_detail(
         .first()
     )
 
-    cps = db.query(ChargePoint).filter(ChargePoint.site_id == site.id).all()
+    cps = db.query(ChargePoint).filter(
+        ChargePoint.site_id == site.id,
+        ChargePoint.is_active.is_(True),
+    ).all()
     cp_ids = [cp.id for cp in cps]
 
     status_map: Dict[str, Dict[str, Any]] = {}
@@ -333,8 +722,20 @@ def get_site_detail(
                 last_seen=last_seen_dt.isoformat() if last_seen_dt else None,
                 site_id=str(site.id),
                 site_name=site.name,
+                lifecycle_status="active",
             )
         )
+
+    retired_charge_points_count = (
+        db.query(func.count(ChargePoint.id))
+        .filter(
+            ChargePoint.site_id == site.id,
+            ChargePoint.is_active.is_(False),
+        )
+        .scalar()
+        or 0
+    )
+    lifecycle_fields = _site_lifecycle_fields(db, site)
 
     return SiteDetailResponse(
         id=str(site.id),
@@ -348,6 +749,12 @@ def get_site_detail(
         domain=None,
         price_per_kwh=float(tariff.base_price_per_kwh) if tariff else None,
         charge_points=charge_points,
+        lifecycle_status=lifecycle_fields["lifecycle_status"],
+        archived_at=lifecycle_fields["archived_at"],
+        archive_reason=lifecycle_fields["archive_reason"],
+        active_charge_points_count=len(charge_points),
+        retiring_charge_points_count=0,
+        retired_charge_points_count=int(retired_charge_points_count),
         created_at=site.created_at.isoformat() if site.created_at else "",
         updated_at=site.updated_at.isoformat() if site.updated_at else "",
     )
@@ -361,6 +768,13 @@ def update_site(
     db: Session = Depends(get_db),
 ) -> SiteDetailResponse:
     site = _get_scoped_site(db, site_id, current_user_obj)
+
+    if req.is_active is not None and req.is_active is not bool(site.is_active):
+        raise _coded_http_exception(
+            422,
+            "site_lifecycle_endpoint_required",
+            "Use the archive or restore endpoint to change site lifecycle",
+        )
 
     final_latitude = req.latitude if req.latitude is not None else site.latitude
     final_longitude = req.longitude if req.longitude is not None else site.longitude
@@ -378,8 +792,6 @@ def update_site(
         site.latitude = req.latitude
     if req.longitude is not None:
         site.longitude = req.longitude
-    if req.is_active is not None:
-        site.is_active = req.is_active
     if req.operating_hours is not None:
         site.operating_hours = req.operating_hours
 
@@ -457,21 +869,146 @@ def update_site_pricing(
     )
 
 
-@router.delete("/{site_id}", summary="删除站点")
+@router.get("/{site_id}/archive-preflight", summary="站点归档预检")
+def get_site_archive_preflight(
+    site_id: str,
+    current_user_obj=Depends(require_permission("sites.read")),
+    db: Session = Depends(get_db),
+) -> dict:
+    site = _get_scoped_site(db, site_id, current_user_obj)
+    return _site_archive_preflight(db, site)
+
+
+@router.post("/{site_id}/archive", summary="归档站点")
+def archive_site(
+    site_id: str,
+    req: SiteLifecycleRequest,
+    current_user_obj=Depends(require_permission("sites.write")),
+    db: Session = Depends(get_db),
+) -> dict:
+    site = _get_scoped_site(db, site_id, current_user_obj)
+    reason = _normalized_reason(req.reason)
+    if site_lifecycle_status(site) == "archived":
+        return _site_lifecycle_response(db, site)
+
+    preflight = _site_archive_preflight(db, site)
+    if not preflight["can_archive_now"]:
+        raise _coded_http_exception(
+            409,
+            "site_archive_blocked",
+            "Site has active charge points or unfinished business",
+            blockers=preflight["blockers"],
+        )
+
+    apply_site_archived_state(site)
+    add_lifecycle_audit(
+        db,
+        tenant_id=site.tenant_id,
+        actor_id=current_user_obj.id,
+        action=SITE_ARCHIVE_ACTION,
+        resource_type="site",
+        resource_id=str(site.id),
+        reason=reason,
+        before_data={"lifecycle_status": "active"},
+        after_data={"lifecycle_status": "archived"},
+    )
+    db.commit()
+    db.refresh(site)
+    return _site_lifecycle_response(db, site)
+
+
+@router.post("/{site_id}/restore", summary="恢复归档站点")
+def restore_site(
+    site_id: str,
+    req: SiteLifecycleRequest,
+    current_user_obj=Depends(require_permission("sites.write")),
+    db: Session = Depends(get_db),
+) -> dict:
+    site = _get_scoped_site(db, site_id, current_user_obj)
+    reason = _normalized_reason(req.reason)
+    if site_lifecycle_status(site) != "archived":
+        previous_restore = latest_lifecycle_audit(
+            db,
+            tenant_id=site.tenant_id,
+            resource_type="site",
+            resource_id=str(site.id),
+            actions=(SITE_RESTORE_ACTION,),
+        )
+        if previous_restore:
+            return _site_lifecycle_response(db, site)
+        raise _coded_http_exception(
+            409,
+            "site_not_archived",
+            "Only an archived site can be restored",
+            blockers=[],
+        )
+
+    apply_site_restored_state(site)
+    add_lifecycle_audit(
+        db,
+        tenant_id=site.tenant_id,
+        actor_id=current_user_obj.id,
+        action=SITE_RESTORE_ACTION,
+        resource_type="site",
+        resource_id=str(site.id),
+        reason=reason,
+        before_data={"lifecycle_status": "archived"},
+        after_data={"lifecycle_status": "active"},
+    )
+    db.commit()
+    db.refresh(site)
+    return _site_lifecycle_response(db, site)
+
+
+@router.delete("/{site_id}", summary="永久删除未使用站点")
 def delete_site(
     site_id: str,
-    current_user_obj=Depends(get_current_admin_user),
+    req: PermanentDeleteSiteRequest,
+    current_user_obj=Depends(require_permission("sites.write")),
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
     site = _get_scoped_site(db, site_id, current_user_obj)
+    reason = _normalized_reason(req.reason)
+    if req.confirmation.strip() != site.site_code:
+        raise _coded_http_exception(
+            422,
+            "site_delete_confirmation_mismatch",
+            "confirmation must match the site code",
+        )
 
-    cp_count = db.query(func.count(ChargePoint.id)).filter(ChargePoint.site_id == site.id).scalar() or 0
-    if cp_count > 0:
-        raise HTTPException(status_code=400, detail="Site has charge points, cannot delete")
+    blockers = _site_permanent_delete_blockers(db, site)
+    if blockers:
+        raise _coded_http_exception(
+            409,
+            "site_permanent_delete_blocked",
+            "Only a completely unused site can be permanently deleted",
+            blockers=blockers,
+        )
 
+    site_uuid = str(site.id)
+    site_code = site.site_code
+    add_lifecycle_audit(
+        db,
+        tenant_id=site.tenant_id,
+        actor_id=current_user_obj.id,
+        action=SITE_DELETE_ACTION,
+        resource_type="site",
+        resource_id=site_uuid,
+        reason=reason,
+        before_data={
+            "lifecycle_status": "active",
+            "site_code": site_code,
+            "name": site.name,
+        },
+        after_data=None,
+    )
     db.delete(site)
     db.commit()
-    return {"message": "Site deleted successfully"}
+    return {
+        "message": "Site permanently deleted",
+        "site_id": site_uuid,
+        "site_code": site_code,
+    }
 
 
 @router.get(
@@ -490,19 +1027,35 @@ def list_bindable_charge_points(
     """
     tenant_id = tenant_id_context.get()
     target_site = _get_scoped_site(db, site_id, current_user_obj)
+    if target_site.is_active is not True:
+        raise _coded_http_exception(
+            409,
+            "charger_move_blocked",
+            "Charge points can only be moved to an active site",
+            blockers=[
+                {"type": "target_site_archived", "resource_id": str(target_site.id)}
+            ],
+        )
 
-    cp_q = db.query(ChargePoint).join(Site, Site.id == ChargePoint.site_id)
-    if tenant_id and not current_user_obj.is_super_admin:
+    cp_q = db.query(ChargePoint).join(Site, Site.id == ChargePoint.site_id).filter(
+        ChargePoint.is_active.is_(True),
+        Site.is_active.is_(True),
+    )
+    if tenant_id:
         cp_q = cp_q.filter(ChargePoint.tenant_id == tenant_id)
 
     # 排除已经属于目标站点的
     cp_q = cp_q.filter(ChargePoint.site_id != target_site.id)
 
     auto_site_rule = or_(
-        Site.name == func.concat("站点-", ChargePoint.ocpp_identity),
-        Site.site_code == func.concat("site-", ChargePoint.ocpp_identity),
+        Site.name == literal("站点-") + ChargePoint.ocpp_identity,
+        Site.site_code == literal("site-") + ChargePoint.ocpp_identity,
     )
-    cps = cp_q.filter(auto_site_rule).all()
+    cps = [
+        cp
+        for cp in cp_q.filter(auto_site_rule).all()
+        if not _charge_point_move_blockers(db, cp)
+    ]
 
     cp_ids = [cp.id for cp in cps]
     status_map: Dict[str, Dict[str, Any]] = {}
@@ -552,20 +1105,41 @@ def list_bindable_charge_points(
 
 
 class BindChargePointsRequest(StrictRequestModel):
-    charge_point_ids: List[str] = Field(..., min_length=1)
+    charge_point_ids: List[str] = Field(..., min_length=1, max_length=200)
     force_move: bool = False
+    reason: Optional[str] = Field(None, max_length=500)
+
+    @field_validator("charge_point_ids", mode="before")
+    @classmethod
+    def normalize_charge_point_ids(cls, value):
+        if not isinstance(value, list):
+            return value
+        normalized = [str(item).strip() for item in value]
+        if any(not item for item in normalized):
+            raise ValueError("charge_point_ids must not contain blank values")
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("charge_point_ids must be unique")
+        return normalized
 
 
 @router.post("/{site_id}/bind-charge-points", summary="绑定/迁移充电桩到站点")
 def bind_charge_points(
     site_id: str,
     req: BindChargePointsRequest,
-    current_user_obj=Depends(get_current_admin_user),
+    current_user_obj=Depends(require_permission("sites.write")),
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
-    tenant_id = tenant_id_context.get()
-
     target_site = _get_scoped_site(db, site_id, current_user_obj)
+    if target_site.is_active is not True:
+        raise _coded_http_exception(
+            409,
+            "charger_move_blocked",
+            "Charge points can only be moved to an active site",
+            blockers=[
+                {"type": "target_site_archived", "resource_id": str(target_site.id)}
+            ],
+        )
+    reason = _normalized_reason(req.reason or "Charge point moved between sites")
 
     # 读取 charge points（按租户约束）
     cps = []
@@ -577,33 +1151,92 @@ def bind_charge_points(
         else:
             cps.append(cp)
     if missing:
-        raise HTTPException(status_code=404, detail={"message": "Charge points not found", "missing": missing})
+        raise _coded_http_exception(
+            404,
+            "charge_point_not_found",
+            "Charge points not found",
+            missing=missing,
+        )
 
     # 跨租户保护：即使 super_admin，也禁止把不同 tenant 的 CP 绑到该站点
     conflicts_tenant = [cp.ocpp_identity for cp in cps if cp.tenant_id != target_site.tenant_id]
     if conflicts_tenant:
-        raise HTTPException(
-            status_code=400,
-            detail={"message": "Tenant mismatch between site and charge points", "conflicts": conflicts_tenant},
+        raise _coded_http_exception(
+            403,
+            "charge_point_tenant_mismatch",
+            "Charge point belongs to another tenant",
+            conflicts=conflicts_tenant,
         )
 
-    # 冲突：已经在其他站点
-    move_conflicts = [cp.ocpp_identity for cp in cps if cp.site_id != target_site.id]
-    if move_conflicts and not req.force_move:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "message": "Some charge points already belong to another site. Set force_move=true to move.",
-                "conflicts": move_conflicts,
+    to_move = [cp for cp in cps if cp.site_id != target_site.id]
+    if to_move and not req.force_move:
+        raise _coded_http_exception(
+            409,
+            "charger_move_blocked",
+            "Set force_move=true to confirm moving charge points from another site",
+            blockers=[
+                {
+                    "type": "move_confirmation_required",
+                    "resource_id": str(cp.id),
+                    "ocpp_identity": cp.ocpp_identity,
+                }
+                for cp in to_move
+            ],
+        )
+
+    blockers = []
+    for cp in to_move:
+        for blocker in _charge_point_move_blockers(db, cp):
+            blockers.append(
+                {
+                    **blocker,
+                    "charge_point_id": str(cp.id),
+                    "ocpp_identity": cp.ocpp_identity,
+                }
+            )
+    if blockers:
+        raise _coded_http_exception(
+            409,
+            "charger_move_blocked",
+            "One or more charge points have lifecycle or business history blockers",
+            blockers=blockers,
+        )
+
+    moved_ids = [str(cp.id) for cp in to_move]
+    unchanged_ids = [str(cp.id) for cp in cps if cp.site_id == target_site.id]
+    # 所有设备通过预检后再统一修改，保证批量迁移原子性。
+    for cp in to_move:
+        source_site = cp.site
+        before_data = {
+            "site_id": str(cp.site_id),
+            "site_code": source_site.site_code if source_site else None,
+            "site_name": source_site.name if source_site else None,
+        }
+        cp.site_id = target_site.id
+        add_lifecycle_audit(
+            db,
+            tenant_id=cp.tenant_id,
+            actor_id=current_user_obj.id,
+            action=CHARGER_MOVE_ACTION,
+            resource_type="charge_point",
+            resource_id=str(cp.id),
+            reason=reason,
+            before_data=before_data,
+            after_data={
+                "site_id": str(target_site.id),
+                "site_code": target_site.site_code,
+                "site_name": target_site.name,
             },
         )
 
-    # 执行绑定/迁移
-    for cp in cps:
-        cp.site_id = target_site.id
-
     db.commit()
-    return {"success": True, "site_id": str(target_site.id), "bound": [str(cp.id) for cp in cps]}
+    return {
+        "success": True,
+        "site_id": str(target_site.id),
+        "bound": [str(cp.id) for cp in cps],
+        "moved": moved_ids,
+        "unchanged": unchanged_ids,
+    }
 
 
 class CreateChargePointInSiteRequest(StrictRequestModel):
@@ -670,6 +1303,12 @@ def create_charge_point_in_site(
         raise HTTPException(status_code=403, detail="Tenant ID required")
 
     site = _get_scoped_site(db, site_id, current_user_obj)
+    if site.is_active is not True:
+        raise _coded_http_exception(
+            409,
+            "site_not_operational",
+            "Cannot provision a charge point under an archived site",
+        )
 
     # 确保 CP ID 合法（与 ws 严格模式一致）
     cp_id = (req.id or "").strip()

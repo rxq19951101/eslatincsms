@@ -7,13 +7,15 @@ import logging
 import os
 from typing import Optional, Dict, Any
 from uuid import UUID
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 from app.database.models import (
     Site, ChargePoint, EVSE, EVSEStatus, Device,
     ChargingSession, DeviceEvent, DeviceConfig, ChargePointConfig, Tenant
 )
 from app.core.id_generator import generate_site_id, generate_charge_point_id
+from app.core.config import get_settings
 from app.database.base import tenant_id_context
 
 logger = logging.getLogger("ocpp_csms")
@@ -399,52 +401,37 @@ class ChargePointService:
         db: Session,
         charge_point_id: str,
         device_serial_number: Optional[str] = None
-    ) -> None:
-        """记录心跳事件"""
-        # 如果提供了device_serial_number，检查设备是否存在
-        # 如果不存在，设为None以避免外键约束错误
-        if device_serial_number:
-            device = db.query(Device).filter(
-                Device.serial_number == device_serial_number
-            ).first()
-            if not device:
-                logger.warning(
-                    f"设备 {device_serial_number} 不存在于devices表中，"
-                    f"heartbeat事件将不关联设备（charge_point_id={charge_point_id}）"
-                )
-                device_serial_number = None
-                device = None
-        
-        # 获取tenant_id（从charge_point）
-        tenant_id = None
-        cp = None
-        if charge_point_id:
-            cp = db.query(ChargePoint).filter(ChargePoint.ocpp_identity == charge_point_id).first()
-            if cp:
-                tenant_id = cp.tenant_id
-        
+    ) -> bool:
+        """限频持久化在线快照，不为正常心跳创建历史事件。"""
+        cp = db.query(ChargePoint).filter(
+            ChargePoint.ocpp_identity == charge_point_id
+        ).first()
         if not cp:
             raise ValueError(f"ChargePoint {charge_point_id} 不存在，无法记录心跳")
 
-        event = DeviceEvent(
-            tenant_id=tenant_id,
-            device_id=device.id if device_serial_number and device else None,
-            device_serial_number=device_serial_number,
-            charge_point_id=cp.id if cp else None,
-            event_type="heartbeat",
-            timestamp=datetime.now(timezone.utc)
+        now = datetime.now(timezone.utc)
+        persist_interval = max(
+            1, get_settings().heartbeat_persist_interval_seconds
         )
-        db.add(event)
-        
-        # 更新EVSE状态的最后在线时间
+        cutoff = now - timedelta(seconds=persist_interval)
+
+        # 在线状态只需要分钟级持久化。过滤条件也避免加载无需更新的 EVSE。
         evse_statuses = db.query(EVSEStatus).filter(
-            EVSEStatus.charge_point_id == cp.id
+            EVSEStatus.charge_point_id == cp.id,
+            or_(
+                EVSEStatus.last_seen.is_(None),
+                EVSEStatus.last_seen < cutoff,
+            ),
         ).all()
-        
+
+        if not evse_statuses:
+            return False
+
         for evse_status in evse_statuses:
-            evse_status.last_seen = datetime.now(timezone.utc)
-        
+            evse_status.last_seen = now
+
         db.commit()
+        return True
     
     @staticmethod
     def get_charge_point_by_device_serial(

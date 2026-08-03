@@ -104,7 +104,8 @@ def main() -> None:
         role.scope = "tenant"
         role.permissions = [
             "chargers.read", "chargers.control", "chargers.create", "sites.read",
-            "sites.write", "alerts.read", "alerts.write", "users.read", "wallet.adjust",
+            "sites.write", "alerts.read", "alerts.write", "transactions.read",
+            "users.read", "wallet.adjust",
         ]
         role.description = "Deterministic SIM-E2E operator role"
         db.add(role)

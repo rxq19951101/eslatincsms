@@ -27,6 +27,16 @@ def get_required_bootstrap_password(name: str) -> str:
     value = os.getenv(name)
     if value is None or not value.strip():
         raise RuntimeError(f"{name} must be set when bootstrapping an empty database")
+    if len(value) < 16:
+        raise RuntimeError(f"{name} must contain at least 16 characters")
+    return value
+
+
+def get_required_bootstrap_email(name: str) -> str:
+    """Read and minimally validate a bootstrap login email."""
+    value = (os.getenv(name) or "").strip().lower()
+    if "@" not in value or "." not in value.rsplit("@", 1)[-1] or " " in value:
+        raise RuntimeError(f"{name} must be a valid email address")
     return value
 
 def create_initial_data():
@@ -36,14 +46,14 @@ def create_initial_data():
     if not database_url:
         raise RuntimeError("DATABASE_URL must be set for database bootstrap")
     
-    # 创建引擎（使用 autocommit 模式，避免事务事件）
-    # 关键：不导入 app.database.base，避免事件监听器
-    engine = create_engine_direct(database_url, isolation_level="AUTOCOMMIT")
+    # 不导入 app.database.base，避免请求级事件监听器；bootstrap 必须使用
+    # 单一事务，任何一步失败都不得留下半套管理员或角色数据。
+    engine = create_engine_direct(database_url)
     
     try:
         print("正在创建初始数据...")
         
-        with engine.connect() as connection:
+        with engine.begin() as connection:
             # 检查是否已有租户和管理员用户（使用原始 SQL）
             tenant_result = connection.execute(text("SELECT COUNT(*) FROM tenants"))
             tenant_count = tenant_result.scalar()
@@ -66,10 +76,19 @@ def create_initial_data():
             tenant_admin_password = get_required_bootstrap_password(
                 "CSMS_BOOTSTRAP_TENANT_ADMIN_PASSWORD"
             )
+            super_admin_email = get_required_bootstrap_email(
+                "CSMS_BOOTSTRAP_SUPER_ADMIN_EMAIL"
+            )
+            tenant_admin_email = get_required_bootstrap_email(
+                "CSMS_BOOTSTRAP_TENANT_ADMIN_EMAIL"
+            )
+            if super_admin_password == tenant_admin_password:
+                raise RuntimeError("Bootstrap admin passwords must be different")
+            if super_admin_email == tenant_admin_email:
+                raise RuntimeError("Bootstrap admin emails must be different")
             
-            # 先设置角色为 postgres superuser（ocpp_user 应该是数据库所有者，有权限）
-            # 或者直接使用 ocpp_user，它在创建表时应该有权限
-            connection.execute(text("SET LOCAL role = ocpp_user"))
+            # 使用 DATABASE_URL 对应的部署账号。生产账号名称由 DB_USER 配置，
+            # 不得在初始化逻辑中写死本地开发角色名。
             
             # 创建默认租户
             print("\n1. 创建默认租户...")
@@ -87,7 +106,6 @@ def create_initial_data():
                 "max_users": 1000,
                 "settings": "{}"
             })
-            connection.commit()
             print(f"✓ 租户创建成功: 默认租户 (ID: {tenant_id})")
             
             # 创建超级管理员用户
@@ -99,16 +117,15 @@ def create_initial_data():
                 VALUES (:id, :username, :email, :password_hash, :full_name, :is_active, :is_super_admin, NOW(), NOW())
             """), {
                 "id": super_admin_id,
-                "username": "admin",
-                "email": "admin@example.com",
+                "username": super_admin_email,
+                "email": super_admin_email,
                 "password_hash": super_admin_password_hash,
                 "full_name": "系统管理员",
                 "is_active": True,
                 "is_super_admin": True
             })
-            connection.commit()
-            print(f"✓ 超级管理员创建成功: admin (ID: {super_admin_id})")
-            print(f"  邮箱: admin@example.com")
+            print(f"✓ 超级管理员创建成功: {super_admin_email} (ID: {super_admin_id})")
+            print(f"  邮箱: {super_admin_email}")
             
             # 为超级管理员创建租户成员关系（关联到默认租户）
             print("\n2.1 创建超级管理员的租户关联...")
@@ -123,7 +140,6 @@ def create_initial_data():
                 "is_primary": True,
                 "status": "active"
             })
-            connection.commit()
             print(f"✓ 超级管理员已关联到默认租户")
             
             # 创建租户管理员用户
@@ -135,15 +151,14 @@ def create_initial_data():
                 VALUES (:id, :username, :email, :password_hash, :full_name, :is_active, :is_super_admin, NOW(), NOW())
             """), {
                 "id": tenant_admin_id,
-                "username": "tenant_admin",
-                "email": "tenant_admin@example.com",
+                "username": tenant_admin_email,
+                "email": tenant_admin_email,
                 "password_hash": tenant_admin_password_hash,
                 "full_name": "租户管理员",
                 "is_active": True,
                 "is_super_admin": False
             })
-            connection.commit()
-            
+
             # 创建租户成员关系
             membership_id = str(uuid.uuid4())
             connection.execute(text("""
@@ -156,7 +171,6 @@ def create_initial_data():
                 "is_primary": True,
                 "status": "active"
             })
-            connection.commit()
             # 为初始租户管理员绑定与运行时一致的租户管理员角色。
             role_id = str(uuid.uuid4())
             default_permissions = [
@@ -179,13 +193,17 @@ def create_initial_data():
                 "tenant_id": tenant_id,
                 "permissions": json.dumps(default_permissions),
             })
+            membership_role_id = str(uuid.uuid4())
             connection.execute(text("""
-                INSERT INTO tenant_membership_roles (membership_id, role_id, created_at)
-                VALUES (:membership_id, :role_id, NOW())
-            """), {"membership_id": membership_id, "role_id": role_id})
-            connection.commit()
-            print(f"✓ 租户管理员创建成功: tenant_admin (ID: {tenant_admin_id})")
-            print(f"  邮箱: tenant_admin@example.com")
+                INSERT INTO tenant_membership_roles (id, membership_id, role_id, created_at)
+                VALUES (:id, :membership_id, :role_id, NOW())
+            """), {
+                "id": membership_role_id,
+                "membership_id": membership_id,
+                "role_id": role_id,
+            })
+            print(f"✓ 租户管理员创建成功: {tenant_admin_email} (ID: {tenant_admin_id})")
+            print(f"  邮箱: {tenant_admin_email}")
             print(f"  关联租户: 默认租户")
             
             print("\n" + "="*50)
@@ -194,14 +212,14 @@ def create_initial_data():
             print("\n默认账号信息：")
             print("-" * 50)
             print("超级管理员:")
-            print(f"  用户名: admin")
-            print(f"  邮箱: admin@example.com")
+            print(f"  用户名: {super_admin_email}")
+            print(f"  邮箱: {super_admin_email}")
             print(f"  权限: 超级管理员（可访问所有租户）")
             print(f"  主租户: 默认租户")
             print("-" * 50)
             print("租户管理员:")
-            print(f"  用户名: tenant_admin")
-            print(f"  邮箱: tenant_admin@example.com")
+            print(f"  用户名: {tenant_admin_email}")
+            print(f"  邮箱: {tenant_admin_email}")
             print(f"  权限: 租户管理员（仅可访问默认租户）")
             print(f"  租户: 默认租户")
             print("-" * 50)

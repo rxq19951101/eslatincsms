@@ -18,8 +18,17 @@ from sqlalchemy.orm import Session
 
 from app.core.logging_config import get_logger
 from app.database.models import ChargePoint, QrToken
+from app.services.asset_lifecycle_service import require_charge_point_operational
 
 logger = get_logger(__name__)
+
+
+class InvalidQrTokenError(ValueError):
+    code = "qr_token_invalid"
+    message = "Invalid or revoked QR token"
+
+    def __init__(self):
+        super().__init__(self.message)
 
 
 def build_qr_payload(token: str) -> str:
@@ -38,28 +47,34 @@ def ensure_qr_token(db: Session, charge_point_id: str, connector_id: int) -> QrT
     cp = db.query(ChargePoint).filter(ChargePoint.id == charge_point_id).first()
     if not cp:
         raise ValueError(f"ChargePoint not found: {charge_point_id}")
+    require_charge_point_operational(cp)
 
     existing = (
         db.query(QrToken)
         .filter(
             QrToken.charge_point_id == charge_point_id,
             QrToken.connector_id == connector_id,
-            QrToken.revoked_at.is_(None),
         )
         .first()
     )
-    if existing:
+    if existing and existing.revoked_at is None:
         return existing
 
     # token 可能极小概率碰撞，冲突则重试
     for _ in range(5):
         token = secrets.token_urlsafe(32)  # 通常 ~43 chars
-        rec = QrToken(
-            token=token,
-            operator_tenant_id=cp.tenant_id,
-            charge_point_id=charge_point_id,
-            connector_id=connector_id,
-        )
+        if existing:
+            rec = existing
+            rec.token = token
+            rec.operator_tenant_id = cp.tenant_id
+            rec.revoked_at = None
+        else:
+            rec = QrToken(
+                token=token,
+                operator_tenant_id=cp.tenant_id,
+                charge_point_id=charge_point_id,
+                connector_id=connector_id,
+            )
         try:
             db.add(rec)
             db.commit()
@@ -67,6 +82,14 @@ def ensure_qr_token(db: Session, charge_point_id: str, connector_id: int) -> QrT
             return rec
         except IntegrityError:
             db.rollback()
+            existing = (
+                db.query(QrToken)
+                .filter(
+                    QrToken.charge_point_id == charge_point_id,
+                    QrToken.connector_id == connector_id,
+                )
+                .first()
+            )
             continue
 
     raise RuntimeError("Failed to allocate unique qr token after retries")
@@ -74,9 +97,20 @@ def ensure_qr_token(db: Session, charge_point_id: str, connector_id: int) -> QrT
 
 def resolve_qr_token(db: Session, token: str) -> QrToken:
     """解析 token -> QrToken 记录（爆改测试版）"""
-    rec = db.query(QrToken).filter(QrToken.token == token, QrToken.revoked_at.is_(None)).first()
+    rec = db.query(QrToken).filter(QrToken.token == token).first()
     if not rec:
-        raise ValueError("Invalid or revoked qr token")
+        raise InvalidQrTokenError()
+    cp = db.query(ChargePoint).filter(
+        ChargePoint.id == rec.charge_point_id,
+        ChargePoint.tenant_id == rec.operator_tenant_id,
+    ).first()
+    if not cp:
+        raise InvalidQrTokenError()
+    # Check asset state before revoked_at so a retired charger's revoked QR
+    # returns the lifecycle-specific conflict required by the public contract.
+    require_charge_point_operational(cp)
+    if rec.revoked_at is not None:
+        raise InvalidQrTokenError()
     return rec
 
 

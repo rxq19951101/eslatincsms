@@ -222,13 +222,20 @@ const chargingSlice = createSlice({
         state.loadingMeter = false;
         const newPoints = action.payload.points || [];
         if (newPoints.length > 0) {
+          // Redis 只保留最新实时快照，新的实时点替换旧实时点。
+          if (newPoints.some((p) => p.source === 'realtime')) {
+            state.meterValues = state.meterValues.filter((p) => p.source !== 'realtime');
+          }
           // 追加（去重：基于 id）
           const existingIds = new Set(state.meterValues.map((p) => p.id));
           for (const p of newPoints) {
             if (!existingIds.has(p.id)) state.meterValues.push(p);
           }
-          // 后端按时间顺序返回；UUID 不具备可用于时间排序的数值语义。
-          state.lastMeterId = newPoints[newPoints.length - 1].id;
+          // Redis 实时 ID 不能作为数据库 since_id；游标只跟随持久化记录。
+          const persistedPoints = newPoints.filter((p) => p.source !== 'realtime');
+          if (persistedPoints.length > 0) {
+            state.lastMeterId = persistedPoints[persistedPoints.length - 1].id;
+          }
           // 控制内存：只保留最近 300 条
           if (state.meterValues.length > 300) {
             state.meterValues = state.meterValues.slice(state.meterValues.length - 300);

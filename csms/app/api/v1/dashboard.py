@@ -152,7 +152,9 @@ async def get_dashboard_summary(
     
     # 构建基础查询（多租户过滤）
     # RLS 会自动过滤，但为了性能，我们也在应用层添加过滤
-    charge_point_query = db.query(ChargePoint)
+    charge_point_query = db.query(ChargePoint).filter(
+        ChargePoint.site.has(Site.is_active.is_(True))
+    )
     if tenant_id:
         charge_point_query = charge_point_query.filter(ChargePoint.tenant_id == tenant_id)
     
@@ -160,11 +162,29 @@ async def get_dashboard_summary(
     if tenant_id:
         site_query = site_query.filter(Site.tenant_id == tenant_id)
     
-    order_query = db.query(Order)
+    # Dashboard business metrics are operational snapshots. Historical orders and
+    # invoices remain available from transaction/report endpoints, but assets that
+    # have since been retired or archived must not contribute here.
+    order_query = (
+        db.query(Order)
+        .join(ChargePoint, ChargePoint.id == Order.charge_point_id)
+        .filter(
+            ChargePoint.is_active.is_(True),
+            ChargePoint.site.has(Site.is_active.is_(True)),
+        )
+    )
     if tenant_id:
         order_query = order_query.filter(Order.tenant_id == tenant_id)
     
-    invoice_query = db.query(Invoice)
+    invoice_query = (
+        db.query(Invoice)
+        .join(ChargingSession, ChargingSession.id == Invoice.session_id)
+        .join(ChargePoint, ChargePoint.id == ChargingSession.charge_point_id)
+        .filter(
+            ChargePoint.is_active.is_(True),
+            ChargePoint.site.has(Site.is_active.is_(True)),
+        )
+    )
     if tenant_id:
         invoice_query = invoice_query.filter(Invoice.tenant_id == tenant_id)
     
@@ -287,25 +307,33 @@ async def get_dashboard_trends(
     start_date = (end_date - timedelta(days=days)).replace(hour=0, minute=0, second=0)
     
     # 构建查询
-    invoice_query = db.query(Invoice)
-    if tenant_id and not current_user.is_super_admin:
+    invoice_query = (
+        db.query(Invoice)
+        .join(ChargingSession, ChargingSession.id == Invoice.session_id)
+        .join(ChargePoint, ChargePoint.id == ChargingSession.charge_point_id)
+        .filter(
+            ChargePoint.is_active.is_(True),
+            ChargePoint.site.has(Site.is_active.is_(True)),
+        )
+    )
+    if tenant_id:
         invoice_query = invoice_query.filter(Invoice.tenant_id == tenant_id)
     
-    order_query = db.query(Order)
-    if tenant_id and not current_user.is_super_admin:
+    order_query = (
+        db.query(Order)
+        .join(ChargePoint, ChargePoint.id == Order.charge_point_id)
+        .filter(
+            ChargePoint.is_active.is_(True),
+            ChargePoint.site.has(Site.is_active.is_(True)),
+        )
+    )
+    if tenant_id:
         order_query = order_query.filter(Order.tenant_id == tenant_id)
 
     # 站点过滤：Invoice 通过 session -> charge_point -> site 关联；Order 通过 charge_point_id -> site 关联
     if site_id:
-        invoice_query = (
-            invoice_query.join(ChargingSession, ChargingSession.id == Invoice.session_id)
-            .join(ChargePoint, ChargePoint.id == ChargingSession.charge_point_id)
-            .filter(ChargePoint.site_id == site_id)
-        )
-        order_query = (
-            order_query.join(ChargePoint, ChargePoint.id == Order.charge_point_id)
-            .filter(ChargePoint.site_id == site_id)
-        )
+        invoice_query = invoice_query.filter(ChargePoint.site_id == site_id)
+        order_query = order_query.filter(ChargePoint.site_id == site_id)
     
     # 按日期聚合数据
     energy_trend = []
@@ -387,7 +415,8 @@ async def get_dashboard_sites(
         site_q = site_q.filter(Site.tenant_id == tenant_id)
 
     scoped_cp_q = db.query(ChargePoint.id, ChargePoint.site_id).filter(
-        ChargePoint.is_active == True  # noqa: E712
+        ChargePoint.is_active == True,  # noqa: E712
+        ChargePoint.site.has(Site.is_active.is_(True)),
     )
     if tenant_id:
         scoped_cp_q = scoped_cp_q.filter(ChargePoint.tenant_id == tenant_id)
@@ -413,7 +442,10 @@ async def get_dashboard_sites(
             ChargePoint.site_id.label("site_id"),
             func.count(ChargePoint.id).label("cp_count"),
         )
-        .filter(ChargePoint.is_active == True)  # noqa: E712
+        .filter(
+            ChargePoint.is_active == True,  # noqa: E712
+            ChargePoint.site.has(Site.is_active.is_(True)),
+        )
         .group_by(ChargePoint.site_id)
         .subquery()
     )
@@ -425,7 +457,11 @@ async def get_dashboard_sites(
             func.count(Order.id).label("orders_count"),
         )
         .join(ChargePoint, ChargePoint.id == Order.charge_point_id)
-        .filter(Order.created_at >= start_date)
+        .filter(
+            Order.created_at >= start_date,
+            ChargePoint.is_active.is_(True),
+            ChargePoint.site.has(Site.is_active.is_(True)),
+        )
         .group_by(ChargePoint.site_id)
         .subquery()
     )
@@ -439,7 +475,11 @@ async def get_dashboard_sites(
         )
         .join(ChargingSession, ChargingSession.id == Invoice.session_id)
         .join(ChargePoint, ChargePoint.id == ChargingSession.charge_point_id)
-        .filter(Invoice.issued_at >= start_date)
+        .filter(
+            Invoice.issued_at >= start_date,
+            ChargePoint.is_active.is_(True),
+            ChargePoint.site.has(Site.is_active.is_(True)),
+        )
         .group_by(ChargePoint.site_id)
         .subquery()
     )

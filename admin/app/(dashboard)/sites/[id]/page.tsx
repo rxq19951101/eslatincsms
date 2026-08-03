@@ -12,6 +12,7 @@ import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import AddressAutocomplete from '@/components/sites/AddressAutocomplete';
+import SiteLifecyclePanel, { SiteArchiveBlocker } from '@/components/sites/SiteLifecyclePanel';
 import GoogleMapView from '@/components/map/GoogleMapView';
 import { hasPermission, usePermissions } from '@/hooks/usePermissions';
 import {
@@ -65,10 +66,15 @@ export default function SiteDetailPage() {
     fetcher,
     { refreshInterval: 30000 }
   );
+  const isArchived = site?.lifecycle_status === 'archived';
 
   const { permissions } = usePermissions();
-  const canEditSite = useMemo(() => hasPermission(permissions, 'sites.edit'), [permissions]);
-  const canEditTariff = useMemo(() => hasPermission(permissions, 'tariffs.edit'), [permissions]);
+  const canWriteSites = useMemo(() => hasPermission(permissions, 'sites.write'), [permissions]);
+  const canEditSite = canWriteSites && !isArchived;
+  const canEditTariff = useMemo(
+    () => hasPermission(permissions, 'tariffs.edit') && !isArchived,
+    [permissions, isArchived]
+  );
   const canEditAny = canEditSite || canEditTariff;
 
   const [isEditing, setIsEditing] = useState(false);
@@ -217,7 +223,7 @@ export default function SiteDetailPage() {
 
   const openBindDialog = async () => {
     if (!site) return;
-    if (!canEditAny) {
+    if (!canEditSite) {
       alert(t('无权限执行绑定操作'));
       return;
     }
@@ -258,7 +264,7 @@ export default function SiteDetailPage() {
   };
 
   const openCreateDialog = () => {
-    if (!canEditAny) {
+    if (!canEditSite) {
       alert(t('无权限添加充电桩'));
       return;
     }
@@ -272,6 +278,18 @@ export default function SiteDetailPage() {
     setCpModel('');
     setCpEvses([{ evse_id: 1, physical_reference: 'A01-1', connector_type: 'Type2', max_power_kw: '7' }]);
     setCreateOpen(true);
+  };
+
+  const openLifecycleBlocker = (blocker: SiteArchiveBlocker) => {
+    if (blocker.type === 'active_charge_point') {
+      router.push(`/chargers/${encodeURIComponent(blocker.resource_id)}`);
+      return;
+    }
+    if (blocker.type === 'ongoing_session') {
+      router.push('/sessions');
+      return;
+    }
+    router.push('/transactions');
   };
 
   const onCreateChargePoint = async () => {
@@ -363,7 +381,7 @@ export default function SiteDetailPage() {
           </Button>
           <Button
             onClick={openCreateDialog}
-            disabled={!canEditAny}
+            disabled={!canEditSite}
             className="bg-slate-700/50 border border-slate-600 text-slate-200 hover:bg-slate-600"
           >
             <Plus className="h-4 w-4 mr-2" />
@@ -371,7 +389,7 @@ export default function SiteDetailPage() {
           </Button>
           <Button
             onClick={openBindDialog}
-            disabled={!canEditAny}
+            disabled={!canEditSite}
             className="bg-slate-700/50 border border-slate-600 text-slate-200 hover:bg-slate-600"
           >
             <Link2 className="h-4 w-4 mr-2" />
@@ -387,6 +405,14 @@ export default function SiteDetailPage() {
           </Button>
         </div>
       </div>
+
+      <SiteLifecyclePanel
+        site={site}
+        canWrite={canWriteSites}
+        onChanged={() => mutate()}
+        onDeleted={() => router.push('/sites')}
+        onOpenBlocker={openLifecycleBlocker}
+      />
 
       <Card className="bg-slate-800/80 backdrop-blur-sm border-slate-700">
         <CardHeader>

@@ -18,6 +18,7 @@ import { IdempotencyIntentStore, requestIntent } from '@/lib/idempotency';
 import QrPayloadCopy from '@/components/chargers/QrPayloadCopy';
 import RemoteStopDialog from '@/components/chargers/RemoteStopDialog';
 import MaintenanceCommandDialog, { MaintenanceCommand } from '@/components/chargers/MaintenanceCommandDialog';
+import ChargerLifecyclePanel from '@/components/chargers/ChargerLifecyclePanel';
 import ChargingRecordsTable from '@/components/transactions/ChargingRecordsTable';
 import { formatDateTime } from '@/lib/localization';
 import { hasPermission, usePermissions } from '@/hooks/usePermissions';
@@ -49,6 +50,7 @@ export default function ChargerDetailPage() {
   const { locale, t } = useI18n();
   const { permissions } = usePermissions();
   const canControlChargers = hasPermission(permissions, 'chargers.control');
+  const canWriteChargers = hasPermission(permissions, 'chargers.write');
   const router = useRouter();
   const params = useParams();
   const chargerId = params?.id as string;
@@ -60,8 +62,9 @@ export default function ChargerDetailPage() {
       refreshInterval: 30000, // 30 秒自动刷新
     }
   );
+  const isRetired = charger?.lifecycle_status === 'retired';
   const { data: activeSessions, mutate: mutateSessions } = useSWR<ActiveSession[]>(
-    charger && canControlChargers ? API_ENDPOINTS.TRANSACTIONS_ACTIVE : null,
+    charger && canControlChargers && !isRetired ? API_ENDPOINTS.TRANSACTIONS_ACTIVE : null,
     (url: string) => apiGet<ActiveSession[]>(url),
     { refreshInterval: 5000 }
   );
@@ -96,7 +99,7 @@ export default function ChargerDetailPage() {
 
   // 获取二维码列表
   const { data: qrData, mutate: mutateQr } = useSWR<{ qr_codes: ChargerQrCode[] }>(
-    chargerId ? `${API_BASE_URL}/api/v1/chargers/${chargerId}/qr` : null,
+    chargerId && !isRetired ? `${API_BASE_URL}/api/v1/chargers/${chargerId}/qr` : null,
     (url: string) => apiGet<{ qr_codes: ChargerQrCode[] }>(url)
   );
 
@@ -324,6 +327,16 @@ export default function ChargerDetailPage() {
         </div>
       </div>
 
+      <ChargerLifecyclePanel
+        charger={charger}
+        canWrite={canWriteChargers}
+        onChanged={async () => {
+          await mutate();
+          await mutateQr();
+        }}
+        onDeleted={() => router.push('/chargers')}
+      />
+
       {/* Tabs */}
       <Tabs defaultValue="basic" className="space-y-6">
         <TabsList className="bg-slate-800/50 border-slate-700">
@@ -336,7 +349,7 @@ export default function ChargerDetailPage() {
           <TabsTrigger value="history" className="data-[state=active]:bg-slate-700">
             {t('历史记录')}
           </TabsTrigger>
-          {canControlChargers && (
+          {canControlChargers && !isRetired && (
             <TabsTrigger data-testid="admin-charger-control-tab" value="control" className="data-[state=active]:bg-slate-700">
               {t('远程控制')}
             </TabsTrigger>
@@ -408,6 +421,7 @@ export default function ChargerDetailPage() {
           </Card>
 
           {/* QR Codes */}
+          {!isRetired && (
           <Card className="bg-slate-800/80 backdrop-blur-sm border-slate-700">
             <CardHeader>
               <div className="flex items-center justify-between">
@@ -529,6 +543,7 @@ export default function ChargerDetailPage() {
               )}
             </CardContent>
           </Card>
+          )}
         </TabsContent>
 
         {/* Status Monitor */}
@@ -634,13 +649,21 @@ export default function ChargerDetailPage() {
                 <ShieldCheck className="h-7 w-7 text-cyan-400" />
               </div>
               <div className="flex flex-wrap gap-3">
-                <Button type="button" variant="outline" onClick={handleAcceptanceReport} disabled={commissioning}>
-                  {t('生成自动验收报告')}
-                </Button>
-                <Button type="button" onClick={handleCommission} disabled={commissioning || !(acceptanceReport || charger.acceptance_report)?.passed}>
-                  {t('确认正式投运')}
-                </Button>
-                <Button type="button" variant="destructive" onClick={handleRotateCredential}>{t('轮换设备密钥')}</Button>
+                {!isRetired ? (
+                  <>
+                    <Button type="button" variant="outline" onClick={handleAcceptanceReport} disabled={commissioning}>
+                      {t('生成自动验收报告')}
+                    </Button>
+                    <Button type="button" onClick={handleCommission} disabled={commissioning || !(acceptanceReport || charger.acceptance_report)?.passed}>
+                      {t('确认正式投运')}
+                    </Button>
+                    <Button type="button" variant="destructive" onClick={handleRotateCredential}>{t('轮换设备密钥')}</Button>
+                  </>
+                ) : (
+                  <p className="rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-100">
+                    {t('退役状态下不可验收、投运或轮换密钥，请先恢复充电桩。')}
+                  </p>
+                )}
               </div>
               {rotatedCredential && (
                 <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-4 text-amber-100">
@@ -665,7 +688,7 @@ export default function ChargerDetailPage() {
         </TabsContent>
 
         {/* Remote Control */}
-        {canControlChargers && <TabsContent value="control">
+        {canControlChargers && !isRetired && <TabsContent value="control">
           <Card className="bg-slate-800/80 backdrop-blur-sm border-slate-700">
             <CardHeader>
               <CardTitle className="text-white">{t('远程控制')}</CardTitle>
@@ -898,7 +921,7 @@ export default function ChargerDetailPage() {
           </Card>
         </TabsContent>}
       </Tabs>
-      {canControlChargers && <RemoteStopDialog
+      {canControlChargers && !isRetired && <RemoteStopDialog
         open={remoteStopSession !== null}
         session={remoteStopSession ? {
           id: remoteStopSession.id,
@@ -917,7 +940,7 @@ export default function ChargerDetailPage() {
         }}
         onConfirm={handleRemoteStop}
       />}
-      {canControlChargers && (
+      {canControlChargers && !isRetired && (
         <MaintenanceCommandDialog
           open={maintenanceCommand !== null}
           command={maintenanceCommand}

@@ -27,6 +27,10 @@ from app.database.models import (
     OutboxEvent,
 )
 from app.services.outbox_service import OutboxService
+from app.services.asset_lifecycle_service import (
+    AssetNotOperationalError,
+    require_charge_point_operational,
+)
 from app.api.validation import StrictRequestModel
 import uuid
 
@@ -118,6 +122,75 @@ def _scoped_charge_point(db: Session, reference: str) -> ChargePoint:
     return cp
 
 
+def _normalize_remote_command_key(
+    idempotency_key: Optional[str],
+    *,
+    generate: bool,
+) -> Optional[str]:
+    if idempotency_key is None:
+        return str(uuid.uuid4()) if generate else None
+    command_key = idempotency_key.strip()
+    if not command_key or len(command_key) > 255:
+        raise HTTPException(status_code=422, detail="Idempotency-Key must contain 1-255 characters")
+    return command_key
+
+
+def _raise_idempotency_key_reused() -> None:
+    exc = HTTPException(
+        status_code=409,
+        detail="Idempotency-Key was already used for a different remote command",
+    )
+    exc.error_code = "IDEMPOTENCY_KEY_REUSED"
+    raise exc
+
+
+def _validate_remote_command_match(
+    event: OutboxEvent,
+    *,
+    charge_point: ChargePoint,
+    action: str,
+    payload: dict,
+) -> None:
+    stored_payload = event.payload or {}
+    expected_payload = {
+        "charge_point_id": str(charge_point.id),
+        "ocpp_identity": charge_point.ocpp_identity,
+        **payload,
+    }
+    if (
+        event.aggregate_type != "ChargePoint"
+        or event.aggregate_id != str(charge_point.id)
+        or event.event_type != f"{action}Requested"
+        or any(stored_payload.get(key) != value for key, value in expected_payload.items())
+    ):
+        _raise_idempotency_key_reused()
+
+
+def _find_remote_command(
+    db: Session,
+    *,
+    charge_point: ChargePoint,
+    action: str,
+    payload: dict,
+    idempotency_key: Optional[str],
+) -> Optional[OutboxEvent]:
+    command_key = _normalize_remote_command_key(idempotency_key, generate=False)
+    if command_key is None:
+        return None
+    existing = db.query(OutboxEvent).filter(
+        OutboxEvent.tenant_id == charge_point.tenant_id,
+        OutboxEvent.idempotency_key == f"remote-command:{command_key}",
+    ).first()
+    if existing:
+        _validate_remote_command_match(
+            existing,
+            charge_point=charge_point,
+            action=action,
+            payload=payload,
+        )
+    return existing
+
+
 def _record_remote_command(
     db: Session,
     *,
@@ -127,15 +200,20 @@ def _record_remote_command(
     payload: dict,
     idempotency_key: Optional[str],
 ) -> tuple[OutboxEvent, bool]:
-    command_key = (idempotency_key or str(uuid.uuid4())).strip()
-    if not command_key or len(command_key) > 255:
-        raise HTTPException(status_code=422, detail="Idempotency-Key must contain 1-255 characters")
+    command_key = _normalize_remote_command_key(idempotency_key, generate=True)
+    assert command_key is not None
     stored_key = f"remote-command:{command_key}"
     existing = db.query(OutboxEvent).filter(
         OutboxEvent.tenant_id == charge_point.tenant_id,
         OutboxEvent.idempotency_key == stored_key,
     ).first()
     if existing:
+        _validate_remote_command_match(
+            existing,
+            charge_point=charge_point,
+            action=action,
+            payload=payload,
+        )
         return existing, False
 
     command_id = str(uuid.uuid4())
@@ -405,6 +483,25 @@ async def remote_start(
         f"运维管理员ID: {admin.id}"
     )
     cp = _scoped_charge_point(db, req.charge_point_id)
+    command_payload = {
+        "operation_reason": req.operation_reason,
+        "connector_id": req.connector_id,
+        "id_tag": operations_id_tag,
+    }
+    existing = _find_remote_command(
+        db,
+        charge_point=cp,
+        action="remote_start",
+        payload=command_payload,
+        idempotency_key=command_idempotency_key,
+    )
+    if existing:
+        return _replay_remote_command(existing)
+
+    try:
+        require_charge_point_operational(cp)
+    except AssetNotOperationalError as exc:
+        raise _remote_start_conflict(exc.code, exc.message) from exc
     if not check_charger_connection(cp.ocpp_identity):
         raise _remote_start_conflict(
             "CHARGER_OFFLINE",
@@ -450,11 +547,7 @@ async def remote_start(
 
     event, is_new = _record_remote_command(
         db, charge_point=cp, admin=admin, action="remote_start",
-        payload={
-            "operation_reason": req.operation_reason,
-            "connector_id": req.connector_id,
-            "id_tag": operations_id_tag,
-        },
+        payload=command_payload,
         idempotency_key=command_idempotency_key,
     )
     if not is_new:

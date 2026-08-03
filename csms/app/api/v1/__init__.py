@@ -37,6 +37,7 @@ def register_routes():
         ("statistics", "/statistics", "统计数据"),
         ("devices", "/devices", "设备管理"),
         ("dashboard", "/dashboard", "仪表板"),  # 添加 dashboard 路由
+        ("asset_archive", "/asset-archive", "资产归档"),
         ("app.auth", "/app/auth", "APP用户认证"),
     ("app.chargers", "/app/chargers", "APP充电站查询"),  # 添加 APP 认证路由
     ("app.sites", "/app/sites", "APP公开站点查询"),

@@ -106,42 +106,58 @@ class TestChargePointService:
                 status="Available"
             )
     
-    def test_record_heartbeat(self, db_session: Session, sample_charge_point: ChargePoint, sample_device: Device):
+    def test_record_heartbeat(
+        self,
+        db_session: Session,
+        sample_charge_point: ChargePoint,
+        sample_device: Device,
+        sample_evse_status: EVSEStatus,
+    ):
         """测试记录心跳"""
-        ChargePointService.record_heartbeat(
+        persisted = ChargePointService.record_heartbeat(
             db=db_session,
             charge_point_id=sample_charge_point.ocpp_identity,
             device_serial_number=sample_device.serial_number
         )
-        
-        # 检查是否创建了DeviceEvent
+
+        assert persisted is False
+        db_session.refresh(sample_evse_status)
+        assert sample_evse_status.last_seen is not None
+
+        # 正常心跳不创建永久事件。
         from app.database.models import DeviceEvent
         event = db_session.query(DeviceEvent).filter(
             DeviceEvent.charge_point_id == sample_charge_point.id,
             DeviceEvent.event_type == "heartbeat"
         ).first()
-        
-        assert event is not None
-        assert event.device_serial_number == sample_device.serial_number
-    
-    def test_record_heartbeat_invalid_device(self, db_session: Session, sample_charge_point: ChargePoint):
+
+        assert event is None
+
+    def test_record_heartbeat_invalid_device(
+        self,
+        db_session: Session,
+        sample_charge_point: ChargePoint,
+        sample_evse_status: EVSEStatus,
+    ):
         """测试使用无效设备序列号记录心跳"""
         # 不应该抛出异常，应该记录警告并继续
-        ChargePointService.record_heartbeat(
+        persisted = ChargePointService.record_heartbeat(
             db=db_session,
             charge_point_id=sample_charge_point.ocpp_identity,
             device_serial_number="999999999999999"  # 不存在的设备
         )
-        
-        # 检查是否创建了DeviceEvent（但device_serial_number为None）
+
+        assert persisted is False
+        db_session.refresh(sample_evse_status)
+        assert sample_evse_status.last_seen is not None
+
         from app.database.models import DeviceEvent
         event = db_session.query(DeviceEvent).filter(
             DeviceEvent.charge_point_id == sample_charge_point.id,
             DeviceEvent.event_type == "heartbeat"
         ).first()
-        
-        assert event is not None
-        assert event.device_serial_number is None
+
+        assert event is None
     
     def test_get_evse_status(self, db_session: Session, sample_evse_status: EVSEStatus):
         """测试获取EVSE状态"""

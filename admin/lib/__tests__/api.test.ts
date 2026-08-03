@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi, afterEach, beforeAll, afterAll } from 'vitest';
-import { apiGet, apiPost } from '../api';
+import { apiDelete, apiGet, apiPost } from '../api';
 import { setTokens, clearTokens } from '../auth';
 import { setCurrentTenantId } from '../tenant';
 import { server } from '@/__mocks__/server';
@@ -95,6 +95,27 @@ describe('API Client', () => {
           headers: expect.objectContaining({
             'X-Tenant-Id': 'tenant-1',
           }),
+        })
+      );
+    });
+  });
+
+  describe('apiDelete', () => {
+    it('应该发送 DELETE 请求并包含确认 body', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: async () => ({ success: true }),
+      });
+
+      await apiDelete('/test', { confirmation: 'CP-01', reason: 'Created by mistake' });
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({
+          method: 'DELETE',
+          body: JSON.stringify({ confirmation: 'CP-01', reason: 'Created by mistake' }),
         })
       );
     });

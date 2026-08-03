@@ -18,6 +18,7 @@ from app.database.base import tenant_id_context
 from app.database.models import ChargingSession, EVSE, EVSEStatus, Order, MeterValue
 from app.domain.charging_session import validate_transition
 from app.services.outbox_service import OutboxService
+from app.services.asset_lifecycle_service import require_charge_point_operational
 
 logger = logging.getLogger("ocpp_csms")
 
@@ -55,6 +56,11 @@ class SessionService:
         if existing:
             # StartTransaction 重放是幂等成功；不允许重新打开已结束会话。
             return existing
+
+        # A connected device may race with retirement or site archival. The
+        # protocol handler must not create a new session/order after either
+        # lifecycle boundary has closed new business.
+        require_charge_point_operational(charge_point)
 
         evse_status = db.query(EVSEStatus).filter(
             EVSEStatus.evse_id == evse.id
@@ -204,6 +210,7 @@ class SessionService:
         connector_id: Optional[int] = None,
         sampled_value: Optional[Dict[str, Any]] = None,
         idempotency_key: Optional[str] = None,
+        commit: bool = True,
     ) -> bool:
         session = db.query(ChargingSession).filter(
             ChargingSession.id == session_id
@@ -230,5 +237,8 @@ class SessionService:
             value=int(value),
             sampled_value=sampled_value,
         ))
-        db.commit()
+        if commit:
+            db.commit()
+        else:
+            db.flush()
         return True

@@ -44,8 +44,8 @@ steps:
     action: remote_start
     with:
       charge_point_id: ${seed.charge_point.ocpp_identity}
-      id_tag: ADMIN-REMOTE-TAG
       connector_id: 1
+      operation_reason: SIM E2E admin remote start
       idempotency_key: "${run_id}:admin-start"
     expect:
       status: 200
@@ -69,16 +69,20 @@ steps:
     retry: 5
     expect:
       status: 200
-      body: {min_count: 1, unique_by: transaction_id, each: {status: ongoing}}
+      body.items: {min_count: 1, unique_by: id, each: {status: ongoing}}
     save:
-      transaction_id: body.0.transaction_id
+      session_id: body.items.0.id
+  - id: meter-sampling-window
+    actor: system
+    action: await
+    with: {seconds: 12}
   - id: command-audit-replay
     actor: admin
     action: remote_start
     with:
       charge_point_id: ${seed.charge_point.ocpp_identity}
-      id_tag: ADMIN-REMOTE-TAG
       connector_id: 1
+      operation_reason: SIM E2E admin remote start
       idempotency_key: "${run_id}:admin-start"
     expect:
       status: 200
@@ -94,8 +98,9 @@ steps:
     actor: admin
     action: remote_stop
     with:
-      charge_point_id: ${seed.charge_point.ocpp_identity}
-      transaction_id: ${transaction_id}
+      session_id: ${session_id}
+      operation_reason: SIM E2E admin remote stop
+      idempotency_key: "${run_id}:admin-stop"
     expect:
       status: 200
       body.success: true
@@ -115,9 +120,9 @@ steps:
     retry: 5
     expect:
       status: 200
-      body:
+      body.items:
         min_count: 1
-        unique_by: transaction_id
+        unique_by: id
         each: {status: completed}
-        any_match: {transaction_id: "${transaction_id}"}
+        any_match: {id: "${session_id}"}
 reports: {formats: [json, junit, timeline]}

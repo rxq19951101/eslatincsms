@@ -20,7 +20,12 @@ from app.core.auth import get_current_user
 from app.database.base import get_db, SuperSessionLocal
 from app.database.models import AppUser, ChargingSession, MeterValue, AppWalletTransaction, Tariff, ChargePoint, EVSEStatus, EVSE, Site
 from app.services.billing_service import BillingService
-from app.services.qr_service import resolve_qr_token
+from app.services.meter_telemetry_service import meter_telemetry_service
+from app.services.asset_lifecycle_service import (
+    AssetNotOperationalError,
+    require_charge_point_operational,
+)
+from app.services.qr_service import InvalidQrTokenError, resolve_qr_token
 
 from app.api.v1.ocpp_control import (
     check_charger_connection,
@@ -122,6 +127,22 @@ def _business_error(status_code: int, code: str, message: str, **details: Any) -
     return exc
 
 
+def _resolve_operational_qr(db: Session, token: str):
+    try:
+        return resolve_qr_token(db=db, token=token)
+    except AssetNotOperationalError as exc:
+        raise _business_error(409, exc.code, exc.message) from exc
+    except InvalidQrTokenError as exc:
+        raise _business_error(400, exc.code, exc.message) from exc
+
+
+def _require_operational_business_asset(charge_point: ChargePoint) -> None:
+    try:
+        require_charge_point_operational(charge_point)
+    except AssetNotOperationalError as exc:
+        raise _business_error(409, exc.code, exc.message) from exc
+
+
 async def get_current_app_user(
     current_user_payload: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -187,7 +208,9 @@ async def start_charging_by_scan(
         
         lookup_db = SuperSessionLocal()
         try:
-            token_rec = resolve_qr_token(db=lookup_db, token=req.qr_token)
+            token_rec = _resolve_operational_qr(db=lookup_db, token=req.qr_token)
+        except HTTPException:
+            raise
         except Exception as e:
             log_api_error(
                 method="POST",
@@ -212,6 +235,7 @@ async def start_charging_by_scan(
             ).first()
             if not charge_point:
                 raise HTTPException(status_code=404, detail="Charge point not found")
+            _require_operational_business_asset(charge_point)
 
             evse = sdb.query(EVSE).filter(
                 EVSE.charge_point_id == charge_point.id,
@@ -422,10 +446,12 @@ def check_charger_status(
     sdb = SuperSessionLocal()
     try:
         try:
-            token_rec = resolve_qr_token(db=sdb, token=qr_token)
+            token_rec = _resolve_operational_qr(db=sdb, token=qr_token)
             charge_point_id = token_rec.charge_point_id
             connector_id = token_rec.connector_id
             logger.info(f"[APP API] QR resolved: charge_point_id={charge_point_id}, connector_id={connector_id}")
+        except HTTPException:
+            raise
         except ValueError as e:
             logger.warning("[APP API] QR lookup rejected: %s", type(e).__name__)
             raise HTTPException(status_code=400, detail=f"Invalid QR token: {e}")
@@ -443,6 +469,7 @@ def check_charger_status(
         if not charger:
             logger.warning("[APP API] Charger not found: %s (resolved from QR)", charge_point_id)
             raise HTTPException(status_code=404, detail=f"Charger not found: {charge_point_id}")
+        _require_operational_business_asset(charger)
         
         logger.info(f"[APP API] Charger found: {charge_point_id}, tenant_id={charger.tenant_id}")
 
@@ -662,7 +689,9 @@ def get_active_session(
         token_rec = None
         if qr_token:
             try:
-                token_rec = resolve_qr_token(db=db, token=qr_token)
+                token_rec = _resolve_operational_qr(db=db, token=qr_token)
+            except HTTPException:
+                raise
             except Exception as e:
                 log_api_error(
                     method="GET",
@@ -793,7 +822,9 @@ async def stop_charging(
             query = query.filter(ChargingSession.id == req.session_id)
         else:
             try:
-                token_rec = resolve_qr_token(db=db, token=req.qr_token)
+                token_rec = _resolve_operational_qr(db=db, token=req.qr_token)
+            except HTTPException:
+                raise
             except Exception as e:
                 log_api_error(
                     method="POST",
@@ -1091,8 +1122,58 @@ def get_meter_values(
                     "voltage_v": voltage_v,
                     "soc": soc,
                     "sampled_value": sv,
+                    "source": "database",
                 }
             )
+
+        realtime = meter_telemetry_service.get_latest(
+            tenant_id=session.tenant_id,
+            session_id=session.id,
+        )
+        if realtime:
+            realtime_timestamp = realtime.get("timestamp")
+            realtime_comparison_timestamp = (
+                realtime.get("received_at") or realtime_timestamp
+            )
+            realtime_dt = None
+            if isinstance(realtime_comparison_timestamp, str):
+                try:
+                    realtime_dt = datetime.fromisoformat(
+                        realtime_comparison_timestamp.replace("Z", "+00:00")
+                    )
+                except ValueError:
+                    realtime_dt = None
+
+            latest_db_dt = rows[-1].timestamp if rows else None
+            if latest_db_dt and latest_db_dt.tzinfo is None:
+                latest_db_dt = latest_db_dt.replace(tzinfo=timezone.utc)
+            if realtime_dt and realtime_dt.tzinfo is None:
+                realtime_dt = realtime_dt.replace(tzinfo=timezone.utc)
+
+            if not latest_db_dt or not realtime_dt or realtime_dt > latest_db_dt:
+                sv = realtime.get("sampled_value")
+                power_w = _extract_first_numeric(sv, "Power.Active.Import")
+                current_a = _extract_first_numeric(sv, "Current.Import")
+                voltage_v = _extract_first_numeric(sv, "Voltage")
+                soc = _extract_first_numeric(sv, "SoC")
+                value_wh = int(realtime.get("value_wh", 0))
+                result.append({
+                    "id": realtime.get("id") or f"realtime:{realtime_timestamp}",
+                    "timestamp": realtime_timestamp,
+                    "connector_id": realtime.get("connector_id"),
+                    "value_wh": value_wh,
+                    "energy_kwh": float(Decimal(value_wh) / Decimal("1000")),
+                    "power_kw": (
+                        power_w / 1000.0
+                        if isinstance(power_w, (int, float))
+                        else None
+                    ),
+                    "current_a": current_a,
+                    "voltage_v": voltage_v,
+                    "soc": soc,
+                    "sampled_value": sv,
+                    "source": "realtime",
+                })
 
         log_api_response(
             method="GET",

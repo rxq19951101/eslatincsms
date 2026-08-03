@@ -192,6 +192,15 @@ export interface ChargePointDetail extends ChargePoint {
   acceptance_report?: AcceptanceReport | null;
   last_acceptance_at?: string | null;
   commissioned_at?: string | null;
+  lifecycle_status?: 'active' | 'retired';
+  retirement_reason?: string | null;
+  retirement_requested_at?: string | null;
+  retired_at?: string | null;
+  original_site?: {
+    id: string;
+    site_code: string;
+    name: string;
+  } | null;
 }
 
 export interface AcceptanceReport {
@@ -226,6 +235,12 @@ export interface SiteListItem {
   domain?: string | null;
   charge_points_count: number;
   online_charge_points_count: number;
+  lifecycle_status?: 'active' | 'archived';
+  archived_at?: string | null;
+  archive_reason?: string | null;
+  active_charge_points_count?: number;
+  retiring_charge_points_count?: number;
+  retired_charge_points_count?: number;
   created_at: string;
   updated_at: string;
 }
@@ -242,6 +257,7 @@ export interface SiteDetailChargePoint {
   last_seen?: string | null;
   site_id: string;
   site_name?: string | null;
+  lifecycle_status?: 'active' | 'retired';
 }
 
 export interface SiteDetail {
@@ -256,8 +272,52 @@ export interface SiteDetail {
   domain?: string | null;
   price_per_kwh?: number | null;
   charge_points: SiteDetailChargePoint[];
+  lifecycle_status?: 'active' | 'archived';
+  archived_at?: string | null;
+  archive_reason?: string | null;
+  active_charge_points_count?: number;
+  retiring_charge_points_count?: number;
+  retired_charge_points_count?: number;
   created_at: string;
   updated_at: string;
+}
+
+export interface AssetArchiveActor {
+  id: string;
+  username?: string | null;
+  full_name?: string | null;
+}
+
+export interface ArchivedSiteItem {
+  id: string;
+  site_code: string;
+  name: string;
+  address: string;
+  lifecycle_status: 'archived';
+  archived_at?: string | null;
+  archive_reason?: string | null;
+  archived_by?: AssetArchiveActor | null;
+  active_charge_points_count: number;
+  retiring_charge_points_count: number;
+  retired_charge_points_count: number;
+}
+
+export interface RetiredChargerItem {
+  id: string;
+  ocpp_identity: string;
+  display_code: string;
+  display_name?: string | null;
+  vendor?: string | null;
+  model?: string | null;
+  lifecycle_status: 'retired';
+  retirement_reason?: string | null;
+  retired_at?: string | null;
+  retired_by?: AssetArchiveActor | null;
+  original_site: {
+    id: string;
+    site_code: string;
+    name: string;
+  };
 }
 
 export interface BindChargePointsRequest {

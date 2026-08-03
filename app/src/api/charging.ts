@@ -142,6 +142,7 @@ export async function settleCharging(sessionId: string): Promise<SettleResult> {
 
 export interface MeterValuePoint {
   id: string;
+  source?: 'database' | 'realtime';
   timestamp: string | null;
   connector_id: number | null;
   value_wh: number;

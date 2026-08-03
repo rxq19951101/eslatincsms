@@ -23,14 +23,25 @@ export const API_ENDPOINTS = {
   // 充电桩
   CHARGERS: '/api/v1/chargers',
   CHARGER_DETAIL: (id: string) => `/api/v1/chargers/${id}`,
+  CHARGER_RETIREMENT_PREFLIGHT: (id: string) => `/api/v1/chargers/${id}/retirement-preflight`,
+  CHARGER_RETIRE: (id: string) => `/api/v1/chargers/${id}/retire`,
+  CHARGER_RESTORE: (id: string) => `/api/v1/chargers/${id}/restore`,
   CHARGER_PRICING: (id: string) => `/api/v1/chargers/${id}/pricing`,
   CHARGER_ROTATE_CREDENTIALS: (id: string) => `/api/v1/chargers/${id}/credentials/rotate`,
   CHARGER_ACCEPTANCE_REPORT: (id: string) => `/api/v1/chargers/${id}/acceptance-report`,
   CHARGER_COMMISSION: (id: string) => `/api/v1/chargers/${id}/commission`,
 
+  // 资产归档
+  ASSET_ARCHIVE_SITES: '/api/v1/asset-archive/sites',
+  ASSET_ARCHIVE_CHARGERS: '/api/v1/asset-archive/chargers',
+
   // 站点（Site）
   SITES: '/api/v1/sites',
+  SITES_ACTIVE: '/api/v1/sites?lifecycle_status=active',
   SITE_DETAIL: (id: string) => `/api/v1/sites/${id}`,
+  SITE_ARCHIVE_PREFLIGHT: (id: string) => `/api/v1/sites/${id}/archive-preflight`,
+  SITE_ARCHIVE: (id: string) => `/api/v1/sites/${id}/archive`,
+  SITE_RESTORE: (id: string) => `/api/v1/sites/${id}/restore`,
   SITE_PRICING: (id: string) => `/api/v1/sites/${id}/pricing`,
   SITE_BINDABLE_CHARGE_POINTS: (id: string) => `/api/v1/sites/${id}/bindable-charge-points`,
   SITE_BIND_CHARGE_POINTS: (id: string) => `/api/v1/sites/${id}/bind-charge-points`,
