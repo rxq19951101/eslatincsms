@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 import re
 
 
@@ -39,6 +40,8 @@ class ChargePointProfile:
     firmware_version: str = "1.0.0"
     serial_number: str | None = None
     heartbeat_interval_sec: int = 30
+    # 整桩共享功率上限；None 表示各 connector 按自身 power_kw 独立运行。
+    shared_power_limit_kw: float | None = None
     # 支付模拟配置
     enable_payment_simulation: bool = True
     payment_delay_seconds: int = 5
@@ -54,6 +57,11 @@ class ChargePointProfile:
             )
         if self.serial_number is not None and not self.serial_number.strip():
             raise ValueError("BootNotification serial number must not be blank")
+        if self.shared_power_limit_kw is not None and (
+            not math.isfinite(self.shared_power_limit_kw)
+            or self.shared_power_limit_kw <= 0
+        ):
+            raise ValueError("shared_power_limit_kw must be a finite number greater than 0")
 
     @property
     def ocpp_identity(self) -> str:

@@ -14,7 +14,7 @@ from ocpp.v16 import ChargePoint as OcppChargePoint
 from ocpp.v16 import call, call_result
 from ocpp.v16.enums import Action, AuthorizationStatus, RegistrationStatus
 
-from .metering import MeteringState, advance_meter
+from .metering import MeteringState, advance_meter, allocate_shared_power_kw
 from .profiles import ChargePointProfile, MeteringProfile
 logger = logging.getLogger("eslatin_charger_sim")
 
@@ -76,6 +76,26 @@ class SimChargePoint(OcppChargePoint):
         # 初始化 connector runtime
         for cid in sorted(self.meterings.keys()):
             self.state.connectors[cid] = ConnectorRuntime(connector_id=cid)
+
+    def allocated_power_kw(self, connector_id: int) -> float:
+        """Return the connector's current power after applying a shared limit."""
+        metering = self.meterings.get(connector_id)
+        if metering is None:
+            raise ValueError(f"Missing metering profile for connector_id={connector_id}")
+        if self.profile.shared_power_limit_kw is None:
+            return metering.power_kw
+
+        active_connector_ids = [
+            cid
+            for cid, runtime in self.state.connectors.items()
+            if runtime.transaction_id is not None
+        ]
+        allocations = allocate_shared_power_kw(
+            {cid: item.power_kw for cid, item in self.meterings.items()},
+            active_connector_ids,
+            self.profile.shared_power_limit_kw,
+        )
+        return allocations.get(connector_id, 0.0)
 
     async def start_background(self) -> None:
         # Boot + 初始状态
@@ -205,11 +225,12 @@ class SimChargePoint(OcppChargePoint):
             raise ValueError(f"Missing metering profile for connector_id={connector_id}")
         if connector.transaction_id is None:
             raise RuntimeError("MeterValues requires an active OCPP transaction")
+        allocated_power_kw = self.allocated_power_kw(connector_id)
         if advance:
             advance_meter(
                 connector.meter,
                 interval_sec=metering.meter_values_interval_sec,
-                power_kw=metering.power_kw,
+                power_kw=allocated_power_kw,
                 soc_end=metering.soc_end,
             )
         sampled_value = [
@@ -220,7 +241,7 @@ class SimChargePoint(OcppChargePoint):
             },
             {
                 "measurand": "Power.Active.Import",
-                "value": str(int(metering.power_kw * 1000)),
+                "value": str(int(allocated_power_kw * 1000)),
                 "unit": "W",
             },
             {"measurand": "Current.Import", "value": str(metering.current_a), "unit": "A"},

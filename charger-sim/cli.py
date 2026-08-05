@@ -58,6 +58,7 @@ async def run_one(args) -> None:
         firmware_version=args.firmware_version,
         serial_number=args.serial_number,
         heartbeat_interval_sec=args.heartbeat_interval,
+        shared_power_limit_kw=args.shared_power_limit_kw,
         enable_payment_simulation=False,
     )
     connector_ids = args.connector_id
@@ -118,6 +119,11 @@ async def run_many(args) -> None:
             firmware_version=c.get("firmware_version", "1.0.0"),
             serial_number=c.get("serial_number"),
             heartbeat_interval_sec=int(c.get("heartbeat_interval", 30)),
+            shared_power_limit_kw=(
+                float(c["shared_power_limit_kw"])
+                if c.get("shared_power_limit_kw") is not None
+                else None
+            ),
             enable_payment_simulation=False,
         )
         meterings = [
@@ -259,6 +265,12 @@ def build_parser() -> argparse.ArgumentParser:
     p1.add_argument("--heartbeat-interval", type=int, default=30)
     p1.add_argument("--meter-interval", type=int, default=5)
     p1.add_argument("--power-kw", type=float, default=7.0)
+    p1.add_argument(
+        "--shared-power-limit-kw",
+        type=float,
+        default=None,
+        help="整桩共享功率上限；多枪同时充电时按活跃枪公平分配",
+    )
     p1.add_argument("--voltage-v", type=float, default=220.0)
     p1.add_argument("--current-a", type=float, default=16.0)
     p1.add_argument("--soc-start", type=float, default=20.0)

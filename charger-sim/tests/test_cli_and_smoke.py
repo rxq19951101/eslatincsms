@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 import argparse
 import tempfile
 from pathlib import Path
@@ -23,10 +23,13 @@ class CLIContractTests(unittest.TestCase):
                 "SERIAL-BOOT-456",
                 "--connector-id",
                 "1",
+                "--shared-power-limit-kw",
+                "60",
             ]
         )
         self.assertEqual(args.ocpp_identity, "CP-WS-123")
         self.assertEqual(args.serial_number, "SERIAL-BOOT-456")
+        self.assertEqual(args.shared_power_limit_kw, 60.0)
 
     def test_qr_sources_require_one_server_value_per_connector(self) -> None:
         with self.assertRaisesRegex(ValueError, "Pre-register the charger in Admin"):
@@ -82,6 +85,28 @@ class CLIContractTests(unittest.TestCase):
 
 
 class ScenarioCLIExitTests(unittest.IsolatedAsyncioTestCase):
+    @patch("cli.connect_and_run", new_callable=AsyncMock)
+    async def test_run_many_passes_shared_power_limit_to_profile(
+        self, connect_and_run: AsyncMock
+    ) -> None:
+        content = """\
+ws: ws://localhost:9000/ocpp
+chargers:
+  - ocpp_identity: CP-SHARED-CLI-001
+    connector_ids: [1, 2]
+    power_kw: 60
+    shared_power_limit_kw: 60
+"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "chargers.yml"
+            config_path.write_text(content, encoding="utf-8")
+            await cli.run_many(argparse.Namespace(config=str(config_path), ws=None))
+
+        profile = connect_and_run.await_args.kwargs["profile"]
+        meterings = connect_and_run.await_args.kwargs["meterings"]
+        self.assertEqual(profile.shared_power_limit_kw, 60.0)
+        self.assertEqual([metering.power_kw for metering in meterings], [60.0, 60.0])
+
     async def test_failed_scenario_exits_nonzero_and_still_writes_reports(self) -> None:
         content = """\
 schema_version: "1.0"
