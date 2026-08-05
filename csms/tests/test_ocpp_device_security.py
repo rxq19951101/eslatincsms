@@ -1,7 +1,11 @@
+import base64
 from unittest.mock import MagicMock, patch
 from datetime import datetime, timezone
 
+import pytest
+
 from app.core.ocpp_auth import (
+    _presented_secret,
     hash_ocpp_secret,
     is_secure_ocpp_websocket,
     verify_charge_point_pre_registered,
@@ -14,6 +18,11 @@ def _session_with_charge_point(charge_point):
     session = MagicMock()
     session.query.return_value.filter.return_value.first.return_value = charge_point
     return session
+
+
+def _basic_auth(identity, secret):
+    encoded = base64.b64encode(f"{identity}:{secret}".encode("utf-8")).decode("ascii")
+    return {"authorization": f"Basic {encoded}"}
 
 
 def test_pre_registration_returns_real_boolean():
@@ -29,12 +38,64 @@ def test_per_device_secret_is_bound_to_identity(monkeypatch):
         is_active=True,
     )
     session = _session_with_charge_point(charge_point)
-    import base64
-    basic = base64.b64encode(f"CP-SECURE-001:{secret}".encode()).decode()
     monkeypatch.setenv("ENVIRONMENT", "production")
     with patch("app.database.base.SuperSessionLocal", return_value=session):
-        assert verify_ocpp_api_key({"authorization": f"Basic {basic}"}, "CP-SECURE-001")
-        assert not verify_ocpp_api_key({"authorization": f"Basic {basic}"}, "CP-OTHER-001")
+        assert verify_ocpp_api_key(_basic_auth("CP-SECURE-001", secret), "CP-SECURE-001")
+        assert not verify_ocpp_api_key(_basic_auth("CP-SECURE-001", secret), "CP-OTHER-001")
+
+
+def test_basic_auth_uses_complete_colon_identity_and_preserves_colons_in_secret(monkeypatch):
+    identity = "CO.BOGOTA:SIM-AC-7KW-01"
+    secret = "device:secret:with:colons"
+    charge_point = MagicMock(
+        ocpp_auth_secret_hash=hash_ocpp_secret(secret),
+        is_active=True,
+    )
+    session = _session_with_charge_point(charge_point)
+    monkeypatch.setenv("ENVIRONMENT", "production")
+
+    with patch("app.database.base.SuperSessionLocal", return_value=session):
+        assert verify_ocpp_api_key(_basic_auth(identity, secret), identity)
+        assert not verify_ocpp_api_key(_basic_auth("CO.BOGOTA", secret), identity)
+        assert not verify_ocpp_api_key(_basic_auth(identity, "wrong-secret"), identity)
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {},
+        {"authorization": "Basic"},
+        {"authorization": "Basic !!!not-base64!!!"},
+        {"authorization": "Basic " + base64.b64encode(b"missing-separator").decode("ascii")},
+        {"authorization": "Basic " + base64.b64encode(b"CP-SECURE-001:\xff").decode("ascii")},
+    ],
+)
+def test_malformed_basic_auth_fails_closed(headers):
+    assert _presented_secret(headers, "CP-SECURE-001") is None
+
+
+def test_x_api_key_and_bearer_secret_compatibility():
+    assert _presented_secret({"X-API-Key": " device-secret "}, "CP-SECURE-001") == "device-secret"
+    assert _presented_secret(
+        {"Authorization": "Bearer device-secret"}, "CP-SECURE-001"
+    ) == "device-secret"
+
+
+def test_colon_identity_completes_websocket_handshake(
+    client, db_session, sample_charge_point
+):
+    identity = "CO.BOGOTA:SIM-AC-7KW-01"
+    secret = "device:secret"
+    sample_charge_point.ocpp_identity = identity
+    sample_charge_point.ocpp_auth_secret_hash = hash_ocpp_secret(secret)
+    db_session.commit()
+
+    with client.websocket_connect(
+        f"/ocpp?id={identity}",
+        headers=_basic_auth(identity, secret),
+        subprotocols=["ocpp1.6"],
+    ) as websocket:
+        assert websocket.accepted_subprotocol == "ocpp1.6"
 
 
 def test_production_proxy_wss_detection():

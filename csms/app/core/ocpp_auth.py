@@ -62,8 +62,10 @@ def _presented_secret(headers: dict, charge_point_id: str) -> Optional[str]:
     if authorization.lower().startswith("basic "):
         try:
             decoded = base64.b64decode(authorization.split(None, 1)[1], validate=True).decode("utf-8")
-            username, password = decoded.split(":", 1)
-            return password if username == charge_point_id else None
+            identity_prefix = f"{charge_point_id}:"
+            if not decoded.startswith(identity_prefix):
+                return None
+            return decoded[len(identity_prefix):]
         except (ValueError, UnicodeDecodeError):
             return None
     if authorization.lower().startswith("bearer "):
