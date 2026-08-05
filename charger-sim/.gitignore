@@ -1,6 +1,9 @@
 test_accounts.yml
 seed.sim-e2e.json
-reports/
+reports/*
+!reports/__init__.py
+!reports/redaction.py
+!reports/writers.py
 /out/
 *.local.yml
 __pycache__/
