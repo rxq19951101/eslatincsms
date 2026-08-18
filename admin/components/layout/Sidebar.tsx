@@ -19,12 +19,14 @@ import {
   CreditCard,
   Activity,
   Archive,
+  Landmark,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useAuthStore } from '@/store/authStore';
 import { usePermissions, hasPermission } from '@/hooks/usePermissions';
 import { useI18n } from '@/lib/i18n';
 import Image from 'next/image';
+import { PAY_MP_002_NAVIGATION } from '@/lib/payMp002Foundation';
 
 interface NavigationItem {
   key: string;
@@ -32,6 +34,7 @@ interface NavigationItem {
   icon: typeof LayoutDashboard;
   permission?: string;
   anyPermissions?: string[];
+  payMp002Permissions?: string[];
   superAdminOnly?: boolean;
 }
 
@@ -42,6 +45,12 @@ const navigation: NavigationItem[] = [
   { key: 'transactions', href: '/transactions', icon: FileText, permission: 'transactions.read' },
   { key: 'sessions', href: '/sessions', icon: Activity, permission: 'transactions.read' },
   { key: 'payments', href: '/payments', icon: CreditCard, superAdminOnly: true },
+  {
+    key: 'payMp002.title',
+    href: '/payments-operations',
+    icon: Landmark,
+    payMp002Permissions: PAY_MP_002_NAVIGATION.map((item) => item.permission),
+  },
   { key: 'reports', href: '/statistics', icon: BarChart3, permission: 'reports.read' },
   { key: 'alerts', href: '/alerts', icon: Bell, permission: 'alerts.read' },
   { key: 'users', href: '/users', icon: Users, permission: 'admin_users.read' },
@@ -58,6 +67,9 @@ export function Sidebar() {
   const { t } = useI18n();
   const visibleNavigation = navigation.filter((item) => {
     if (item.superAdminOnly) return !!user?.is_super_admin;
+    if (item.payMp002Permissions) {
+      return isLoading || item.payMp002Permissions.some((permission) => hasPermission(permissions, permission));
+    }
     if (item.anyPermissions) {
       return !!user?.is_super_admin
         || isLoading

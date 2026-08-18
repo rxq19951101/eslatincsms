@@ -53,6 +53,7 @@ from app.services.asset_lifecycle_service import (
     normalize_lifecycle_reason,
     site_lifecycle_status,
 )
+from app.services.pricing_service import PricingMode, PricingService
 
 logger = get_logger("ocpp_csms")
 
@@ -125,6 +126,7 @@ class SiteDetailResponse(BaseModel):
     operating_hours: Optional[str]
     domain: Optional[str]
     price_per_kwh: Optional[float] = None
+    pricing: Optional[Dict[str, Any]] = None
     charge_points: List[SiteDetailChargePoint]
     lifecycle_status: Literal["active", "archived"]
     archived_at: Optional[str] = None
@@ -137,18 +139,51 @@ class SiteDetailResponse(BaseModel):
 
 
 class SitePricingUpdateRequest(BaseModel):
-    """站点级基础电价（作为默认价）"""
+    """Explicit site pricing mode (PRC-MODE-001)."""
 
-    base_price_per_kwh: Decimal = Field(..., gt=0, description="基础电价（每kWh）")
-    service_fee: Optional[Decimal] = Field(None, ge=0, description="服务费（可选）")
+    pricing_mode: Literal["paid", "free", "unavailable"]
+    base_price_per_kwh: Optional[Decimal] = Field(None, ge=0)
+    service_fee: Optional[Decimal] = Field(None, ge=0)
+    free_reason: Optional[str] = Field(None, min_length=3, max_length=500)
+    valid_until: Optional[datetime] = None
+
+    @model_validator(mode="after")
+    def validate_pricing_mode(self):
+        if self.pricing_mode == "paid":
+            if self.base_price_per_kwh is None or self.base_price_per_kwh <= 0:
+                raise ValueError("paid pricing requires base_price_per_kwh greater than 0")
+            if self.free_reason is not None:
+                raise ValueError("paid pricing must not include free_reason")
+        elif self.pricing_mode == "free":
+            if not self.free_reason:
+                raise ValueError("free pricing requires free_reason")
+            if self.valid_until is None or self.valid_until.tzinfo is None:
+                raise ValueError("free pricing requires timezone-aware valid_until")
+            if self.valid_until <= datetime.now(timezone.utc):
+                raise ValueError("free pricing valid_until must be in the future")
+            if self.base_price_per_kwh not in (None, Decimal("0")):
+                raise ValueError("free pricing price must be 0")
+            if self.service_fee not in (None, Decimal("0")):
+                raise ValueError("free pricing service_fee must be 0")
+        else:
+            if any(value is not None for value in (
+                self.base_price_per_kwh, self.service_fee, self.free_reason, self.valid_until
+            )):
+                raise ValueError("unavailable pricing does not accept price or free metadata")
+        return self
 
 
 class SitePricingResponse(BaseModel):
     site_id: str
-    tariff_id: str
-    base_price_per_kwh: Decimal
-    service_fee: Decimal
-    valid_from: str
+    pricing_mode: str
+    pricing_source: str
+    tariff_id: Optional[str]
+    base_price_per_kwh: Optional[Decimal]
+    service_fee: Optional[Decimal]
+    currency: str
+    free_reason: Optional[str]
+    valid_from: Optional[str]
+    valid_until: Optional[str]
 
 
 class SiteLifecycleRequest(StrictRequestModel):
@@ -650,21 +685,7 @@ def get_site_detail(
 ) -> SiteDetailResponse:
     site = _get_scoped_site(db, site_id, current_user_obj)
 
-    # 站点价格（站点级 tariff：取 active 的第一条）
-    now = datetime.now(timezone.utc)
-    tariff = (
-        db.query(Tariff)
-        .filter(
-            Tariff.tenant_id == site.tenant_id,
-            Tariff.site_id == site.id,
-            Tariff.charge_point_id.is_(None),
-            Tariff.is_active == True,  # noqa: E712
-            Tariff.valid_from <= now,
-        )
-        .filter((Tariff.valid_until.is_(None)) | (Tariff.valid_until >= now))
-        .order_by(Tariff.valid_from.desc())
-        .first()
-    )
+    pricing = PricingService.resolve_site(db, site.tenant_id, site.id)
 
     cps = db.query(ChargePoint).filter(
         ChargePoint.site_id == site.id,
@@ -747,7 +768,8 @@ def get_site_detail(
         is_active=bool(site.is_active),
         operating_hours=site.operating_hours,
         domain=None,
-        price_per_kwh=float(tariff.base_price_per_kwh) if tariff else None,
+        price_per_kwh=float(pricing.base_price_per_kwh or 0) if pricing.is_available else None,
+        pricing=pricing.as_dict(),
         charge_points=charge_points,
         lifecycle_status=lifecycle_fields["lifecycle_status"],
         archived_at=lifecycle_fields["archived_at"],
@@ -844,28 +866,46 @@ def update_site_pricing(
         if t.valid_until is None:
             t.valid_until = now
 
-    service_fee = float(req.service_fee) if req.service_fee is not None else 0.0
+    before_tariff = old_tariffs[0] if old_tariffs else None
+    before_data = (
+        PricingService._parse_tariff(before_tariff, "site").as_dict()
+        if before_tariff else PricingService.unavailable().as_dict()
+    )
+    mode = PricingMode(req.pricing_mode)
+    price = req.base_price_per_kwh if mode == PricingMode.PAID else Decimal("0.00")
+    service_fee = req.service_fee if mode == PricingMode.PAID and req.service_fee is not None else Decimal("0.00")
     new_tariff = Tariff(
         tenant_id=site.tenant_id,
-        site_id=str(site.id),
+        site_id=site.id,
         charge_point_id=None,
         name="站点默认定价",
-        base_price_per_kwh=req.base_price_per_kwh,
+        base_price_per_kwh=price,
         service_fee=service_fee,
+        time_based_rules=PricingService.metadata(mode, free_reason=req.free_reason),
         valid_from=now,
-        valid_until=None,
+        valid_until=req.valid_until.astimezone(timezone.utc) if req.valid_until else None,
         is_active=True,
     )
     db.add(new_tariff)
+    db.flush()
+    resolved = PricingService._parse_tariff(new_tariff, "site")
+    db.add(AuditLog(
+        tenant_id=site.tenant_id,
+        actor_id=current_user_obj.id,
+        actor_type="admin",
+        action="tariff.site.update",
+        resource_type="site",
+        resource_id=str(site.id),
+        before_data=before_data,
+        after_data=resolved.as_dict(),
+        audit_metadata={"free_reason": req.free_reason} if req.free_reason else {},
+    ))
     db.commit()
     db.refresh(new_tariff)
 
     return SitePricingResponse(
         site_id=str(site.id),
-        tariff_id=str(new_tariff.id),
-        base_price_per_kwh=float(new_tariff.base_price_per_kwh),
-        service_fee=float(new_tariff.service_fee or 0),
-        valid_from=new_tariff.valid_from.isoformat() if new_tariff.valid_from else "",
+        **resolved.as_dict(),
     )
 
 

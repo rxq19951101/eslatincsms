@@ -1,9 +1,9 @@
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import SiteDetailPage from '../page';
-import { apiDelete, apiGet, apiPost } from '@/lib/api';
+import { apiDelete, apiGet, apiPost, apiPut } from '@/lib/api';
 
 const siteId = 'site-uuid-1';
 const siteMutate = vi.fn();
@@ -58,6 +58,17 @@ vi.mock('swr', () => ({
           retiring_charge_points_count: 0,
           retired_charge_points_count: 2,
           price_per_kwh: 1200,
+          pricing: {
+            pricing_mode: 'paid',
+            pricing_source: 'site',
+            tariff_id: 'tariff-site-1',
+            base_price_per_kwh: '1200.00',
+            service_fee: '0.00',
+            currency: 'COP',
+            free_reason: null,
+            valid_from: '2026-08-01T00:00:00Z',
+            valid_until: null,
+          },
           charge_points: archived ? [] : [{
             id: 'charger-uuid-1',
             ocpp_identity: 'CO.BOGOTA:CP-01',
@@ -79,10 +90,83 @@ vi.mock('swr', () => ({
   },
 }));
 
+beforeAll(() => {
+  Object.defineProperty(HTMLElement.prototype, 'hasPointerCapture', { value: () => false });
+  Object.defineProperty(HTMLElement.prototype, 'setPointerCapture', { value: () => undefined });
+  Object.defineProperty(HTMLElement.prototype, 'releasePointerCapture', { value: () => undefined });
+  Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { value: () => undefined });
+});
+
 describe('site detail lifecycle', () => {
   beforeEach(() => {
     testState.lifecycleStatus = 'active';
     vi.clearAllMocks();
+  });
+
+  it('shows the effective paid site price in COP with its source', () => {
+    const { container } = render(<SiteDetailPage />);
+
+    expect(screen.getByTestId('pricing-summary')).toHaveTextContent('付费');
+    expect(screen.getByTestId('pricing-summary')).toHaveTextContent('站点默认');
+    expect(screen.getByTestId('pricing-summary')).toHaveTextContent('COP');
+    expect(screen.getByTestId('pricing-summary')).toHaveTextContent('1,200.00');
+    expect(container).not.toHaveTextContent('¥');
+  });
+
+  it('submits an explicit free site price with reason and future deadline', async () => {
+    const user = userEvent.setup();
+    vi.mocked(apiPut).mockResolvedValueOnce({});
+    vi.spyOn(window, 'alert').mockImplementation(() => undefined);
+    render(<SiteDetailPage />);
+
+    await user.click(screen.getByRole('button', { name: '编辑' }));
+    await user.click(screen.getByRole('combobox', { name: '站点定价模式' }));
+    await user.click(screen.getByRole('option', { name: '免费' }));
+    await user.type(screen.getByRole('textbox', { name: '免费原因' }), '开业推广活动');
+    await user.type(screen.getByLabelText('免费截止时间'), '2099-12-31T23:59');
+    await user.click(screen.getByRole('button', { name: '保存定价' }));
+
+    await waitFor(() => expect(apiPut).toHaveBeenCalledWith(
+      `/api/v1/sites/${siteId}/pricing`,
+      {
+        pricing_mode: 'free',
+        base_price_per_kwh: '0.00',
+        service_fee: '0.00',
+        free_reason: '开业推广活动',
+        valid_until: expect.any(String),
+      }
+    ));
+    const freePayload = vi.mocked(apiPut).mock.calls[0][1] as { valid_until: string };
+    expect(new Date(freePayload.valid_until).getTime()).toBeGreaterThan(Date.now());
+  });
+
+  it('supports unavailable site pricing and all charger override modes', async () => {
+    const user = userEvent.setup();
+    vi.mocked(apiPut).mockResolvedValue({});
+    vi.spyOn(window, 'alert').mockImplementation(() => undefined);
+    render(<SiteDetailPage />);
+
+    await user.click(screen.getByRole('button', { name: '编辑' }));
+    await user.click(screen.getByRole('combobox', { name: '站点定价模式' }));
+    await user.click(screen.getByRole('option', { name: '暂不可用' }));
+    await user.click(screen.getByRole('button', { name: '保存定价' }));
+    await waitFor(() => expect(apiPut).toHaveBeenCalledWith(
+      `/api/v1/sites/${siteId}/pricing`,
+      { pricing_mode: 'unavailable' }
+    ));
+
+    await user.click(screen.getByRole('button', { name: '覆盖定价' }));
+    await user.click(screen.getByRole('combobox', { name: '充电桩定价模式' }));
+    expect(screen.getByRole('option', { name: '继承站点' })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: '付费' })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: '免费' })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: '暂不可用' })).toBeInTheDocument();
+    await user.keyboard('{Escape}');
+    await user.click(screen.getByRole('button', { name: '保存' }));
+    await waitFor(() => expect(apiPut).toHaveBeenCalledWith(
+      '/api/v1/chargers/charger-uuid-1/pricing',
+      { pricing_mode: 'inherit' }
+    ));
   });
 
   it('shows archive blockers and opens the relevant charger', async () => {

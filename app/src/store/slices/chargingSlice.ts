@@ -3,7 +3,12 @@
  */
 
 import { createAsyncThunk, createSlice, PayloadAction } from '@reduxjs/toolkit';
-import type { ActiveChargingSession, MeterValuePoint, RemoteResponse } from '../../api/charging';
+import type {
+  ActiveChargingSession,
+  ChargingSettlementMethod,
+  MeterValuePoint,
+  RemoteResponse,
+} from '../../api/charging';
 import { getActiveChargingSession, getMeterValues, startChargingByScan, stopCharging } from '../../api/charging';
 import { handleApiError } from '../../api/client';
 
@@ -30,6 +35,8 @@ export interface ChargingState {
   lastRemoteResult: RemoteResponse | null;
   recoveryChecked: boolean;
   recovering: boolean;
+  settlementMethod: ChargingSettlementMethod | 'free' | null;
+  paymentIntentId: string | null;
 }
 
 const initialState: ChargingState = {
@@ -47,6 +54,8 @@ const initialState: ChargingState = {
   lastRemoteResult: null,
   recoveryChecked: false,
   recovering: false,
+  settlementMethod: null,
+  paymentIntentId: null,
 };
 
 function chargingFailure(error: unknown, operation: ChargingOperation): ChargingFailure {
@@ -57,12 +66,24 @@ function chargingFailure(error: unknown, operation: ChargingOperation): Charging
 export const startCharging = createAsyncThunk(
   'charging/start',
   async (
-    { qrToken }: { qrToken: string },
+    {
+      qrToken,
+      settlementMethod,
+      paymentIntentId,
+    }: {
+      qrToken: string;
+      settlementMethod?: ChargingSettlementMethod;
+      paymentIntentId?: string | null;
+    },
     { rejectWithValue }
   ) => {
     try {
-      const res = await startChargingByScan({ qrToken });
-      return { qrToken, res };
+      const res = await startChargingByScan({
+        qrToken,
+        ...(settlementMethod ? { settlementMethod } : {}),
+        ...(paymentIntentId ? { paymentIntentId } : {}),
+      });
+      return { qrToken, res, settlementMethod: settlementMethod ?? 'wallet', paymentIntentId: paymentIntentId ?? null };
     } catch (e: unknown) {
       return rejectWithValue(chargingFailure(e, 'start'));
     }
@@ -170,6 +191,8 @@ const chargingSlice = createSlice({
         state.starting = false;
         state.qrToken = action.payload.qrToken;
         state.lastRemoteResult = action.payload.res;
+        state.settlementMethod = action.payload.settlementMethod;
+        state.paymentIntentId = action.payload.paymentIntentId;
         if (action.payload.res.session) {
           state.activeSession = action.payload.res.session;
         }

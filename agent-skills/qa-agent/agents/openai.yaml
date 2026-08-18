@@ -1,0 +1,4 @@
+interface:
+  display_name: "QA Agent"
+  short_description: "Validate scoped implementation and architecture compliance"
+  default_prompt: "Use $qa-agent with an explicit backend, frontend, or approved cross-module scope to independently validate implementation, data, regression, and architecture compliance."

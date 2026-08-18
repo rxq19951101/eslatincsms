@@ -86,13 +86,13 @@ def test_missing_heartbeat_snapshot_is_persisted(
 @pytest.mark.asyncio
 async def test_meter_values_message_commits_once(
     db_session,
-    sample_charge_point,
+    sample_commercial_charge_point,
     sample_evse,
     sample_evse_status,
 ):
     handler = OCPPMessageHandler()
     start = await handler.handle_message(
-        sample_charge_point.ocpp_identity,
+        sample_commercial_charge_point.ocpp_identity,
         "StartTransaction",
         {"connectorId": 1, "idTag": "P0_TAG", "meterStart": 0},
         evse_id=1,
@@ -107,7 +107,7 @@ async def test_meter_values_message_commits_once(
     event.listen(Session, "after_commit", count_commit)
     try:
         result = await handler.handle_message(
-            sample_charge_point.ocpp_identity,
+            sample_commercial_charge_point.ocpp_identity,
             "MeterValues",
             {
                 "transactionId": start["transactionId"],

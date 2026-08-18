@@ -38,4 +38,15 @@ describe('API error envelope', () => {
     expect(parsed.message).toBe('Invalid QR token');
     expect(parsed.fieldErrors).toEqual({ qr_token: 'Invalid QR token' });
   });
+
+  it('parses stable business errors from FastAPI detail objects', () => {
+    const parsed = parseApiErrorPayload({
+      detail: {
+        code: 'TARIFF_NOT_CONFIGURED',
+        message: 'This charger is not currently available for commercial charging.',
+      },
+    }, 409);
+    expect(parsed.code).toBe('TARIFF_NOT_CONFIGURED');
+    expect(parsed.message).toBe('This charger is not currently available for commercial charging.');
+  });
 });

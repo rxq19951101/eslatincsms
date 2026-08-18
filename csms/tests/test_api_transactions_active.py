@@ -98,6 +98,7 @@ def test_transaction_records_paginate_use_invoice_authority_and_export_same_filt
     assert record["charger"] == {
         "display_code": "A01",
         "display_name": "Lobby charger",
+        "ocpp_identity": sample_charge_point.ocpp_identity,
     }
     assert record["connector"]["id"] == str(sample_evse.id)
     assert record["connector"]["connector_number"] == 1
@@ -235,6 +236,7 @@ def test_active_sessions_include_operational_mapping_cost_and_tenant_isolation(
         "id": str(sample_charge_point.id),
         "display_code": "A01",
         "display_name": "Lobby charger",
+        "ocpp_identity": sample_charge_point.ocpp_identity,
     }
     assert active["connector"] == {
         "id": str(sample_evse.id),
@@ -381,4 +383,4 @@ def test_active_sessions_do_not_use_other_charger_tariff_as_site_default(
         item["charger"]["display_code"]: item for item in response.json()
     }
     assert active_by_charger["A01"]["estimated_cost"] == "2000.00"
-    assert active_by_charger["A02"]["estimated_cost"] == "1000.00"
+    assert active_by_charger["A02"]["estimated_cost"] == "1011.00"

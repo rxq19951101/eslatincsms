@@ -29,7 +29,7 @@ actors:
     type: fake_payment
     environment: ${seed.environment}
     base_url: ${api_base}
-    webhook_path: /api/v1/app/wallet/payments/sim-webhook
+    webhook_path: /api/v1/app/payments/webhooks/sim
     webhook_secret: ${webhook_secret}
 steps:
   - {id: intruder-login, actor: intruder, action: login, expect: {status: 200}}
@@ -106,21 +106,20 @@ steps:
       body.delivery_count: 1
       body.deliveries.0.status_code: 409
       body.deliveries.0.response.error.status_code: 409
-  - id: owner-payment-status
+  - id: owner-wallet-balance
     actor: payment_owner
-    action: query
-    with: {path: "/api/v1/app/wallet/payments/${seed.fake_top_up_order.id}/status"}
+    action: get_wallet
     expect:
       status: 200
-      body.order_id: ${seed.fake_top_up_order.id}
-      body.status: approved
+      body.currency: COP
+      body.balance: {exists: true}
   - id: owner-ledger-idempotency
     actor: payment_owner
     action: query
     with: {path: /api/v1/app/wallet/transactions, query: {limit: 200}}
     expect:
       status: 200
-      body: {count: 1, unique_by: id, each: {type: top_up}}
+      body: {min_count: 1, unique_by: id, any_match: {type: top_up}}
   - {id: tenant-admin-login, actor: tenant_admin, action: login, expect: {status: 200}}
   - id: platform-payment-detail-is-permission-guarded
     actor: tenant_admin

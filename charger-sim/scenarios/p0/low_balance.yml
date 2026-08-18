@@ -36,7 +36,7 @@ steps:
       body.error.code: HTTP_ERROR
       body.error.status_code: 402
       body.error.details.0.code: INSUFFICIENT_BALANCE
-      body.error.details.0.balance: 0.0
+      body.error.details.0.balance: "0"
   - id: no-command-delivered
     actor: charger
     action: received_commands

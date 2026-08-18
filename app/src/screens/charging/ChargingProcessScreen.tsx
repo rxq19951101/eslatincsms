@@ -6,15 +6,15 @@
  * - 显示充电过程和实时数据
  */
 
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   View,
   Text,
   StyleSheet,
   ActivityIndicator,
   ScrollView,
-  Alert,
   AppState,
+  Linking,
   type AppStateStatus,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -22,7 +22,7 @@ import { useIsFocused, useNavigation, useRoute } from '@react-navigation/native'
 import type { RouteProp } from '@react-navigation/native';
 import type { StackNavigationProp } from '@react-navigation/stack';
 
-import { COLORS, IOS_STYLES, PAYMENT_RAILS_ENABLED, MIN_BALANCE_COP } from '../../constants/config';
+import { COLORS, IOS_STYLES, PAYMENT_RAILS_ENABLED } from '../../constants/config';
 import { useI18n } from '../../i18n';
 import Button from '../../components/ui/Button';
 import Card from '../../components/ui/Card';
@@ -31,18 +31,50 @@ import CircularProgress from '../../components/ui/CircularProgress';
 import Skeleton from '../../components/ui/Skeleton';
 import ScreenHeader from '../../components/ui/ScreenHeader';
 import Badge from '../../components/ui/Badge';
-import type { RootStackParamList } from '../../types';
+import type { CanonicalPaymentMethod, RootStackParamList } from '../../types';
 import { useAppDispatch, useAppSelector } from '../../hooks/useRedux';
 import { fetchActiveSession, fetchMeterValuePoints, setChargingTarget, startCharging, stopChargingSession } from '../../store/slices/chargingSlice';
-import { checkChargerStatus, type ChargerStatusCheck } from '../../api/charging';
-import { PaymentMethodBar } from '../../components/payment/PaymentMethodBar';
+import {
+  buildChargingDirectCheckoutRequest,
+  chargingPreflight,
+  checkChargerStatus,
+  type ChargerStatusCheck,
+  type ChargingSettlementMethod,
+} from '../../api/charging';
+import { listPaymentMethods, isServerCheckoutUrl } from '../../api/payments';
+import {
+  clearPendingCheckoutSession,
+  startCheckoutSession,
+  resolveCheckoutSession,
+} from '../../features/payment/checkoutCoordinator';
+import { PaymentMethodBar, type ChargingPaymentSelection } from '../../components/payment/PaymentMethodBar';
 import { fetchWalletBalance } from '../../store/slices/walletSlice';
 import { formatDateTime, localizeChargingFailure, publicChargerIdentity } from '../../utils/localizedDisplay';
+import { handleApiError } from '../../api/client';
+import { formatPricing } from '../../utils/pricing';
 
 type R = RouteProp<RootStackParamList, 'ChargingProcess'>;
 type Nav = StackNavigationProp<RootStackParamList, 'ChargingProcess'>;
 
 type ChargerStatus = 'checking' | 'offline' | 'charging_other' | 'charging_self' | 'available';
+type DirectCheckoutPhase =
+  | 'awaiting_return'
+  | 'resolving'
+  | 'ready'
+  | 'action_required'
+  | 'expired'
+  | 'submitted'
+  | 'unavailable'
+  | 'network_unknown'
+  | 'error';
+
+const QUERYABLE_CHECKOUT_PHASES = new Set<DirectCheckoutPhase>([
+  'awaiting_return',
+  'action_required',
+  'submitted',
+  'unavailable',
+  'network_unknown',
+]);
 
 const ChargingProcessScreen = () => {
   const { t, locale } = useI18n();
@@ -64,7 +96,25 @@ const ChargingProcessScreen = () => {
   const [stopRequested, setStopRequested] = useState(false);
   const [hasEverActive, setHasEverActive] = useState(false);
   const [isInitialLoad, setIsInitialLoad] = useState(true);
+  const [settlementMethod, setSettlementMethod] = useState<ChargingPaymentSelection>('wallet');
+  const [savedPaymentMethods, setSavedPaymentMethods] = useState<CanonicalPaymentMethod[]>([]);
+  const [selectedSavedPaymentMethodId, setSelectedSavedPaymentMethodId] = useState<string | null>(null);
+  const [paymentMethodsLoading, setPaymentMethodsLoading] = useState(false);
+  const [paymentMethodsError, setPaymentMethodsError] = useState(false);
+  const [paymentMethodsReloadKey, setPaymentMethodsReloadKey] = useState(0);
+  const [unpaidBlocked, setUnpaidBlocked] = useState(false);
+  const [preflightCode, setPreflightCode] = useState<string | null>(null);
+  const [directCheckout, setDirectCheckout] = useState<{
+    sessionId: string;
+    phase: DirectCheckoutPhase;
+    paymentIntentId: string | null;
+    actionUrl: string | null;
+  } | null>(null);
   const startRequestInFlight = useRef(false);
+  const directCheckoutInFlight = useRef(false);
+  const directCheckoutPollAttempts = useRef(0);
+  const wasFocused = useRef(false);
+  const previousAppState = useRef<AppStateStatus>(AppState.currentState ?? 'active');
   const lastActiveIdentity = useRef<string | null>(activeSession?.ocpp_identity || null);
   const lastMeterIdRef = useRef<string | null>(lastMeterId);
   const [appState, setAppState] = useState<AppStateStatus>(AppState.currentState ?? 'active');
@@ -80,7 +130,132 @@ const ChargingProcessScreen = () => {
   }, [lastMeterId]);
 
   const chargingErrorText = useMemo(() => localizeChargingFailure(error, t), [error, t]);
+  const startErrorText = useMemo(() => {
+    const code = String(preflightCode || error?.code || '').toUpperCase();
+    if (code === 'PAYMENT_INTENT_INVALID') return t.charging.paymentIntentInvalid;
+    if (code === 'UNPAID_CHARGES') return t.charging.unpaidChargesBlocked;
+    if (code === 'FINANCIAL_RECHECK_REQUIRED') return t.charging.processingPayment;
+    if (code === 'RAIL_CLOSED' || code === 'RAIL_STATE_UNKNOWN') return t.charging.chargingUnavailable;
+    if (preflightCode) return t.charging.startFailed;
+    return chargingErrorText;
+  }, [chargingErrorText, error?.code, preflightCode, t]);
   const meterErrorText = useMemo(() => localizeChargingFailure(meterError, t), [meterError, t]);
+  const pricing = statusCheckData?.charger_info?.pricing;
+  const priceLabel = formatPricing(pricing, t, locale);
+  const isFreeCharging = pricing?.pricing_mode === 'free';
+  const startSettlementMethod: ChargingSettlementMethod = isFreeCharging ? 'wallet' : settlementMethod;
+  const isUnpaidBlocked = unpaidBlocked || String(error?.code || '').toUpperCase() === 'UNPAID_CHARGES';
+
+  const localizeCheckError = (value: unknown, fallback: string) => {
+    const parsed = handleApiError(value);
+    return localizeChargingFailure(
+      { operation: 'start', code: parsed.code, status: parsed.status },
+      t
+    ) || fallback;
+  };
+
+  const resolveDirectCheckout = useCallback(async () => {
+    if (!directCheckout || directCheckoutInFlight.current) return;
+    directCheckoutInFlight.current = true;
+    setDirectCheckout((current) => current ? { ...current, phase: 'resolving' } : current);
+    try {
+      const recovery = await resolveCheckoutSession(directCheckout.sessionId);
+      if (recovery.kind !== 'resolved' || !recovery.session) {
+        const phase: DirectCheckoutPhase = recovery.kind === 'expired_or_missing'
+          ? 'expired'
+          : recovery.kind === 'already_submitted'
+            ? 'submitted'
+            : recovery.kind === 'temporarily_unavailable'
+              ? 'unavailable'
+              : 'network_unknown';
+        setDirectCheckout((current) => current ? {
+          ...current,
+          phase,
+          paymentIntentId: null,
+          actionUrl: null,
+        } : current);
+        return;
+      }
+
+      const session = recovery.session;
+      if (session.payment_intent_id) {
+        setDirectCheckout({
+          sessionId: session.id,
+          phase: 'ready',
+          paymentIntentId: session.payment_intent_id,
+          actionUrl: null,
+        });
+      } else if (session.status === 'action_required' && session.next_action?.type === 'open_url') {
+        setDirectCheckout((current) => current ? {
+          ...current,
+          phase: 'action_required',
+          actionUrl: session.next_action?.url || null,
+        } : current);
+      } else if (session.status === 'expired') {
+        setDirectCheckout((current) => current ? {
+          ...current,
+          phase: 'expired',
+          paymentIntentId: null,
+          actionUrl: null,
+        } : current);
+      } else if (session.status === 'declined' || session.status === 'error') {
+        setDirectCheckout((current) => current ? {
+          ...current,
+          phase: 'error',
+          paymentIntentId: null,
+          actionUrl: null,
+        } : current);
+      } else {
+        setDirectCheckout((current) => current ? { ...current, phase: 'awaiting_return' } : current);
+      }
+    } catch {
+      setDirectCheckout((current) => current ? {
+        ...current,
+        phase: 'network_unknown',
+      } : current);
+    } finally {
+      directCheckoutInFlight.current = false;
+    }
+  }, [directCheckout]);
+
+  const openDirectCheckoutAction = async () => {
+    const actionUrl = directCheckout?.actionUrl;
+    if (!actionUrl) return;
+    await Linking.openURL(actionUrl);
+  };
+
+  useEffect(() => {
+    const returnedToFocusedScreen = isFocused && !wasFocused.current;
+    wasFocused.current = isFocused;
+    if (returnedToFocusedScreen && directCheckout && QUERYABLE_CHECKOUT_PHASES.has(directCheckout.phase)) {
+      void resolveDirectCheckout();
+    }
+  }, [directCheckout, isFocused, resolveDirectCheckout]);
+
+  useEffect(() => {
+    const returnedToApp = previousAppState.current !== 'active' && appState === 'active';
+    previousAppState.current = appState;
+    if (returnedToApp && directCheckout && QUERYABLE_CHECKOUT_PHASES.has(directCheckout.phase)) {
+      void resolveDirectCheckout();
+    }
+  }, [appState, directCheckout, resolveDirectCheckout]);
+
+  // Web Checkout may open in another tab and cannot reliably return through
+  // the native `eslatin://` deep link. Keep the original screen synchronized
+  // until the server advances the hosted session to READY or a terminal state.
+  useEffect(() => {
+    if (!directCheckout ||
+        (directCheckout.phase !== 'awaiting_return' && directCheckout.phase !== 'submitted')) return;
+    const timer = setInterval(() => {
+      if (directCheckoutPollAttempts.current >= 10) {
+        clearInterval(timer);
+        return;
+      }
+      directCheckoutPollAttempts.current += 1;
+      void resolveDirectCheckout();
+    }, 2500);
+    return () => clearInterval(timer);
+  }, [directCheckout, resolveDirectCheckout]);
 
   const latestPoint = useMemo(() => {
     if (!meterValues || meterValues.length === 0) return null;
@@ -90,6 +265,29 @@ const ChargingProcessScreen = () => {
   useEffect(() => {
     dispatch(fetchWalletBalance());
   }, [dispatch]);
+
+  useEffect(() => {
+    if (isFreeCharging || !PAYMENT_RAILS_ENABLED || chargerStatus !== 'available') return;
+    let cancelled = false;
+    setPaymentMethodsLoading(true);
+    setPaymentMethodsError(false);
+    void listPaymentMethods()
+      .then((items) => {
+        if (cancelled) return;
+        setSavedPaymentMethods(items);
+        const defaultMethod = items.find((item) => item.is_default);
+        setSelectedSavedPaymentMethodId((current) => current ?? defaultMethod?.id ?? null);
+      })
+      .catch(() => {
+        if (!cancelled) setPaymentMethodsError(true);
+      })
+      .finally(() => {
+        if (!cancelled) setPaymentMethodsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [chargerStatus, isFreeCharging, paymentMethodsReloadKey]);
 
   // 页面加载时先检查充电桩状态
   useEffect(() => {
@@ -118,8 +316,7 @@ const ChargingProcessScreen = () => {
         }
       } catch (e: any) {
         console.error('检查充电桩状态失败:', e);
-        // 提取更详细的错误信息
-        let errorMsg = t.chargingUi.checkFailed;
+        let errorMsg = localizeCheckError(e, t.chargingUi.checkFailed);
         if (e?.response?.status === 404) {
           errorMsg = t.chargingUi.notFoundOrQr;
         } else if (e?.response?.status === 400) errorMsg = t.chargingUi.invalidQr;
@@ -239,36 +436,103 @@ const ChargingProcessScreen = () => {
   const showWaitingSession =
     chargerStatus === 'charging_self' && !activeSession && !stopRequested && !starting;
 
+  const prepareDirectCardCheckout = async () => {
+    if (!statusCheckData?.charger_id || !statusCheckData.connector_id || directCheckoutInFlight.current) return;
+    directCheckoutInFlight.current = true;
+    directCheckoutPollAttempts.current = 0;
+    setDirectCheckout({
+      sessionId: '',
+      phase: 'resolving',
+      paymentIntentId: null,
+      actionUrl: null,
+    });
+    try {
+      const session = await startCheckoutSession(buildChargingDirectCheckoutRequest({
+        chargePointId: statusCheckData.charger_id,
+        connectorId: statusCheckData.connector_id,
+        savedPaymentMethodId: selectedSavedPaymentMethodId,
+      }));
+      if (!isServerCheckoutUrl(session.checkout_url)) throw new Error('invalid_checkout_url');
+      setDirectCheckout({
+        sessionId: session.checkout_session_id,
+        phase: 'awaiting_return',
+        paymentIntentId: null,
+        actionUrl: null,
+      });
+      // Do not keep the checkout mutex held while Web waits on a new tab or
+      // native Linking waits for the external app to return. The original
+      // screen must remain free to poll the server-owned checkout state.
+      directCheckoutInFlight.current = false;
+      void Linking.openURL(session.checkout_url).catch(() => undefined);
+    } catch {
+      setDirectCheckout({
+        sessionId: '',
+        phase: 'error',
+        paymentIntentId: null,
+        actionUrl: null,
+      });
+    } finally {
+      directCheckoutInFlight.current = false;
+    }
+  };
+
   const submitStartOnce = async () => {
     if (!qrToken || startRequestInFlight.current || starting) return;
+    setPreflightCode(null);
+    if (!isFreeCharging && settlementMethod === 'direct_card' && !directCheckout?.paymentIntentId) {
+      if (directCheckout?.phase === 'action_required') {
+        await openDirectCheckoutAction();
+        return;
+      }
+      if (directCheckout && QUERYABLE_CHECKOUT_PHASES.has(directCheckout.phase)) {
+        await resolveDirectCheckout();
+        return;
+      }
+      await prepareDirectCardCheckout();
+      return;
+    }
     startRequestInFlight.current = true;
     try {
-      await dispatch(startCharging({ qrToken })).unwrap();
+      const preflight = await chargingPreflight({
+        qrToken,
+        settlementMethod: startSettlementMethod,
+      });
+      if (preflight.decision !== 'allowed') {
+        setPreflightCode(
+          preflight.financial_eligibility.status === 'blocked'
+            ? 'UNPAID_CHARGES'
+            : preflight.financial_eligibility.status === 'recheck_required'
+              ? 'FINANCIAL_RECHECK_REQUIRED'
+              : preflight.rail_eligibility.status === 'closed'
+                ? 'RAIL_CLOSED'
+                : 'RAIL_STATE_UNKNOWN',
+        );
+        return;
+      }
+      await dispatch(startCharging({
+        qrToken,
+        settlementMethod: startSettlementMethod,
+        paymentIntentId: startSettlementMethod === 'direct_card'
+          ? directCheckout?.paymentIntentId
+          : undefined,
+      })).unwrap();
       setChargerStatus('charging_self');
-    } catch {
-      // Stable error semantics are localized from the slice during render.
+    } catch (reason) {
+      const code = String((reason as { code?: string })?.code || '').toUpperCase();
+      if (code === 'UNPAID_CHARGES') {
+        setUnpaidBlocked(true);
+      } else if (code === 'PAYMENT_INTENT_INVALID') {
+        await clearPendingCheckoutSession();
+        setDirectCheckout(null);
+      } else if (!code) {
+        setPreflightCode('START_PRECHECK_FAILED');
+      }
     } finally {
       startRequestInFlight.current = false;
     }
   };
 
   const onStartCharging = () => {
-    const bal = walletBalanceSlice?.balance ?? 0;
-    if (bal < MIN_BALANCE_COP) {
-      Alert.alert(
-        t.charging.insufficientBalance,
-        PAYMENT_RAILS_ENABLED
-          ? t.chargingUi.needTopUp.replace('{amount}', MIN_BALANCE_COP.toLocaleString())
-          : t.chargingUi.needBalance.replace('{amount}', MIN_BALANCE_COP.toLocaleString()),
-        PAYMENT_RAILS_ENABLED
-          ? [
-              { text: t.chargingUi.goTopUp, onPress: () => navigation.navigate('PaymentHub') },
-              { text: t.common.cancel, style: 'cancel' },
-            ]
-          : [{ text: t.chargingUi.understood, style: 'cancel' }]
-      );
-      return;
-    }
     void submitStartOnce();
   };
 
@@ -310,7 +574,7 @@ const ChargingProcessScreen = () => {
       }
     } catch (e: any) {
       console.error('刷新状态失败:', e);
-      let errorMsg = t.chargingUi.refreshFailed;
+      let errorMsg = localizeCheckError(e, t.chargingUi.refreshFailed);
       if (e?.response?.status === 404) {
         errorMsg = t.chargingUi.notFoundOrQr;
       } else if (e?.response?.status === 400) errorMsg = t.chargingUi.invalidQr;
@@ -476,44 +740,134 @@ const ChargingProcessScreen = () => {
               </View>
             )}
 
-            {statusCheckData?.charger_info?.price_per_kwh != null && (
+            {priceLabel && (
               <View style={styles.infoSection}>
                 <Text style={styles.infoLabel}>{t.chargingUi.unitPrice}</Text>
-                <Text style={styles.infoValue}>
-                  $
-                  {statusCheckData!.charger_info!.price_per_kwh!.toLocaleString('es-CO', {
-                    minimumFractionDigits: 0,
-                    maximumFractionDigits: 2,
-                  })}{' '}
-                  COP / kWh
-                </Text>
+                <Text style={styles.infoValue}>{priceLabel}</Text>
               </View>
             )}
 
-            <PaymentMethodBar
-              balanceCOP={walletBalanceSlice?.balance ?? null}
-              loading={loadingBalance}
-              onPressTopUp={
-                PAYMENT_RAILS_ENABLED
-                  ? () => navigation.navigate('PaymentHub')
-                  : undefined
-              }
-            />
+            {!isFreeCharging && (
+              <PaymentMethodBar
+                balanceCOP={walletBalanceSlice?.balance ?? null}
+                loading={loadingBalance}
+                allowDirectCard={PAYMENT_RAILS_ENABLED}
+                selectedMethod={settlementMethod}
+                onMethodChange={setSettlementMethod}
+                savedPaymentMethods={savedPaymentMethods}
+                selectedSavedPaymentMethodId={selectedSavedPaymentMethodId}
+                onSavedPaymentMethodChange={(paymentMethodId) => {
+                  setSelectedSavedPaymentMethodId(paymentMethodId);
+                  if (directCheckout) {
+                    directCheckoutInFlight.current = true;
+                    setDirectCheckout(null);
+                    void clearPendingCheckoutSession()
+                      .catch(() => undefined)
+                      .finally(() => {
+                        directCheckoutInFlight.current = false;
+                      });
+                  }
+                }}
+                savedPaymentMethodsLoading={paymentMethodsLoading}
+                savedPaymentMethodsError={paymentMethodsError}
+                onRetrySavedPaymentMethods={() => setPaymentMethodsReloadKey((value) => value + 1)}
+                cardChoicesDisabled={Boolean(directCheckout && QUERYABLE_CHECKOUT_PHASES.has(directCheckout.phase))}
+                onPressTopUp={
+                  PAYMENT_RAILS_ENABLED
+                    ? () => navigation.navigate('PaymentHub')
+                    : undefined
+                }
+              />
+            )}
 
-            {chargingErrorText && (
-              <View testID="app-charging-start-error" accessibilityRole="alert" style={styles.errorNotice}>
-                <Text style={styles.errorText}>{chargingErrorText}</Text>
+            {isFreeCharging && (
+              <View testID="app-charging-free-settlement" style={styles.freeNotice}>
+                <Text style={styles.freeNoticeTitle}>{t.pricing.free}</Text>
+                <Text style={styles.freeNoticeText}>{t.charging.freeSettlementHint}</Text>
               </View>
+            )}
+
+            {settlementMethod === 'direct_card' && !isFreeCharging && directCheckout && (
+              <View
+                testID="app-charging-direct-checkout"
+                accessibilityLiveRegion="polite"
+                style={styles.checkoutNotice}
+              >
+                {directCheckout.phase === 'resolving' && (
+                  <View style={styles.statusRow}>
+                    <ActivityIndicator size="small" color={COLORS.PRIMARY} />
+                    <Text style={styles.checkoutText}>{t.charging.preparingPayment}</Text>
+                  </View>
+                )}
+                {directCheckout.phase === 'awaiting_return' && (
+                  <Text style={styles.checkoutText}>{t.payment.waitingResult}</Text>
+                )}
+                {directCheckout.phase === 'ready' && (
+                  <Text style={styles.checkoutText}>{t.charging.paymentReady}</Text>
+                )}
+                {directCheckout.phase === 'action_required' && (
+                  <>
+                    <Text style={styles.checkoutText}>{t.charging.actionRequired}</Text>
+                    <Button
+                      testID="app-charging-open-verification"
+                      title={t.charging.openVerification}
+                      variant="outline"
+                      onPress={() => void openDirectCheckoutAction()}
+                      style={styles.checkoutButton}
+                    />
+                  </>
+                )}
+                {directCheckout.phase === 'expired' && (
+                  <Text accessibilityRole="alert" style={styles.errorText}>{t.payment.checkoutExpiredBody}</Text>
+                )}
+                {directCheckout.phase === 'submitted' && (
+                  <Text style={styles.checkoutText}>{t.payment.checkoutSubmittedBody}</Text>
+                )}
+                {directCheckout.phase === 'unavailable' && (
+                  <Text accessibilityRole="alert" style={styles.checkoutText}>{t.payment.checkoutUnavailableBody}</Text>
+                )}
+                {directCheckout.phase === 'network_unknown' && (
+                  <Text accessibilityRole="alert" style={styles.checkoutText}>{t.payment.checkoutNetworkUnknownBody}</Text>
+                )}
+                {directCheckout.phase === 'error' && (
+                  <Text style={styles.errorText}>{t.charging.paymentCheckoutFailed}</Text>
+                )}
+              </View>
+            )}
+
+            {startErrorText && (
+              <View testID="app-charging-start-error" accessibilityRole="alert" style={styles.errorNotice}>
+                <Text style={styles.errorText}>{startErrorText}</Text>
+              </View>
+            )}
+            {(isUnpaidBlocked || preflightCode === 'UNPAID_CHARGES') && (
+              <Button
+                testID="app-charging-view-unpaid"
+                title={t.charging.viewUnpaidCharges}
+                variant="outline"
+                onPress={() => navigation.navigate('UnpaidBills')}
+                style={styles.startButton}
+              />
             )}
 
             <View style={styles.actionButtons}>
               <Button
                 testID="app-charging-start"
-                title={t.charging.start}
+                title={!isFreeCharging && settlementMethod === 'direct_card' && !directCheckout?.paymentIntentId
+                  ? directCheckout?.phase === 'action_required'
+                    ? t.charging.openVerification
+                    : directCheckout?.phase === 'submitted' ||
+                        directCheckout?.phase === 'unavailable' ||
+                        directCheckout?.phase === 'network_unknown'
+                      ? t.payment.refreshStatus
+                      : directCheckout?.phase === 'expired' || directCheckout?.phase === 'error'
+                        ? t.payment.restartCheckout
+                        : t.payment.confirmPay
+                  : t.charging.start}
                 onPress={onStartCharging}
                 variant="primary"
-                disabled={starting}
-                loading={starting}
+                disabled={isUnpaidBlocked || starting || directCheckout?.phase === 'resolving' || directCheckout?.phase === 'awaiting_return'}
+                loading={starting || directCheckout?.phase === 'resolving'}
                 style={styles.startButton}
               />
               <Button
@@ -853,6 +1207,26 @@ const styles = StyleSheet.create({
     color: COLORS.ERROR,
     fontWeight: '700',
   },
+  checkoutNotice: {
+    marginTop: 12,
+    padding: 12,
+    backgroundColor: COLORS.CARD_BG,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: COLORS.BORDER,
+  },
+  checkoutText: { color: COLORS.TEXT_SECONDARY, lineHeight: 20 },
+  checkoutButton: { marginTop: 8 },
+  freeNotice: {
+    marginBottom: 12,
+    padding: 12,
+    backgroundColor: COLORS.CARD_BG,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: COLORS.BORDER,
+  },
+  freeNoticeTitle: { color: COLORS.TEXT_PRIMARY, fontWeight: '700', fontSize: 16 },
+  freeNoticeText: { color: COLORS.TEXT_SECONDARY, marginTop: 4, lineHeight: 20 },
 
   bottomBar: {
     padding: 16,

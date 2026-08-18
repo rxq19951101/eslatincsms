@@ -4,6 +4,8 @@
 
 import apiClient from './client';
 import { API_ENDPOINTS } from '../constants/config';
+import type { PricingInfo } from '../utils/pricing';
+import { pricingNumericValue } from '../utils/pricing';
 
 export interface Charger {
   id: string;
@@ -15,7 +17,8 @@ export interface Charger {
   latitude?: number;
   longitude?: number;
   status: string;
-  price_per_kwh?: number;
+  price_per_kwh?: number | null;
+  pricing?: PricingInfo;
   is_configured: boolean;
   has_location: boolean;
   has_pricing: boolean;
@@ -124,7 +127,7 @@ export const chargersToGeoJSON = (chargers: Charger[]) => {
           name: charger.site_name || charger.ocpp_identity || 'Charger',
           address: charger.site_address || '',
           status: charger.status,
-          price: charger.price_per_kwh || 0,
+          price: pricingNumericValue(charger.pricing),
           available: charger.available_connectors || 0,
           total: charger.total_connectors || 0,
           vendor: charger.vendor || '',

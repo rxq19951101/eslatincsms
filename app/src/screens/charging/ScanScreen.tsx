@@ -33,6 +33,7 @@ const ScanScreen = () => {
 
   const navigation = useNavigation<Nav>();
   const [manual, setManual] = useState('');
+  const [validationError, setValidationError] = useState<string | null>(null);
   const [scanned, setScanned] = useState(false);
 
   const [permission, requestPermission] = useCameraPermissions();
@@ -43,11 +44,23 @@ const ScanScreen = () => {
   const hint = useMemo(() => t.scan.manualHint, [t.scan.manualHint]);
 
   const goToProcess = (payload: string) => {
-    const parsed = parseQrPayload(payload);
+    const value = payload.trim();
+    // The backend/admin exposes the raw token for debugging, while a printed
+    // public QR payload uses the `qr:` prefix. Keep the manual Web test path
+    // convenient without changing the native scanner contract.
+    const normalizedPayload =
+      Platform.OS === 'web' && value && !value.startsWith('{') && !value.toLowerCase().startsWith('qr:')
+        ? `qr:${value}`
+        : value;
+    const parsed = parseQrPayload(normalizedPayload);
     if (!parsed) {
-      Alert.alert(t.scan.invalidQr, t.scan.invalidQrDetail);
+      setValidationError(t.scan.invalidQrDetail);
+      if (Platform.OS !== 'web') {
+        Alert.alert(t.scan.invalidQr, t.scan.invalidQrDetail);
+      }
       return;
     }
+    setValidationError(null);
     navigation.navigate('ChargingProcess', {
       qrToken: parsed.qrToken,
     });
@@ -66,9 +79,13 @@ const ScanScreen = () => {
               testID="app-qr-manual-input"
               accessibilityLabel={t.scan.manualTitle}
               value={manual}
-              onChangeText={setManual}
+              onChangeText={(value) => {
+                setManual(value);
+                if (validationError) setValidationError(null);
+              }}
               placeholder={t.scan.placeholder}
               autoCapitalize="none"
+              error={validationError ?? undefined}
             />
             <View style={styles.row}>
               {canUseCamera && !hasPermission && (

@@ -17,6 +17,7 @@ import { ChargerDetail } from '../api/chargers';
 import { useI18n } from '../i18n';
 import { localizeStatus } from '../utils/localizeStatus';
 import { formatDateTime, publicChargerIdentity } from '../utils/localizedDisplay';
+import { formatPricing } from '../utils/pricing';
 import Icon from './ui/Icon';
 
 const { height: SCREEN_HEIGHT } = Dimensions.get('window');
@@ -38,6 +39,7 @@ const ChargerBottomSheet: React.FC<ChargerBottomSheetProps> = ({
 }) => {
   const { t, locale } = useI18n();
   if (!charger) return null;
+  const priceLabel = formatPricing(charger.pricing, t, locale);
 
   const isAvailable = (charger.available_connectors || 0) > 0;
   const statusColor =
@@ -91,13 +93,11 @@ const ChargerBottomSheet: React.FC<ChargerBottomSheetProps> = ({
                   <Text style={styles.statLabel}>{t.station.connectors}</Text>
                 </View>
 
-                {charger.price_per_kwh && (
+                {priceLabel && (
                   <View style={styles.statItem}>
                     <Icon name="cash-outline" size={24} color={COLORS.PRIMARY} style={styles.statIcon} />
-                    <Text style={styles.statValue}>
-                      ${charger.price_per_kwh.toFixed(2)}
-                    </Text>
-                    <Text style={styles.statLabel}>{t.station.perKwh}</Text>
+                    <Text style={styles.statValue}>{priceLabel}</Text>
+                    <Text style={styles.statLabel}>{t.station.price}</Text>
                   </View>
                 )}
 

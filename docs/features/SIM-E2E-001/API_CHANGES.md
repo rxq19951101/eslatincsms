@@ -54,7 +54,7 @@ Secret 值只能使用 `${ENV_NAME}`；schema 校验禁止凭证字面量。
 
 ## 本地假支付契约
 
-- 入口：`POST /api/v1/app/wallet/payments/sim-webhook`。
+- 入口：`POST /api/v1/app/payments/webhooks/sim`。
 - 仅 `development|test` 启用；其他环境固定返回 404。
 - Secret 只能通过 `SIM_E2E_WEBHOOK_SECRET` 注入。
 - Header：
@@ -70,7 +70,7 @@ Secret 值只能使用 `${ENV_NAME}`；schema 校验禁止凭证字面量。
   `replayed=false`；同一事件重放必须返回 `replayed=true`，事件数和账本数
   仍为 1，余额不得再次变化；同一 `event_id` 携带不同 payload 返回 409。
 - 业务状态查询沿用正式接口：
-  `GET /api/v1/app/wallet/payments/{payment_order_id}/status` 与
+  `GET /api/v1/app/payments/checkout-sessions/{checkout_session_id}` 与
   `GET /api/v1/admin/payments/{payment_order_id}`。
 
 ## Seed JSON 1.1

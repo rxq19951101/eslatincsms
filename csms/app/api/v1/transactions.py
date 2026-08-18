@@ -284,6 +284,7 @@ def _serialize_transaction_row(row) -> dict:
         "charger": {
             "display_code": charge_point.display_code,
             "display_name": charge_point.display_name,
+            "ocpp_identity": charge_point.ocpp_identity,
         },
         "connector": {
             "id": str(evse.id),
@@ -633,6 +634,7 @@ def list_active_sessions(
                 "id": str(charge_point.id),
                 "display_code": charge_point.display_code,
                 "display_name": charge_point.display_name,
+                "ocpp_identity": charge_point.ocpp_identity,
             } if charge_point else None,
             "connector": {
                 "id": str(evse.id),

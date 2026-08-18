@@ -43,10 +43,22 @@ def register_routes():
     ("app.sites", "/app/sites", "APP公开站点查询"),
     ("app.favorites", "/app/favorites", "APP收藏站点"),
     ("app.charging", "/app/charging", "APP扫码充电"),
+    ("app.financial_eligibility", "/app", "APP财务资格与充电预检"),
     ("app.wallet", "/app/wallet", "APP钱包"),
-        ("app.payments", "/app/wallet/payments", "APP支付（Wompi）"),
+        ("app.payments", "/app/payments", "Provider支付Webhook适配"),
+    ("app.payment_checkout", "/app/payments", "APP安全支付结账"),
+    ("app.recovery", "/app", "APP欠费恢复"),
+    ("app.support", "/app", "APP支持案件"),
+    ("app.payment_methods", "/app/payment-methods", "APP保存支付方式"),
+    ("app.risk", "/app", "PAY-MP-002 v2风险投影"),
     ("app.transactions", "/app/transactions", "APP充电记录"),
     ("admin.payments", "/admin/payments", "管理员支付管理"),
+    ("admin.refunds", "/admin", "PAY-MP-002 退款与拒付"),
+    ("admin.reconciliation", "/admin/reconciliation", "PAY-MP-002 三方对账"),
+    ("admin.runtime_rails", "/admin", "PAY-MP-002 Runtime Rail"),
+    ("admin.support", "/admin", "PAY-MP-002 支持案件"),
+    ("admin.audit_events", "/admin", "PAY-MP-002 审计事件"),
+    ("admin.risk", "/admin", "PAY-MP-002 v2风险投影"),
     ]
     
     for module_name, prefix, tag in routes_config:

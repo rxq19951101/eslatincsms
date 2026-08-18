@@ -234,6 +234,10 @@ def main() -> None:
         charger.firmware_version = "1.0.0"
         charger.max_power_kw = 7.0
         charger.is_active = True
+        # The primary simulator is the local app happy-path fixture. Keep it
+        # commercially commissioned so the QR flow can reach OCPP testing.
+        charger.commissioning_status = "commissioned"
+        charger.commissioned_at = charger.commissioned_at or now
         db.add(charger)
 
         other_charger = db.get(

@@ -3,6 +3,7 @@
 !README.md
 !AGENTS.md
 !docs/**/*.md
+!agent-skills/**/*.md
 
 # 本地转换文件与临时产物
 /tmp/
@@ -12,3 +13,6 @@
 .env.local
 .env.*.local
 .env.production
+
+# 编排运行时锁文件（Registry/State 本体仍需保留）
+.codex/runtime/.orchestrator.lock

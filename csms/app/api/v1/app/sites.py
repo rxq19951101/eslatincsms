@@ -21,8 +21,8 @@ from app.database.models import (
     EVSE,
     EVSEStatus,
     Site,
-    Tariff,
 )
+from app.services.pricing_service import ResolvedPricing, PricingService
 
 
 router = APIRouter()
@@ -122,7 +122,7 @@ def _site_payload(
     charge_points: list[ChargePoint],
     evses_by_charge_point: dict[UUID, list[EVSE]],
     status_by_evse: dict[UUID, EVSEStatus],
-    tariff: Optional[Tariff],
+    pricing: Optional[ResolvedPricing],
     now: datetime,
 ) -> Dict[str, Any]:
     all_evses = [
@@ -190,8 +190,9 @@ def _site_payload(
         "connector_types": connector_types,
         "charging_options": charging_options,
         "max_power_kw": max(power_values) if power_values else None,
-        "price_per_kwh": float(tariff.base_price_per_kwh) if tariff else None,
-        "has_pricing": tariff is not None,
+        "price_per_kwh": float(pricing.base_price_per_kwh or 0) if pricing else None,
+        "has_pricing": pricing is not None,
+        "pricing": pricing.as_dict() if pricing else PricingService.unavailable().as_dict(),
     }
 
 
@@ -202,7 +203,7 @@ def _load_site_assets(
     dict[UUID, list[ChargePoint]],
     dict[UUID, list[EVSE]],
     dict[UUID, EVSEStatus],
-    dict[UUID, Tariff],
+    dict[UUID, ResolvedPricing],
 ]:
     site_ids = [site.id for site in sites]
     if not site_ids:
@@ -211,10 +212,18 @@ def _load_site_assets(
     charge_points = db.query(ChargePoint).filter(
         ChargePoint.site_id.in_(site_ids),
         ChargePoint.is_active.is_(True),
+        ChargePoint.commissioning_status == "commissioned",
     ).all()
     charge_points_by_site: dict[UUID, list[ChargePoint]] = defaultdict(list)
+    pricing_by_site: dict[UUID, ResolvedPricing] = {}
     for charge_point in charge_points:
+        pricing = PricingService.resolve(db, charge_point.tenant_id, charge_point.id)
+        if not pricing.is_available:
+            continue
         charge_points_by_site[charge_point.site_id].append(charge_point)
+        pricing_by_site.setdefault(charge_point.site_id, pricing)
+
+    charge_points = [item for items in charge_points_by_site.values() for item in items]
 
     charge_point_ids = [charge_point.id for charge_point in charge_points]
     evses = (
@@ -234,16 +243,7 @@ def _load_site_assets(
     )
     status_by_evse = {row.evse_id: row for row in status_rows}
 
-    tariffs = db.query(Tariff).filter(
-        Tariff.site_id.in_(site_ids),
-        Tariff.charge_point_id.is_(None),
-        Tariff.is_active.is_(True),
-    ).order_by(Tariff.created_at.desc()).all()
-    tariff_by_site: dict[UUID, Tariff] = {}
-    for tariff in tariffs:
-        tariff_by_site.setdefault(tariff.site_id, tariff)
-
-    return charge_points_by_site, evses_by_charge_point, status_by_evse, tariff_by_site
+    return charge_points_by_site, evses_by_charge_point, status_by_evse, pricing_by_site
 
 
 @router.get("", summary="获取公开充电站点列表（普通用户）")
@@ -260,7 +260,7 @@ async def list_sites_for_app(
         Site.latitude.isnot(None),
         Site.longitude.isnot(None),
     ).all()
-    charge_points_by_site, evses_by_cp, status_by_evse, tariff_by_site = _load_site_assets(db, sites)
+    charge_points_by_site, evses_by_cp, status_by_evse, pricing_by_site = _load_site_assets(db, sites)
     now = datetime.now(timezone.utc)
     favorite_site_ids = {
         row[0]
@@ -271,12 +271,14 @@ async def list_sites_for_app(
     result: list[dict] = []
 
     for site in sites:
+        if not charge_points_by_site.get(site.id):
+            continue
         payload = _site_payload(
             site,
             charge_points_by_site.get(site.id, []),
             evses_by_cp,
             status_by_evse,
-            tariff_by_site.get(site.id),
+            pricing_by_site.get(site.id),
             now,
         )
         payload["is_favorite"] = site.id in favorite_site_ids
@@ -312,15 +314,17 @@ async def get_site_detail_for_app(
     if site is None:
         raise HTTPException(status_code=404, detail="Site not found")
 
-    charge_points_by_site, evses_by_cp, status_by_evse, tariff_by_site = _load_site_assets(db, [site])
+    charge_points_by_site, evses_by_cp, status_by_evse, pricing_by_site = _load_site_assets(db, [site])
     charge_points = charge_points_by_site.get(site.id, [])
+    if not charge_points:
+        raise HTTPException(status_code=404, detail="Site not found")
     now = datetime.now(timezone.utc)
     payload = _site_payload(
         site,
         charge_points,
         evses_by_cp,
         status_by_evse,
-        tariff_by_site.get(site.id),
+        pricing_by_site.get(site.id),
         now,
     )
     payload["is_favorite"] = db.query(AppUserFavoriteSite.id).filter(

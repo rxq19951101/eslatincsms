@@ -26,8 +26,8 @@
       "package": "com.eslatin.app",
       "versionCode": 1,
       "adaptiveIcon": {
-        "foregroundImage": "./assets/eslatin-brand-white.png",
-        "backgroundColor": "#FFFFFF"
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundColor": "#07131E"
       },
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,

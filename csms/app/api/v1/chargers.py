@@ -3,9 +3,9 @@
 # 提供充电桩的CRUD操作（使用新表结构）
 #
 
-from typing import List, Optional
+from typing import List, Literal, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy import or_, func
@@ -54,6 +54,7 @@ from app.services.asset_lifecycle_service import (
     normalize_lifecycle_reason,
     require_charge_point_operational,
 )
+from app.services.pricing_service import PricingMode, PricingService
 from app.core.ocpp_auth import generate_ocpp_secret, hash_ocpp_secret
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -71,18 +72,47 @@ class CreateChargerRequest(StrictRequestModel):
 
 
 class ChargerPricingUpdateRequest(BaseModel):
-    """充电桩级覆盖价（优先于站点默认价）"""
+    pricing_mode: Literal["inherit", "paid", "free", "unavailable"]
+    base_price_per_kwh: Optional[Decimal] = Field(None, ge=0)
+    service_fee: Optional[Decimal] = Field(None, ge=0)
+    free_reason: Optional[str] = Field(None, min_length=3, max_length=500)
+    valid_until: Optional[datetime] = None
 
-    base_price_per_kwh: Decimal
-    service_fee: Optional[Decimal] = None
+    @model_validator(mode="after")
+    def validate_pricing_mode(self):
+        if self.pricing_mode == "paid":
+            if self.base_price_per_kwh is None or self.base_price_per_kwh <= 0:
+                raise ValueError("paid pricing requires base_price_per_kwh greater than 0")
+            if self.free_reason is not None:
+                raise ValueError("paid pricing must not include free_reason")
+        elif self.pricing_mode == "free":
+            if not self.free_reason:
+                raise ValueError("free pricing requires free_reason")
+            if self.valid_until is None or self.valid_until.tzinfo is None:
+                raise ValueError("free pricing requires timezone-aware valid_until")
+            if self.valid_until <= datetime.now(timezone.utc):
+                raise ValueError("free pricing valid_until must be in the future")
+            if self.base_price_per_kwh not in (None, Decimal("0")) or self.service_fee not in (None, Decimal("0")):
+                raise ValueError("free pricing price and service_fee must be 0")
+        else:
+            if any(value is not None for value in (
+                self.base_price_per_kwh, self.service_fee, self.free_reason, self.valid_until
+            )):
+                raise ValueError(f"{self.pricing_mode} pricing does not accept price or free metadata")
+        return self
 
 
 class ChargerPricingResponse(BaseModel):
     charge_point_id: str
-    tariff_id: str
-    base_price_per_kwh: Decimal
-    service_fee: Decimal
-    valid_from: str
+    pricing_mode: str
+    pricing_source: str
+    tariff_id: Optional[str]
+    base_price_per_kwh: Optional[Decimal]
+    service_fee: Optional[Decimal]
+    currency: str
+    free_reason: Optional[str]
+    valid_from: Optional[str]
+    valid_until: Optional[str]
 
 
 class ChargerLifecycleRequest(StrictRequestModel):
@@ -351,26 +381,6 @@ def list_chargers(
     if tenant_id:
         query = query.filter(ChargePoint.tenant_id == tenant_id)
     
-    # 根据筛选类型过滤
-    if filter_type == "configured":
-        # 已配置：有位置和价格（通过站点和定价规则判断）
-        query = query.join(Site).join(Tariff).filter(
-            Site.latitude.isnot(None),
-            Site.longitude.isnot(None),
-            Tariff.is_active == True,
-            Tariff.base_price_per_kwh > 0
-        )
-    elif filter_type == "unconfigured":
-        # 未配置：缺少位置或价格
-        query = query.outerjoin(Site).outerjoin(Tariff).filter(
-            or_(
-                Site.latitude.is_(None),
-                Site.longitude.is_(None),
-                Tariff.is_active == False,
-                Tariff.base_price_per_kwh == 0
-            )
-        )
-    
     charge_points = query.all()
     logger.info(f"[API] 查询到 {len(charge_points)} 个充电桩 | 筛选类型: {filter_type or '全部'}")
     
@@ -380,35 +390,12 @@ def list_chargers(
         site = cp.site if cp.site_id else None
         has_location = site and site.latitude is not None and site.longitude is not None
         
-        # 获取定价信息（优先桩级，其次站点级；按 tenant_id + 有效期过滤）
-        now = datetime.now(timezone.utc)
-        tariff = (
-            db.query(Tariff)
-            .filter(
-                Tariff.tenant_id == cp.tenant_id,
-                Tariff.charge_point_id == cp.id,
-                Tariff.is_active == True,  # noqa: E712
-                Tariff.valid_from <= now,
-            )
-            .filter((Tariff.valid_until.is_(None)) | (Tariff.valid_until >= now))
-            .order_by(Tariff.valid_from.desc())
-            .first()
-        )
-        if not tariff and cp.site_id:
-            tariff = (
-                db.query(Tariff)
-                .filter(
-                    Tariff.tenant_id == cp.tenant_id,
-                    Tariff.site_id == cp.site_id,
-                    Tariff.charge_point_id.is_(None),
-                    Tariff.is_active == True,  # noqa: E712
-                    Tariff.valid_from <= now,
-                )
-                .filter((Tariff.valid_until.is_(None)) | (Tariff.valid_until >= now))
-                .order_by(Tariff.valid_from.desc())
-                .first()
-            )
-        has_pricing = tariff is not None and float(tariff.base_price_per_kwh or 0) > 0
+        pricing = PricingService.resolve(db, cp.tenant_id, cp.id)
+        has_pricing = pricing.is_available
+        if filter_type == "configured" and not (has_location and has_pricing):
+            continue
+        if filter_type == "unconfigured" and has_location and has_pricing:
+            continue
         
         # 获取EVSE状态
         evse_status = db.query(EVSEStatus).filter(
@@ -442,7 +429,8 @@ def list_chargers(
                 "longitude": site.longitude if site else None,
                 "address": site.address if site else None,
             },
-            "price_per_kwh": float(tariff.base_price_per_kwh) if tariff else None,
+            "price_per_kwh": float(pricing.base_price_per_kwh or 0) if has_pricing else None,
+            "pricing": pricing.as_dict(),
             "is_configured": is_configured,
             "has_location": has_location,
             "has_pricing": has_pricing,
@@ -466,34 +454,7 @@ def get_charger(
     # 获取站点信息
     site = charge_point.site if charge_point.site_id else None
     
-    # 获取定价信息（优先桩级，其次站点级；按 tenant_id + 有效期过滤）
-    now = datetime.now(timezone.utc)
-    tariff = (
-        db.query(Tariff)
-        .filter(
-            Tariff.tenant_id == charge_point.tenant_id,
-            Tariff.charge_point_id == charge_point.id,
-            Tariff.is_active == True,  # noqa: E712
-            Tariff.valid_from <= now,
-        )
-        .filter((Tariff.valid_until.is_(None)) | (Tariff.valid_until >= now))
-        .order_by(Tariff.valid_from.desc())
-        .first()
-    )
-    if not tariff and charge_point.site_id:
-        tariff = (
-            db.query(Tariff)
-            .filter(
-                Tariff.tenant_id == charge_point.tenant_id,
-                Tariff.site_id == charge_point.site_id,
-                Tariff.charge_point_id.is_(None),
-                Tariff.is_active == True,  # noqa: E712
-                Tariff.valid_from <= now,
-            )
-            .filter((Tariff.valid_until.is_(None)) | (Tariff.valid_until >= now))
-            .order_by(Tariff.valid_from.desc())
-            .first()
-        )
+    pricing = PricingService.resolve(db, charge_point.tenant_id, charge_point.id)
     
     # 获取EVSE状态
     evse_status = db.query(EVSEStatus).filter(
@@ -558,7 +519,8 @@ def get_charger(
             "longitude": site.longitude if site else None,
             "address": site.address if site else None,
         },
-        "price_per_kwh": float(tariff.base_price_per_kwh) if tariff else None,
+        "price_per_kwh": float(pricing.base_price_per_kwh or 0) if pricing.is_available else None,
+        "pricing": pricing.as_dict(),
         "evses": evse_list,  # 每个 EVSE 都有自己的 connector_type
         "lifecycle_status": charge_point_lifecycle_status(charge_point),
         "retirement_reason": retirement_reason,
@@ -790,6 +752,13 @@ def commission_charge_point(
     db: Session = Depends(get_db),
 ) -> dict:
     charge_point = _get_scoped_charge_point(db, charge_point_id, current_user_obj)
+    pricing = PricingService.resolve(db, charge_point.tenant_id, charge_point.id)
+    if not pricing.is_available:
+        raise _coded_http_exception(
+            409,
+            "TARIFF_NOT_CONFIGURED",
+            "A paid or free tariff is required before commissioning.",
+        )
     report = _build_acceptance_report(db, charge_point)
     if not report["passed"]:
         charge_point.acceptance_report = report
@@ -1055,6 +1024,7 @@ def update_charger_pricing(
 
     now = datetime.now(timezone.utc)
 
+    before = PricingService.resolve(db, cp.tenant_id, cp.id)
     # 关闭旧的 active charger-level tariffs
     old_tariffs = (
         db.query(Tariff)
@@ -1070,28 +1040,39 @@ def update_charger_pricing(
         if t.valid_until is None:
             t.valid_until = now
 
-    service_fee = float(req.service_fee) if req.service_fee is not None else 0.0
-    new_tariff = Tariff(
+    if req.pricing_mode != "inherit":
+        mode = PricingMode(req.pricing_mode)
+        new_tariff = Tariff(
+            tenant_id=cp.tenant_id,
+            site_id=cp.site_id,
+            charge_point_id=cp.id,
+            name=f"充电桩覆盖定价-{cp.ocpp_identity}",
+            base_price_per_kwh=(req.base_price_per_kwh if mode == PricingMode.PAID else Decimal("0.00")),
+            service_fee=(req.service_fee if mode == PricingMode.PAID and req.service_fee is not None else Decimal("0.00")),
+            time_based_rules=PricingService.metadata(mode, free_reason=req.free_reason),
+            valid_from=now,
+            valid_until=req.valid_until.astimezone(timezone.utc) if req.valid_until else None,
+            is_active=True,
+        )
+        db.add(new_tariff)
+        db.flush()
+    after = PricingService.resolve(db, cp.tenant_id, cp.id, now)
+    db.add(AuditLog(
         tenant_id=cp.tenant_id,
-        site_id=cp.site_id,
-        charge_point_id=cp.id,
-        name=f"充电桩覆盖定价-{cp.ocpp_identity}",
-        base_price_per_kwh=req.base_price_per_kwh,
-        service_fee=service_fee,
-        valid_from=now,
-        valid_until=None,
-        is_active=True,
-    )
-    db.add(new_tariff)
+        actor_id=current_user_obj.id,
+        actor_type="admin",
+        action="tariff.charger.update",
+        resource_type="charge_point",
+        resource_id=str(cp.id),
+        before_data=before.as_dict(),
+        after_data=after.as_dict(),
+        audit_metadata={"requested_mode": req.pricing_mode, **({"free_reason": req.free_reason} if req.free_reason else {})},
+    ))
     db.commit()
-    db.refresh(new_tariff)
 
     return ChargerPricingResponse(
         charge_point_id=str(cp.id),
-        tariff_id=str(new_tariff.id),
-        base_price_per_kwh=float(new_tariff.base_price_per_kwh),
-        service_fee=float(new_tariff.service_fee or 0),
-        valid_from=new_tariff.valid_from.isoformat() if new_tariff.valid_from else "",
+        **after.as_dict(),
     )
 
 

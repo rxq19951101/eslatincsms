@@ -86,7 +86,7 @@ async def test_websocket_boot_dispatch_keeps_path_identity():
 
 
 def test_qr_check_uses_ocpp_identity_and_returns_both_ids(
-    db_session, sample_charge_point, sample_evse, sample_evse_status
+    db_session, sample_commercial_charge_point, sample_evse, sample_evse_status
 ):
     app_user = AppUser(
         email="uuid-boundary-app@example.com",
@@ -98,7 +98,7 @@ def test_qr_check_uses_ocpp_identity_and_returns_both_ids(
     db_session.add(app_user)
     db_session.commit()
     token_record = SimpleNamespace(
-        charge_point_id=sample_charge_point.id,
+        charge_point_id=sample_commercial_charge_point.id,
         connector_id=sample_evse.evse_id,
     )
 
@@ -109,10 +109,10 @@ def test_qr_check_uses_ocpp_identity_and_returns_both_ids(
     ) as connection_check:
         result = check_charger_status("valid-qr-token", app_user)
 
-    connection_check.assert_called_once_with(sample_charge_point.ocpp_identity)
-    assert result["charge_point_id"] == str(sample_charge_point.id)
-    assert result["charger_id"] == str(sample_charge_point.id)
-    assert result["ocpp_identity"] == sample_charge_point.ocpp_identity
+    connection_check.assert_called_once_with(sample_commercial_charge_point.ocpp_identity)
+    assert result["charge_point_id"] == str(sample_commercial_charge_point.id)
+    assert result["charger_id"] == str(sample_commercial_charge_point.id)
+    assert result["ocpp_identity"] == sample_commercial_charge_point.ocpp_identity
 
 
 def test_pending_chargers_query_connected_ocpp_identity_with_tenant_scope(

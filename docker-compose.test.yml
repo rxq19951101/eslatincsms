@@ -68,16 +68,32 @@ services:
     ports:
       - "8001:9000"
     environment:
-      - ENVIRONMENT=testing
+      - ENVIRONMENT=test
       - DEBUG=false
       - DATABASE_URL=postgresql://ocpp_user:ocpp_password@db:5432/ocpp
       - REDIS_URL=redis://redis:6379/0
       - ENCRYPTION_KEY=${ENCRYPTION_KEY:-test-encryption-key}
       - SECRET_KEY=${SECRET_KEY:-test-secret-key}
       - ENCRYPTION_SALT=ocpp_csms_salt
+      - CSMS_BOOTSTRAP_SUPER_ADMIN_EMAIL=${CSMS_BOOTSTRAP_SUPER_ADMIN_EMAIL:-superadmin@test.local}
+      - CSMS_BOOTSTRAP_SUPER_ADMIN_PASSWORD=${CSMS_BOOTSTRAP_SUPER_ADMIN_PASSWORD:-test-super-admin-password}
+      - CSMS_BOOTSTRAP_TENANT_ADMIN_EMAIL=${CSMS_BOOTSTRAP_TENANT_ADMIN_EMAIL:-tenant-admin@test.local}
+      - CSMS_BOOTSTRAP_TENANT_ADMIN_PASSWORD=${CSMS_BOOTSTRAP_TENANT_ADMIN_PASSWORD:-test-tenant-admin-password}
+      - SIM_E2E_WEBHOOK_SECRET=${SIM_E2E_WEBHOOK_SECRET:-test-sim-e2e-webhook-secret}
+      - PAYMENT_RAILS_ENABLED=${PAYMENT_RAILS_ENABLED:-false}
+      - PUBLIC_API_BASE_URL=${PUBLIC_API_BASE_URL:-http://localhost:8001}
+      - PAYMENT_TOKEN_ENCRYPTION_KEY=${PAYMENT_TOKEN_ENCRYPTION_KEY:-}
+      - CHECKOUT_SIGNING_KEY=${CHECKOUT_SIGNING_KEY:-}
+      - CHECKOUT_RETURN_URL_ALLOWLIST=${CHECKOUT_RETURN_URL_ALLOWLIST:-eslatin://payment-return}
+      - MERCADOPAGO_ENVIRONMENT=${MERCADOPAGO_ENVIRONMENT:-sandbox}
+      - MERCADOPAGO_ACCESS_TOKEN=${MERCADOPAGO_ACCESS_TOKEN:-}
+      - MERCADOPAGO_PUBLIC_KEY=${MERCADOPAGO_PUBLIC_KEY:-}
+      - MERCADOPAGO_WEBHOOK_SECRET=${MERCADOPAGO_WEBHOOK_SECRET:-}
+      - MERCADOPAGO_SANDBOX_PAYER_EMAIL=${MERCADOPAGO_SANDBOX_PAYER_EMAIL:-test_payer@example.com}
       - MQTT_BROKER_HOST=mqtt-broker
       - MQTT_BROKER_PORT=1883
-      - CORS_ORIGINS=http://localhost:3002,http://localhost:3001,http://localhost:3000
+      - 'CORS_ORIGINS=["http://localhost:3002","http://127.0.0.1:3002","http://localhost:3001","http://127.0.0.1:3001","http://localhost:3000","http://127.0.0.1:3000"]'
+      - CORS_ALLOW_ORIGINS=http://localhost:3002,http://127.0.0.1:3002,http://localhost:3001,http://127.0.0.1:3001,http://localhost:3000,http://127.0.0.1:3000
       - LOG_LEVEL=INFO
       - DOCS_URL=/docs
       - REDOC_URL=/redoc

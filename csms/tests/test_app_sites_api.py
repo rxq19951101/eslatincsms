@@ -5,7 +5,7 @@ from decimal import Decimal
 import uuid
 
 from app.core.auth import create_access_token, get_password_hash
-from app.database.models import AppUser, ChargePoint, EVSE, EVSEStatus, Site, Tenant
+from app.database.models import AppUser, ChargePoint, EVSE, EVSEStatus, Site, Tariff, Tenant
 from app.api.v1.app.sites import _status_counts
 
 
@@ -53,6 +53,7 @@ def test_app_sites_aggregate_charge_points_without_duplicates(
     db_session,
     sample_site,
     sample_charge_point,
+    sample_commercial_charge_point,
 ):
     second = ChargePoint(
         tenant_id=sample_site.tenant_id,
@@ -62,6 +63,7 @@ def test_app_sites_aggregate_charge_points_without_duplicates(
         display_name="Fast charger",
         location_hint="North entrance",
         is_active=True,
+        commissioning_status="commissioned",
     )
     db_session.add(second)
     db_session.flush()
@@ -188,12 +190,14 @@ def test_app_sites_charging_option_counts_charging_and_offline(
     db_session,
     sample_site,
     sample_charge_point,
+    sample_commercial_charge_point,
 ):
     second = ChargePoint(
         tenant_id=sample_site.tenant_id,
         site_id=sample_site.id,
         ocpp_identity="CP-MIXED-STATUS-002",
         is_active=True,
+        commissioning_status="commissioned",
     )
     db_session.add(second)
     db_session.flush()
@@ -230,6 +234,7 @@ def test_app_sites_are_cross_tenant_and_require_app_auth(
     db_session,
     sample_site,
     sample_charge_point,
+    sample_commercial_charge_point,
 ):
     other_tenant = Tenant(name="Other public tenant", status="active")
     db_session.add(other_tenant)
@@ -244,12 +249,23 @@ def test_app_sites_are_cross_tenant_and_require_app_auth(
     )
     db_session.add(other_site)
     db_session.flush()
-    db_session.add(ChargePoint(
+    other_charge_point = ChargePoint(
         tenant_id=other_tenant.id,
         site_id=other_site.id,
         ocpp_identity="CP-OTHER-PUBLIC",
         is_active=True,
-    ))
+        commissioning_status="commissioned",
+    )
+    other_tariff = Tariff(
+        tenant_id=other_tenant.id,
+        site_id=other_site.id,
+        name="Other public paid tariff",
+        base_price_per_kwh=Decimal("2700.00"),
+        service_fee=Decimal("0.00"),
+        valid_from=datetime.now(timezone.utc),
+        is_active=True,
+    )
+    db_session.add_all([other_charge_point, other_tariff])
     db_session.commit()
 
     assert client.get("/api/v1/app/sites").status_code == 401
@@ -270,6 +286,7 @@ def test_app_sites_distance_filter_and_limit(
     client,
     db_session,
     sample_site,
+    sample_commercial_charge_point,
 ):
     response = client.get(
         "/api/v1/app/sites",

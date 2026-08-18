@@ -2,6 +2,7 @@ import { en } from '../../i18n/en';
 import { es } from '../../i18n/es';
 import { zh } from '../../i18n/zh';
 import { localizeStatus } from '../localizeStatus';
+import { localizeChargingFailure } from '../localizedDisplay';
 
 describe('localizeStatus', () => {
   it('localizes OCPP statuses in every supported language', () => {
@@ -23,5 +24,9 @@ describe('localizeStatus', () => {
     expect(zh.charging.insufficientBalance).toBe('余额不足');
     expect(en.charging.insufficientBalance).toBe('Insufficient balance');
     expect(es.charging.insufficientBalance).toBe('Saldo insuficiente');
+    expect(localizeChargingFailure({ operation: 'start', code: 'TARIFF_NOT_CONFIGURED', status: 409 }, es))
+      .toBe(es.charging.tariffNotConfigured);
+    expect(localizeChargingFailure({ operation: 'start', code: 'CHARGER_NOT_COMMISSIONED', status: 409 }, zh))
+      .toBe(zh.charging.chargerNotCommissioned);
   });
 });

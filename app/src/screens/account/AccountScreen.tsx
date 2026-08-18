@@ -131,24 +131,30 @@ const AccountScreen = () => {
         <Text style={styles.sectionTitle}>{t.account.supportAndLegal}</Text>
         <Card style={styles.menuSection}>
           <ListItem
+            testID="app-support-cases-open"
+            label={t.history.supportCases}
+            onPress={() => navigation.navigate('SupportCases')}
+            index={0}
+          />
+          <ListItem
             label={t.account.help}
             onPress={() => navigation.navigate('HelpCenter')}
-            index={0}
+            index={1}
           />
           <ListItem
             label={t.account.privacy}
             onPress={() => navigation.navigate('PrivacyPolicy')}
-            index={1}
+            index={2}
           />
           <ListItem
             label={t.account.terms}
             onPress={() => Linking.openURL(LEGAL_URLS.terms)}
-            index={2}
+            index={3}
           />
           <ListItem
             label={t.account.about}
             onPress={() => navigation.navigate('About')}
-            index={3}
+            index={4}
             showArrow={false}
           />
         </Card>

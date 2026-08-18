@@ -4,6 +4,8 @@ import os
 import socket
 import sys
 import uuid
+from datetime import datetime, timezone
+from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -27,6 +29,7 @@ os.environ["ENABLE_HTTP_TRANSPORT"] = "false"
 os.environ["ENABLE_WEBSOCKET_TRANSPORT"] = "false"
 
 from app.database.base import Base
+from app.database.base import tenant_id_context
 from app.database import get_db
 # 导入所有模型以确保它们被注册到Base.metadata
 from app.database.models import (
@@ -60,6 +63,7 @@ _original_super_session_local = app.database.base.SuperSessionLocal
 @pytest.fixture(scope="function")
 def db_session():
     """创建测试数据库会话"""
+    context_token = tenant_id_context.set(None)
     # 使用内存SQLite数据库
     engine = create_engine(
         "sqlite:///:memory:",
@@ -103,6 +107,7 @@ def db_session():
     try:
         yield session
     finally:
+        tenant_id_context.reset(context_token)
         session.close()
         for module, name, original in patched_factories:
             setattr(module, name, original)
@@ -266,6 +271,33 @@ def sample_charge_point(db_session: Session, sample_site: Site, sample_device: D
     db_session.commit()
     db_session.refresh(charge_point)
     return charge_point
+
+
+@pytest.fixture
+def sample_commercial_charge_point(
+    db_session: Session,
+    sample_charge_point: ChargePoint,
+    sample_site: Site,
+):
+    """Make the sample charger commercially discoverable and startable."""
+    from app.services.pricing_service import PricingMode, PricingService
+
+    sample_charge_point.commissioning_status = "commissioned"
+    tariff = Tariff(
+        tenant_id=sample_site.tenant_id,
+        site_id=sample_site.id,
+        charge_point_id=None,
+        name="Sample paid tariff",
+        base_price_per_kwh=Decimal("2700.00"),
+        service_fee=Decimal("0.00"),
+        time_based_rules=PricingService.metadata(PricingMode.PAID),
+        valid_from=datetime.now(timezone.utc),
+        is_active=True,
+    )
+    db_session.add(tariff)
+    db_session.commit()
+    db_session.refresh(sample_charge_point)
+    return sample_charge_point
 
 
 @pytest.fixture

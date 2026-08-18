@@ -48,6 +48,25 @@ def _app_headers(user: AppUser) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
+def test_unpaid_charge_does_not_block_app_login(client, db_session):
+    """D1 blocks paid charging admission, never authentication itself."""
+    user = _create_app_user(
+        db_session,
+        email="unpaid-login@example.test",
+        balance=Decimal("0.00"),
+    )
+    user.has_unpaid_charges = True
+    db_session.commit()
+
+    response = client.post(
+        "/api/v1/app/auth/login-email",
+        json={"email": user.email, "password": "test-password"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["user"]["email"] == user.email
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("dependency", [get_charging_app_user, get_wallet_app_user])
 async def test_app_user_dependencies_reject_non_uuid_token_subject(dependency, db_session):
@@ -59,7 +78,8 @@ async def test_app_user_dependencies_reject_non_uuid_token_subject(dependency, d
 
 
 def test_start_charging_uses_module_charge_point_model(
-    client, db_session, sample_tenant, sample_charge_point, sample_evse
+    client, db_session, sample_tenant, sample_charge_point,
+    sample_commercial_charge_point, sample_evse
 ):
     user = _create_app_user(
         db_session,
@@ -334,6 +354,7 @@ def test_start_charging_distinguishes_rejection_and_timeout(
     db_session,
     sample_tenant,
     sample_charge_point,
+    sample_commercial_charge_point,
     sample_evse,
     side_effect,
     return_value,

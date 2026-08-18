@@ -28,8 +28,11 @@ from app.services.ocpp_message_handler import OCPPMessageHandler
 
 @pytest.mark.asyncio
 async def test_unique_id_replay_returns_first_transaction_result(
-    db_session, sample_charge_point, sample_evse, sample_evse_status
+    db_session, sample_commercial_charge_point, sample_evse, sample_evse_status
 ):
+    # StartTransaction is a production-gated admission path.  Keep the
+    # default sample_charge_point draft for rejection coverage, and use the
+    # explicitly commissioned commercial fixture for this accepted replay.
     handler = OCPPMessageHandler()
     payload = {
         "connectorId": 1,
@@ -39,14 +42,14 @@ async def test_unique_id_replay_returns_first_transaction_result(
     }
 
     first = await handler.handle_message(
-        sample_charge_point.ocpp_identity,
+        sample_commercial_charge_point.ocpp_identity,
         "StartTransaction",
         payload,
         evse_id=1,
         message_unique_id="start-unique-1",
     )
     replay = await handler.handle_message(
-        sample_charge_point.ocpp_identity,
+        sample_commercial_charge_point.ocpp_identity,
         "StartTransaction",
         payload,
         evse_id=1,
@@ -452,12 +455,12 @@ def test_sim_payment_webhook_is_signed_stateful_and_ledger_idempotent(
     }
 
     rejected = client.post(
-        "/api/v1/app/wallet/payments/sim-webhook",
+        "/api/v1/app/payments/webhooks/sim",
         json=payload,
         headers={**headers, "X-Sim-Signature": "sha256=invalid"},
     )
-    first = client.post("/api/v1/app/wallet/payments/sim-webhook", json=payload, headers=headers)
-    replay = client.post("/api/v1/app/wallet/payments/sim-webhook", json=payload, headers=headers)
+    first = client.post("/api/v1/app/payments/webhooks/sim", json=payload, headers=headers)
+    replay = client.post("/api/v1/app/payments/webhooks/sim", json=payload, headers=headers)
 
     assert rejected.status_code == 401
     assert first.status_code == 200
@@ -492,7 +495,7 @@ def test_sim_payment_webhook_is_not_available_in_production(client, monkeypatch)
     monkeypatch.setenv("ENVIRONMENT", "production")
     monkeypatch.setenv("SIM_E2E_WEBHOOK_SECRET", secret)
     response = client.post(
-        "/api/v1/app/wallet/payments/sim-webhook",
+        "/api/v1/app/payments/webhooks/sim",
         json=payload,
         headers={
             "Idempotency-Key": payload["event_id"],

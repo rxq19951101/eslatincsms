@@ -29,11 +29,12 @@ class TestUserChargingFlow:
         handler: OCPPMessageHandler,
         db_session: Session, 
         sample_charge_point: ChargePoint,
+        sample_commercial_charge_point: ChargePoint,
         sample_evse: EVSE,
         sample_evse_status: EVSEStatus
     ):
         """测试完整的用户充电流程"""
-        charge_point_id = sample_charge_point.ocpp_identity
+        charge_point_id = sample_commercial_charge_point.ocpp_identity
         id_tag = "TEST_TAG_001"
         connector_id = 1
         
@@ -269,10 +270,11 @@ class TestUserChargingFlow:
         handler: OCPPMessageHandler,
         db_session: Session,
         sample_charge_point: ChargePoint,
+        sample_commercial_charge_point: ChargePoint,
         sample_evse: EVSE
     ):
         """测试充电统计信息"""
-        charge_point_id = sample_charge_point.ocpp_identity
+        charge_point_id = sample_commercial_charge_point.ocpp_identity
         id_tag = "TEST_TAG_002"
         
         # 开始充电

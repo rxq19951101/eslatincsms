@@ -4,7 +4,7 @@
 #
 
 import asyncio
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, model_validator
@@ -18,14 +18,25 @@ from app.core.logging_config import get_logger
 from app.core.api_logging import log_api_request, log_api_response, log_api_error, log_business_operation
 from app.core.auth import get_current_user
 from app.database.base import get_db, SuperSessionLocal
-from app.database.models import AppUser, ChargingSession, MeterValue, AppWalletTransaction, Tariff, ChargePoint, EVSEStatus, EVSE, Site
+from app.database.models import AppUser, ChargingSession, MeterValue, AppWalletTransaction, Tariff, ChargePoint, EVSEStatus, EVSE, Site, Invoice
+from app.services.charging_payment_intent import (
+    PaymentIntentError,
+    find_intent_order,
+    find_start_requested_order,
+    write_intent,
+)
 from app.services.billing_service import BillingService
+from app.services.pricing_service import PricingMode, PricingService
 from app.services.meter_telemetry_service import meter_telemetry_service
 from app.services.asset_lifecycle_service import (
     AssetNotOperationalError,
     require_charge_point_operational,
 )
 from app.services.qr_service import InvalidQrTokenError, resolve_qr_token
+from app.services.financial_eligibility import (
+    ChargingAdmissionPreflight,
+    FinancialEligibilityEvaluator,
+)
 
 from app.api.v1.ocpp_control import (
     check_charger_connection,
@@ -127,6 +138,45 @@ def _business_error(status_code: int, code: str, message: str, **details: Any) -
     return exc
 
 
+def _has_global_unpaid_charging_bill(db: Session, app_user_id: UUID) -> bool:
+    """Compatibility helper backed exclusively by the canonical evaluator."""
+    return FinancialEligibilityEvaluator.evaluate(
+        db, app_user_id=app_user_id
+    ).status != "eligible"
+
+
+def _reset_claimed_payment_intent(
+    *,
+    intent_id: str,
+    app_user_id: Optional[UUID],
+    connector_id: Optional[int],
+) -> None:
+    """Return an intent to ``ready`` only after a device command failed."""
+
+    if app_user_id is None or connector_id is None:
+        return
+    db = SuperSessionLocal()
+    try:
+        matched = find_intent_order(
+            db,
+            intent_id=intent_id,
+            app_user_id=app_user_id,
+            connector_id=connector_id,
+            lock=True,
+        )
+        if matched is None:
+            return
+        order, intent = matched
+        if intent.status == "start_requested" and not intent.is_expired():
+            write_intent(order, intent.with_state("ready"))
+            db.commit()
+    except Exception:
+        db.rollback()
+        logger.warning("Unable to reset failed charging payment intent", exc_info=True)
+    finally:
+        db.close()
+
+
 def _resolve_operational_qr(db: Session, token: str):
     try:
         return resolve_qr_token(db=db, token=token)
@@ -141,6 +191,15 @@ def _require_operational_business_asset(charge_point: ChargePoint) -> None:
         require_charge_point_operational(charge_point)
     except AssetNotOperationalError as exc:
         raise _business_error(409, exc.code, exc.message) from exc
+
+
+def _require_commissioned(charge_point: ChargePoint) -> None:
+    if charge_point.commissioning_status != "commissioned":
+        raise _business_error(
+            409,
+            "CHARGER_NOT_COMMISSIONED",
+            "This charger is not commissioned for commercial charging.",
+        )
 
 
 async def get_current_app_user(
@@ -167,6 +226,16 @@ async def get_current_app_user(
 
 class StartChargingRequest(BaseModel):
     qr_token: str = Field(..., description="二维码 token（爆改测试版：token-only）", min_length=10)
+    settlement_method: Literal["wallet", "direct_card"] = Field(
+        "wallet",
+        description="结算方式；未升级的客户端默认为 wallet",
+    )
+    payment_intent_id: Optional[str] = Field(
+        None,
+        min_length=16,
+        max_length=128,
+        description="charging_direct checkout confirm 返回的 opaque intent ID",
+    )
 
 
 class StopChargingRequest(BaseModel):
@@ -197,6 +266,9 @@ async def start_charging_by_scan(
     current_user_obj: AppUser = Depends(get_current_app_user),
 ):
     """Resolve a QR token and wait for the device's RemoteStart response."""
+    claimed_intent_id: Optional[str] = None
+    claimed_intent_connector: Optional[int] = None
+    claimed_intent_user: Optional[UUID] = None
     try:
         log_api_request(
             method="POST",
@@ -232,10 +304,12 @@ async def start_charging_by_scan(
             charge_point = sdb.query(ChargePoint).filter(
                 ChargePoint.id == token_rec.charge_point_id,
                 ChargePoint.tenant_id == token_rec.operator_tenant_id,
-            ).first()
+            ).with_for_update().first()
             if not charge_point:
                 raise HTTPException(status_code=404, detail="Charge point not found")
             _require_operational_business_asset(charge_point)
+            charge_point_identity = charge_point.ocpp_identity
+            charge_point_uuid = charge_point.id
 
             evse = sdb.query(EVSE).filter(
                 EVSE.charge_point_id == charge_point.id,
@@ -278,49 +352,138 @@ async def start_charging_by_scan(
                     connector_id=token_rec.connector_id,
                 )
 
+            _require_commissioned(charge_point)
+            pricing = PricingService.resolve(
+                sdb, charge_point.tenant_id, charge_point.id
+            )
+            if not pricing.is_available:
+                raise _business_error(
+                    409,
+                    "TARIFF_NOT_CONFIGURED",
+                    "This charger is not currently available for commercial charging.",
+                )
+
             if not app_user:
                 raise HTTPException(status_code=404, detail="User not found")
 
+            admission = ChargingAdmissionPreflight.evaluate(
+                sdb,
+                app_user_id=current_user_obj.id,
+                qr_token=req.qr_token,
+                settlement_method=req.settlement_method,
+            )
+            if admission.decision != "allowed":
+                financial = admission.financial_eligibility
+                if financial.status != "eligible":
+                    if financial.status == "blocked":
+                        raise _business_error(
+                            402,
+                            "FINANCIAL_ELIGIBILITY_BLOCKED",
+                            "Financial eligibility does not allow charging.",
+                            reason_codes=list(financial.reason_codes),
+                            blocking_resources=list(financial.blocking_resources),
+                            version=financial.decision_version,
+                        )
+                    if financial.status == "recheck_required":
+                        raise _business_error(
+                            409,
+                            "FINANCIAL_RECHECK_REQUIRED",
+                            "Financial facts are still being reconciled.",
+                            reason_codes=list(financial.reason_codes),
+                            version=financial.decision_version,
+                        )
+                    raise _business_error(
+                        503,
+                        "RECOVERY_UNKNOWN",
+                        "Financial facts are not currently known.",
+                        reason_codes=list(financial.reason_codes),
+                        version=financial.decision_version,
+                    )
+                if admission.rail_eligibility.status == "closed":
+                    raise _business_error(
+                        503,
+                        "RAIL_CLOSED",
+                        "Paid charging admission is temporarily closed.",
+                        matched_scope_refs=list(admission.rail_eligibility.matched_scope_refs),
+                        version=admission.rail_eligibility.version,
+                    )
+                raise _business_error(
+                    503,
+                    "RAIL_STATE_UNKNOWN",
+                    "Paid charging admission state is not currently known.",
+                    matched_scope_refs=list(admission.rail_eligibility.matched_scope_refs),
+                    version=admission.rail_eligibility.version,
+                )
+
+            # The QR record is authoritative for tenant, charge point and
+            # connector.  A paid direct-card request must claim the matching
+            # server-created Order before a device command is sent.
+            if pricing.pricing_mode is not PricingMode.FREE:
+                if req.settlement_method == "direct_card":
+                    if not req.payment_intent_id:
+                        raise _business_error(
+                            409,
+                            "PAYMENT_INTENT_INVALID",
+                            "A valid payment method is required before starting this charging session.",
+                        )
+                    try:
+                        pending = find_start_requested_order(
+                            sdb,
+                            app_user_id=current_user_obj.id,
+                            charge_point_id=charge_point.id,
+                            operator_tenant_id=charge_point.tenant_id,
+                            connector_id=token_rec.connector_id,
+                        )
+                        if pending is not None:
+                            raise PaymentIntentError("Another payment intent is already starting")
+                        matched = find_intent_order(
+                            sdb,
+                            intent_id=req.payment_intent_id,
+                            app_user_id=current_user_obj.id,
+                            charge_point_id=charge_point.id,
+                            operator_tenant_id=charge_point.tenant_id,
+                            connector_id=token_rec.connector_id,
+                            lock=True,
+                        )
+                        if matched is None:
+                            raise PaymentIntentError("Payment intent does not match this asset")
+                        intent_order, intent = matched
+                        if intent.is_expired():
+                            write_intent(intent_order, intent.with_state("expired"))
+                            sdb.commit()
+                            raise PaymentIntentError("Payment intent expired")
+                        if intent.status != "ready":
+                            raise PaymentIntentError("Payment intent has already been used")
+                        write_intent(intent_order, intent.with_state("start_requested"))
+                        sdb.commit()
+                        claimed_intent_id = intent.intent_id
+                        claimed_intent_connector = intent.connector_id
+                        claimed_intent_user = intent.app_user_id
+                    except PaymentIntentError as exc:
+                        sdb.rollback()
+                        raise _business_error(
+                            409,
+                            "PAYMENT_INTENT_INVALID",
+                            "A valid payment method is required before starting this charging session.",
+                        ) from exc
+                elif req.payment_intent_id:
+                    raise _business_error(
+                        409,
+                        "PAYMENT_INTENT_INVALID",
+                        "A payment intent can only be used with direct-card settlement.",
+                    )
+
             # Existing activity is checked first so a low balance or newly
             # unpaid account can still recover its current session idempotently.
-            if getattr(app_user, "has_unpaid_charges", False):
-                # 检查用户在该站点是否有未支付费用
-                unpaid_sessions = (
-                    sdb.query(ChargingSession)
-                    .filter(
-                        ChargingSession.user_id == str(current_user_obj.id),
-                        ChargingSession.payment_status == "unpaid",
-                    )
-                )
-                
-                if charge_point.site_id:
-                    unpaid_sessions = unpaid_sessions.join(ChargePoint).filter(
-                        ChargePoint.site_id == charge_point.site_id
-                    )
-                
-                if unpaid_sessions.first():
-                    error = HTTPException(
-                        status_code=402,
-                        detail={
-                            "code": "UNPAID_CHARGES",
-                            "message": "You have unpaid charges. Please pay before starting a new charging session.",
-                        }
-                    )
-                    log_api_error(
-                        method="POST",
-                        path="/api/v1/app/charging/start",
-                        operation="start_charging",
-                        error=error,
-                        current_user=current_user_obj,
-                        params={"charge_point_id": token_rec.charge_point_id}
-                    )
-                    raise error
-
-            # 余额不足不允许启动（无应用内支付时由运营后台预充）
+            # direct_card does not use the wallet start gate.
             from app.core.config import get_settings
-            min_bal = float(get_settings().min_wallet_balance_to_start)
-            bal = float(app_user.balance or 0) if app_user else 0.0
-            if bal < min_bal:
+            min_bal = Decimal(str(get_settings().min_wallet_balance_to_start))
+            bal = Decimal(str(app_user.balance or 0)) if app_user else Decimal("0")
+            if (
+                pricing.pricing_mode != PricingMode.FREE
+                and req.settlement_method == "wallet"
+                and bal < min_bal
+            ):
                 error = HTTPException(
                     status_code=402,
                     detail={
@@ -329,8 +492,8 @@ async def start_charging_by_scan(
                             f"Insufficient wallet balance (need at least {min_bal:.0f} COP). "
                             "Contact the operator to top up your account."
                         ),
-                        "balance": bal,
-                        "min_balance": min_bal,
+                        "balance": str(bal),
+                        "min_balance": str(min_bal),
                     },
                 )
                 log_api_error(
@@ -366,7 +529,7 @@ async def start_charging_by_scan(
         )
         result = await _coalesced_remote_start(
             attempt_key,
-            charge_point.ocpp_identity,
+            charge_point_identity,
             id_tag,
             token_rec.connector_id,
         )
@@ -376,6 +539,12 @@ async def start_charging_by_scan(
         workflow_status = details.get("workflow_status")
 
         if not payload.get("success") or device_status != "Accepted":
+            if claimed_intent_id:
+                _reset_claimed_payment_intent(
+                    intent_id=claimed_intent_id,
+                    app_user_id=claimed_intent_user,
+                    connector_id=claimed_intent_connector,
+                )
             code = "START_IN_PROGRESS" if workflow_status == "start_in_progress" else "REMOTE_START_REJECTED"
             message = (
                 "A start request is already in progress for this connector."
@@ -386,7 +555,7 @@ async def start_charging_by_scan(
                 409,
                 code,
                 message,
-                ocpp_identity=charge_point.ocpp_identity,
+                ocpp_identity=charge_point_identity,
                 connector_id=token_rec.connector_id,
                 device_status=device_status or "Rejected",
             )
@@ -403,14 +572,26 @@ async def start_charging_by_scan(
         return {
             "success": True,
             "status": "accepted",
-            "ocpp_identity": charge_point.ocpp_identity,
-            "charge_point_id": str(charge_point.id),
+            "ocpp_identity": charge_point_identity,
+            "charge_point_id": str(charge_point_uuid),
             "connector_id": token_rec.connector_id,
             "device_status": "Accepted",
         }
     except HTTPException:
+        if claimed_intent_id:
+            _reset_claimed_payment_intent(
+                intent_id=claimed_intent_id,
+                app_user_id=claimed_intent_user,
+                connector_id=claimed_intent_connector,
+            )
         raise
     except Exception as e:
+        if claimed_intent_id:
+            _reset_claimed_payment_intent(
+                intent_id=claimed_intent_id,
+                app_user_id=claimed_intent_user,
+                connector_id=claimed_intent_connector,
+            )
         log_api_error(
             method="POST",
             path="/api/v1/app/charging/start",
@@ -470,41 +651,19 @@ def check_charger_status(
             logger.warning("[APP API] Charger not found: %s (resolved from QR)", charge_point_id)
             raise HTTPException(status_code=404, detail=f"Charger not found: {charge_point_id}")
         _require_operational_business_asset(charger)
+        _require_commissioned(charger)
         
         logger.info(f"[APP API] Charger found: {charge_point_id}, tenant_id={charger.tenant_id}")
 
         # 获取站点信息
         site = charger.site if charger.site_id else None
 
-        # 获取定价信息
-        tariff = None
-        now = datetime.now(timezone.utc)
-        if charger.site_id:
-            tariff = (
-                db.query(Tariff)
-                .filter(
-                    Tariff.tenant_id == charger.tenant_id,
-                    Tariff.site_id == charger.site_id,
-                    Tariff.charge_point_id.is_(None),
-                    Tariff.is_active == True,  # noqa: E712
-                    Tariff.valid_from <= now,
-                )
-                .filter((Tariff.valid_until.is_(None)) | (Tariff.valid_until >= now))
-                .order_by(Tariff.valid_from.desc())
-                .first()
-            )
-        if not tariff:
-            tariff = (
-                db.query(Tariff)
-                .filter(
-                    Tariff.tenant_id == charger.tenant_id,
-                    Tariff.charge_point_id == charge_point_id,
-                    Tariff.is_active == True,  # noqa: E712
-                    Tariff.valid_from <= now,
-                )
-                .filter((Tariff.valid_until.is_(None)) | (Tariff.valid_until >= now))
-                .order_by(Tariff.valid_from.desc())
-                .first()
+        pricing = PricingService.resolve(db, charger.tenant_id, charger.id)
+        if not pricing.is_available:
+            raise _business_error(
+                409,
+                "TARIFF_NOT_CONFIGURED",
+                "This charger is not currently available for commercial charging.",
             )
 
         # 检查充电桩是否在线（通过 last_seen）
@@ -526,32 +685,16 @@ def check_charger_status(
         is_connected = check_charger_connection(charger.ocpp_identity)
         is_online = is_online and is_connected
 
-        # 检查用户是否有欠费
+        # D1 is a global billing fact, not a cached user flag or site-local query.
         user_id = str(current_user_obj.id)
         app_user = db.query(AppUser).filter(AppUser.id == current_user_obj.id).first()
         
-        if getattr(app_user, "has_unpaid_charges", False):
-            # 检查用户在该站点是否有未支付费用
-            unpaid_q = (
-                db.query(ChargingSession)
-                .join(ChargePoint)
-                .filter(
-                    ChargingSession.user_id == user_id,
-                    ChargingSession.payment_status == "unpaid",
-                )
+        if app_user and _has_global_unpaid_charging_bill(db, current_user_obj.id):
+            raise _business_error(
+                402,
+                "UNPAID_CHARGES",
+                "Pay outstanding charging bills before starting another session.",
             )
-            if charger.site_id:
-                unpaid_q = unpaid_q.filter(ChargePoint.site_id == charger.site_id)
-            unpaid_sessions = unpaid_q.first()
-            
-            if unpaid_sessions:
-                raise HTTPException(
-                    status_code=402,
-                    detail={
-                        "code": "UNPAID_CHARGES",
-                        "message": "You have unpaid charges at this site. Please pay before starting a new charging session.",
-                    }
-                )
 
         # 检查是否有活跃充电会话
         active_session = (
@@ -614,7 +757,8 @@ def check_charger_status(
                 "model": charger.model,
                 "site_name": site.name if site else None,
                 "site_address": site.address if site else None,
-                "price_per_kwh": float(tariff.base_price_per_kwh) if tariff and tariff.base_price_per_kwh else None,
+                "price_per_kwh": float(pricing.base_price_per_kwh or 0),
+                "pricing": pricing.as_dict(),
             },
         }
         
@@ -906,19 +1050,19 @@ async def stop_charging(
         db.close()
 
 
-@router.post("/settle", summary="结算充电费用并写入钱包流水（终端用户）")
+@router.post("/settle", summary="结算充电费用（钱包、银行卡或免费分支）")
 def settle_charging(
     req: SettleChargingRequest,
     current_user_obj: AppUser = Depends(get_current_app_user),
 ):
     """
-    结算策略（简化版）：
+    结算策略：
     - 仅允许结算当前用户自己的 session（通过 id_tag 归属）
     - 仅当 session 已结束（end_time 或 meter_stop 存在）才允许结算
-    - 根据 Tariff（优先桩级，其次站点级）读取 price_per_kwh
-    - 费用 = energy_kwh * price_per_kwh（无电量则为0）
-    - 钱包：AppUser.balance -= 费用（不足则扣到 0，避免出现负余额）
-    - 流水幂等：WalletTransaction.id 固定为 charge_{session_id}，重复调用不会重复扣费
+    - 金额由 BillingService 从价格快照计算并由唯一 Invoice 固化
+    - 钱包余额不足不扣款、不标记已支付
+    - direct_card 只准备准确金额 PaymentOrder，不写钱包
+    - free 只生成零金额审计 Payment，不创建 Provider 订单
     """
     try:
         log_api_request(
@@ -999,6 +1143,10 @@ def settle_charging(
                 "energy_kwh": result.energy_kwh,
                 "price_per_kwh": result.price_per_kwh,
                 "invoice_id": result.invoice_id,
+                "settlement_method": result.settlement_method,
+                "payment_status": result.payment_status,
+                "payment_order_id": result.payment_order_id,
+                "next_action": result.next_action,
             }
         except HTTPException:
             raise

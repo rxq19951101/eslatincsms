@@ -1,19 +1,17 @@
-/**
- * 添加支付方式（简化版，本地存储）
- */
+/** Add a saved card through the server-hosted Mercado Pago checkout. */
 
-import React, { useMemo, useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, Alert } from 'react-native';
+import React, { useState } from 'react';
+import { Alert, Linking, StyleSheet, Text, View } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import type { StackNavigationProp } from '@react-navigation/stack';
 
 import { COLORS } from '../../constants/config';
 import { useI18n } from '../../i18n';
-import type { RootStackParamList, PaymentMethod } from '../../types';
-import { addPaymentMethod, getPaymentMethods, savePaymentMethods } from '../../utils/paymentMethodsStorage';
+import type { RootStackParamList } from '../../types';
+import { createSaveCardCheckoutSession, isServerCheckoutUrl } from '../../api/payments';
+import { trackCheckoutSession } from '../../features/payment/checkoutCoordinator';
 import ScreenHeader from '../../components/ui/ScreenHeader';
 import Screen from '../../components/ui/Screen';
-import TextField from '../../components/ui/TextField';
 import Button from '../../components/ui/Button';
 import Card from '../../components/ui/Card';
 
@@ -21,129 +19,55 @@ type Nav = StackNavigationProp<RootStackParamList, 'AddPayment'>;
 
 const AddPaymentScreen = () => {
   const { t } = useI18n();
-
   const navigation = useNavigation<Nav>();
-  const [type, setType] = useState<PaymentMethod['type']>('visa');
-  const [lastFour, setLastFour] = useState('');
-  const [saving, setSaving] = useState(false);
+  const [opening, setOpening] = useState(false);
 
-  const isLastFourValid = useMemo(() => {
-    const s = lastFour.trim();
-    if (!s) return true; // 可选
-    return /^\d{4}$/.test(s);
-  }, [lastFour]);
-
-  const onSave = async () => {
-    if (!isLastFourValid) {
-      Alert.alert(t.payment.lastFourAlertTitle, t.payment.lastFourAlertBody);
-      return;
-    }
-    setSaving(true);
+  const onOpenCheckout = async () => {
+    if (opening) return;
+    setOpening(true);
     try {
-      const existing = await getPaymentMethods();
-      const isFirst = existing.length === 0;
-
-      const method: PaymentMethod = {
-        id: `pm_${Date.now()}`,
-        type,
-        last_four: lastFour.trim() || undefined,
-        is_default: isFirst,
-      };
-
-      // 新增到本地列表
-      const next = await addPaymentMethod(method);
-
-      // 若不是第一张，也允许用户“新增即默认”——这里保持：只有第一张自动默认
-      // 保证列表中至少一个默认
-      if (!next.some((m) => m.is_default) && next.length > 0) {
-        next[0] = { ...next[0], is_default: true };
-        await savePaymentMethods(next);
+      const session = await createSaveCardCheckoutSession();
+      if (!isServerCheckoutUrl(session.checkout_url)) {
+        throw new Error('insecure_checkout_url');
       }
-
+      await trackCheckoutSession(session);
+      await Linking.openURL(session.checkout_url);
       navigation.goBack();
     } catch {
-      Alert.alert(t.common.error, t.payment.saveFailed);
+      Alert.alert(t.common.error, t.payment.openFailed);
     } finally {
-      setSaving(false);
+      setOpening(false);
     }
   };
 
   return (
     <Screen>
-      <ScreenHeader title={t.payment.addMethodDemo} onBack={() => navigation.goBack()} />
-
-      <View style={styles.demoBanner}>
-        <Text style={styles.demoBannerText}>
-          {t.payment.addMethodHint}
-        </Text>
-      </View>
+      <ScreenHeader title={t.payment.addMethod} onBack={() => navigation.goBack()} />
 
       <Card style={styles.card}>
-        <Text style={styles.label}>{t.payment.type}</Text>
-        <View style={styles.typeRow}>
-          {([
-            ['visa', 'VISA'],
-            ['mastercard', 'Mastercard'],
-            ['paypal', 'PayPal'],
-            ['apple_pay', 'Apple Pay'],
-            ['google_pay', 'Google Pay'],
-          ] as Array<[PaymentMethod['type'], string]>).map(([v, t]) => (
-            <TouchableOpacity
-              key={v}
-              style={[styles.typeChip, type === v && styles.typeChipActive]}
-              onPress={() => setType(v)}
-            >
-              <Text style={[styles.typeText, type === v && styles.typeTextActive]}>{t}</Text>
-            </TouchableOpacity>
-          ))}
-        </View>
-
-        <TextField
-          label={t.payment.lastFour}
-          value={lastFour}
-          onChangeText={setLastFour}
-          placeholder={t.payment.lastFourPlaceholder}
-          keyboardType="numeric"
-          maxLength={4}
-          error={!isLastFourValid ? t.payment.lastFourInvalid : undefined}
-        />
+        <Text style={styles.title}>{t.payment.secureCardTitle}</Text>
+        <Text style={styles.body}>{t.payment.secureCardBody}</Text>
+        <Text style={styles.note}>{t.payment.secureCardNote}</Text>
       </Card>
 
       <View style={styles.bottomBar}>
-        <Button title={saving ? t.payment.saving : t.common.save} disabled={saving} loading={saving} onPress={onSave} size="large" />
+        <Button
+          title={opening ? t.payment.opening : t.payment.continueToSecurePage}
+          disabled={opening}
+          loading={opening}
+          onPress={() => void onOpenCheckout()}
+          size="large"
+        />
       </View>
     </Screen>
   );
 };
 
 const styles = StyleSheet.create({
-  demoBanner: {
-    marginHorizontal: 16,
-    marginTop: 8,
-    padding: 12,
-    backgroundColor: '#FFFBEB',
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: '#FDE68A',
-  },
-  demoBannerText: { fontSize: 13, color: COLORS.TEXT_PRIMARY, lineHeight: 20 },
-  card: {
-    margin: 16,
-    padding: 16,
-  },
-  label: { color: COLORS.TEXT_SECONDARY, fontSize: 12, marginBottom: 6 },
-  typeRow: { flexDirection: 'row', flexWrap: 'wrap' },
-  typeChip: {
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 999,
-    backgroundColor: '#E5E7EB',
-    marginRight: 10,
-    marginBottom: 10,
-  },
-  typeChipActive: { backgroundColor: COLORS.PRIMARY },
-  typeText: { fontWeight: '800', color: COLORS.TEXT_PRIMARY, fontSize: 12 },
-  typeTextActive: { color: '#FFFFFF' },
+  card: { margin: 16, padding: 18 },
+  title: { color: COLORS.TEXT_PRIMARY, fontSize: 18, fontWeight: '900', marginBottom: 10 },
+  body: { color: COLORS.TEXT_PRIMARY, fontSize: 15, lineHeight: 23 },
+  note: { color: COLORS.TEXT_SECONDARY, fontSize: 13, lineHeight: 20, marginTop: 16 },
   bottomBar: {
     padding: 12,
     backgroundColor: '#FFFFFF',

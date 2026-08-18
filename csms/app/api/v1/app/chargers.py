@@ -8,9 +8,10 @@ from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import func, and_
 from app.database.base import get_db, SuperSessionLocal
-from app.database.models import ChargePoint, Site, EVSE, EVSEStatus, Tariff, AppUser
+from app.database.models import ChargePoint, Site, EVSE, EVSEStatus, AppUser
 from app.core.logging_config import get_logger
 from app.core.auth import get_current_user
+from app.services.pricing_service import PricingService
 from math import radians, cos, sin, asin, sqrt
 from uuid import UUID
 
@@ -87,6 +88,7 @@ async def list_chargers_for_app(
     # 注意：evses 表不存 status，实时状态在 evse_status 表
     query = db.query(ChargePoint).join(Site, ChargePoint.site_id == Site.id).filter(
         ChargePoint.is_active.is_(True),
+        ChargePoint.commissioning_status == "commissioned",
         Site.is_active.is_(True),
     )
     
@@ -108,11 +110,9 @@ async def list_chargers_for_app(
         if not site:
             continue
         
-        # 获取定价信息
-        tariff = db.query(Tariff).filter(
-            Tariff.site_id == site.id,
-            Tariff.is_active == True
-        ).first()
+        pricing = PricingService.resolve(db, charger.tenant_id, charger.id)
+        if not pricing.is_available:
+            continue
         
         # 计算可用连接器数量（evse_status.status == 'Available'）
         # 注意：status 可能是历史残留；必须以 last_seen 判断在线后才计数
@@ -165,12 +165,13 @@ async def list_chargers_for_app(
             "latitude": float(site.latitude) if site.latitude else None,
             "longitude": float(site.longitude) if site.longitude else None,
             "status": overall_status,
-            "price_per_kwh": float(tariff.base_price_per_kwh) if tariff else None,
+            "price_per_kwh": float(pricing.base_price_per_kwh or 0),
+            "pricing": pricing.as_dict(),
             "available_connectors": available_count,
             "total_connectors": total_count,
             "is_configured": True,
             "has_location": True,
-            "has_pricing": tariff is not None,
+            "has_pricing": True,
             "last_seen": last_seen.isoformat() if last_seen else None,
         }
         
@@ -213,6 +214,7 @@ async def get_charger_detail_for_app(
     charger = db.query(ChargePoint).join(Site, ChargePoint.site_id == Site.id).filter(
         ChargePoint.id == charge_point_id,
         ChargePoint.is_active.is_(True),
+        ChargePoint.commissioning_status == "commissioned",
         Site.is_active.is_(True),
     ).first()
     
@@ -222,13 +224,9 @@ async def get_charger_detail_for_app(
     # 获取站点信息
     site = charger.site
     
-    # 获取定价信息
-    tariff = None
-    if site:
-        tariff = db.query(Tariff).filter(
-            Tariff.site_id == site.id,
-            Tariff.is_active == True
-        ).first()
+    pricing = PricingService.resolve(db, charger.tenant_id, charger.id)
+    if not pricing.is_available:
+        raise HTTPException(status_code=404, detail="Charger not found")
     
     # 获取连接器信息
     evses = db.query(EVSE).filter(EVSE.charge_point_id == charger.id).all()
@@ -278,7 +276,8 @@ async def get_charger_detail_for_app(
         "latitude": float(site.latitude) if site and site.latitude else None,
         "longitude": float(site.longitude) if site and site.longitude else None,
         "status": detail_status,
-        "price_per_kwh": float(tariff.base_price_per_kwh) if tariff else None,
+        "price_per_kwh": float(pricing.base_price_per_kwh or 0),
+        "pricing": pricing.as_dict(),
         "available_connectors": available_count,
         "total_connectors": len(evses),
         "last_seen": last_seen_detail.isoformat() if last_seen_detail else None,

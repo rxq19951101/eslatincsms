@@ -34,6 +34,10 @@ _SENSITIVE_KEY_PARTS = (
     "reset_url",
 )
 _SENSITIVE_EXACT_KEYS = {
+    "access_token",
+    "card_token",
+    "client_secret",
+    "credential_handle",
     "key",
     "pwd",
     "pass",
@@ -43,15 +47,17 @@ _SENSITIVE_EXACT_KEYS = {
     "qr",
     "qr_code",
     "qr_payload",
+    "refresh_token",
     "x_signature",
     "x_sim_signature",
     "set_cookie",
 }
 
 _ASSIGNMENT_RE = re.compile(
-    r"(?i)([\"']?(?:qr[-_ ]?token|password|passwd|pwd|access[-_ ]?token|"
+    r"(?i)([\"']?(?:qr[-_ ]?token|card[-_ ]?token|password|passwd|pwd|access[-_ ]?token|"
     r"refresh[-_ ]?token|webhook[-_ ]?(?:secret|signature)|secret|signature|"
-    r"authorization|api[-_ ]?key|private[-_ ]?key)[\"']?\s*[:=]\s*)"
+    r"client[-_ ]?secret|credential[-_ ]?handle|authorization|api[-_ ]?key|"
+    r"private[-_ ]?key)[\"']?\s*[:=]\s*)"
     r"([\"']?)[^\s&,;\"'}\]]+\2"
 )
 _BEARER_RE = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+")
@@ -65,6 +71,9 @@ _PROVIDER_CREDENTIAL_RE = re.compile(
     r"\bAKIA[0-9A-Z]{16}\b|"
     r"\bgh[pousr]_[A-Za-z0-9]{20,}\b|"
     r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"
+)
+_CHECKOUT_SIGNED_PATH_RE = re.compile(
+    r"(/api/v1/app/payments/checkout/)[^\s/?#]+"
 )
 
 
@@ -81,6 +90,7 @@ def redact_log_text(value: str) -> str:
     safe = _BEARER_RE.sub("Bearer " + REDACTED, value)
     safe = _JWT_RE.sub(REDACTED, safe)
     safe = _PROVIDER_CREDENTIAL_RE.sub(REDACTED, safe)
+    safe = _CHECKOUT_SIGNED_PATH_RE.sub(r"\1" + REDACTED, safe)
     safe = _ASSIGNMENT_RE.sub(lambda match: match.group(1) + REDACTED, safe)
     return safe
 

@@ -7,12 +7,14 @@ import chargingReducer from '../../../store/slices/chargingSlice';
 import walletReducer, { setBalance } from '../../../store/slices/walletSlice';
 import {
   checkChargerStatus,
+  chargingPreflight,
   getActiveChargingSession,
   getMeterValues,
   startChargingByScan,
   stopCharging,
   type ActiveChargingSession,
 } from '../../../api/charging';
+import type { PricingInfo } from '../../../utils/pricing';
 
 const mockNavigation = {
   goBack: jest.fn(),
@@ -34,6 +36,7 @@ jest.mock('@react-navigation/native', () => ({
 
 jest.mock('../../../api/charging', () => ({
   checkChargerStatus: jest.fn(),
+  chargingPreflight: jest.fn(),
   getActiveChargingSession: jest.fn(),
   getMeterValues: jest.fn(),
   startChargingByScan: jest.fn(),
@@ -76,6 +79,7 @@ jest.mock('../../../components/ui/Skeleton', () => {
 });
 
 const mockedCheck = checkChargerStatus as jest.MockedFunction<typeof checkChargerStatus>;
+const mockedPreflight = chargingPreflight as jest.MockedFunction<typeof chargingPreflight>;
 const mockedStartApi = startChargingByScan as jest.MockedFunction<typeof startChargingByScan>;
 const mockedActiveApi = getActiveChargingSession as jest.MockedFunction<typeof getActiveChargingSession>;
 const mockedMeterApi = getMeterValues as jest.MockedFunction<typeof getMeterValues>;
@@ -96,6 +100,18 @@ const activeSession: ActiveChargingSession = {
   meter_stop: null,
 };
 
+const paidPricing: PricingInfo = {
+  pricing_mode: 'paid',
+  pricing_source: 'site',
+  tariff_id: 'tariff-1',
+  base_price_per_kwh: '1200.00',
+  service_fee: '0.00',
+  currency: 'COP',
+  free_reason: null,
+  valid_from: '2026-08-05T12:00:00Z',
+  valid_until: null,
+};
+
 describe('ChargingProcessScreen start button', () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -107,7 +123,20 @@ describe('ChargingProcessScreen start button', () => {
       status: 'available',
       is_online: true,
       connector_status: 'Available',
-      charger_info: { site_name: 'QA Station', price_per_kwh: 1200 },
+      charger_info: { site_name: 'QA Station', price_per_kwh: 1200, pricing: paidPricing },
+    });
+    mockedPreflight.mockResolvedValue({
+      resource: { charge_point_id: 'internal-charge-point-id', site_id: 'site-1', connector_id: 1, pricing_mode: 'paid' },
+      financial_eligibility: {
+        operation: 'paid_charging_admission', status: 'eligible', reason_codes: [],
+        blocking_resources: [], allowed_actions: ['start_charging'],
+        evaluated_at: '2026-08-15T10:00:00Z', version: 1,
+      },
+      rail_eligibility: {
+        axis: 'paid_admission', status: 'open', matched_scope_refs: [],
+        evaluated_at: '2026-08-15T10:00:00Z', version: 1,
+      },
+      decision: 'allowed', allowed_actions: ['start_charging'],
     });
   });
 
@@ -127,8 +156,35 @@ describe('ChargingProcessScreen start button', () => {
     fireEvent.press(startButton);
     fireEvent.press(startButton);
 
-    expect(mockedStartApi).toHaveBeenCalledTimes(1);
-    expect(mockedStartApi).toHaveBeenCalledWith({ qrToken: 'public-qr-token' });
+    await waitFor(() => expect(mockedStartApi).toHaveBeenCalledTimes(1));
+    expect(mockedStartApi).toHaveBeenCalledWith({
+      qrToken: 'public-qr-token',
+      settlementMethod: 'wallet',
+    });
+    screen.unmount();
+  });
+
+  it('starts an explicitly free session without requiring wallet balance', async () => {
+    mockedCheck.mockResolvedValue({
+      charger_id: 'internal-charge-point-id',
+      ocpp_identity: 'CP-PUBLIC-001',
+      connector_id: 1,
+      status: 'available',
+      is_online: true,
+      connector_status: 'Available',
+      charger_info: {
+        site_name: 'QA Station',
+        price_per_kwh: 0,
+        pricing: { ...paidPricing, pricing_mode: 'free', base_price_per_kwh: '0.00' },
+      },
+    });
+    mockedStartApi.mockResolvedValue({ success: true, status: 'accepted' });
+    const store = configureStore({ reducer: { charging: chargingReducer, wallet: walletReducer } });
+    const screen = render(<Provider store={store}><ChargingProcessScreen /></Provider>);
+
+    expect(await screen.findByText('Gratis · 0 COP/kWh')).toBeTruthy();
+    fireEvent.press(screen.getByTestId('app-charging-start'));
+    await waitFor(() => expect(mockedStartApi).toHaveBeenCalledTimes(1));
     screen.unmount();
   });
 
@@ -160,6 +216,29 @@ describe('ChargingProcessScreen start button', () => {
     fireEvent.press(stopButton);
     await waitFor(() => expect(mockedStopApi).toHaveBeenCalledWith(activeSession.id));
     expect(mockedStartApi).not.toHaveBeenCalled();
+    screen.unmount();
+  });
+
+  it('shows a safe unpaid block with a deferred bills entry', async () => {
+    mockedStartApi.mockRejectedValue({
+      isAxiosError: true,
+      response: {
+        status: 402,
+        data: { detail: { code: 'UNPAID_CHARGES', message: 'Pay outstanding charging bills before starting another session.' } },
+      },
+    });
+    const store = configureStore({ reducer: { charging: chargingReducer, wallet: walletReducer } });
+    const screen = render(<Provider store={store}><ChargingProcessScreen /></Provider>);
+
+    const startButton = await waitFor(() => screen.getByTestId('app-charging-start'));
+    fireEvent.press(startButton);
+
+    await waitFor(() => expect(screen.getByTestId('app-charging-start-error')).toBeTruthy());
+    expect(screen.getByTestId('app-charging-view-unpaid')).toBeTruthy();
+    fireEvent.press(screen.getByTestId('app-charging-view-unpaid'));
+    expect(mockNavigation.navigate).toHaveBeenCalledWith('UnpaidBills');
+    fireEvent.press(screen.getByTestId('app-charging-start'));
+    expect(mockedStartApi).toHaveBeenCalledTimes(1);
     screen.unmount();
   });
 });

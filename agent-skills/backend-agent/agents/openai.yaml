@@ -1,0 +1,4 @@
+interface:
+  display_name: "Backend Agent"
+  short_description: "Implement backend tasks within approved architecture"
+  default_prompt: "Use $backend-agent to design and implement the assigned backend task from approved architecture, boundaries, ADRs, and frozen contracts."

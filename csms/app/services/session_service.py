@@ -19,6 +19,12 @@ from app.database.models import ChargingSession, EVSE, EVSEStatus, Order, MeterV
 from app.domain.charging_session import validate_transition
 from app.services.outbox_service import OutboxService
 from app.services.asset_lifecycle_service import require_charge_point_operational
+from app.services.pricing_service import PricingService
+from app.services.charging_payment_intent import (
+    PaymentIntentError,
+    find_start_requested_order,
+    write_intent,
+)
 
 logger = logging.getLogger("ocpp_csms")
 
@@ -33,6 +39,7 @@ class SessionService:
         id_tag: str,
         user_id: Optional[str] = None,
         meter_start: int = 0,
+        payment_intent_order: Optional[Order] = None,
     ) -> ChargingSession:
         charge_point = get_charge_point_by_reference(db, charge_point_id)
         if not charge_point:
@@ -61,6 +68,11 @@ class SessionService:
         # protocol handler must not create a new session/order after either
         # lifecycle boundary has closed new business.
         require_charge_point_operational(charge_point)
+        if charge_point.commissioning_status != "commissioned":
+            raise ValueError("CHARGER_NOT_COMMISSIONED")
+        pricing = PricingService.resolve(db, tenant_id, charge_point.id)
+        if not pricing.is_available:
+            raise ValueError("TARIFF_NOT_CONFIGURED")
 
         evse_status = db.query(EVSEStatus).filter(
             EVSEStatus.evse_id == evse.id
@@ -71,6 +83,37 @@ class SessionService:
             ).with_for_update().first()
             if active and active.status == "ongoing":
                 raise ValueError(f"EVSE already has an ongoing session: {active.id}")
+
+        if payment_intent_order is None and user_id:
+            app_user_id = parse_uuid(user_id)
+            if app_user_id is not None:
+                try:
+                    matched_intent = find_start_requested_order(
+                        db,
+                        app_user_id=app_user_id,
+                        charge_point_id=charge_point.id,
+                        operator_tenant_id=tenant_id,
+                        connector_id=evse_id,
+                    )
+                except PaymentIntentError as exc:
+                    raise ValueError("PAYMENT_INTENT_INVALID") from exc
+                if matched_intent is not None:
+                    payment_intent_order = matched_intent[0]
+
+        parsed_intent = None
+        if payment_intent_order is not None:
+            try:
+                from app.services.charging_payment_intent import parse_payment_intent
+
+                parsed_intent = parse_payment_intent(payment_intent_order.pre_authorization)
+                if parsed_intent is None or parsed_intent.status != "start_requested":
+                    raise PaymentIntentError("Payment intent is not startable")
+                if parsed_intent.app_user_id != parse_uuid(user_id):
+                    raise PaymentIntentError("Payment intent user mismatch")
+                if parsed_intent.connector_id != evse_id:
+                    raise PaymentIntentError("Payment intent connector mismatch")
+            except PaymentIntentError as exc:
+                raise ValueError("PAYMENT_INTENT_INVALID") from exc
 
         now = datetime.now(timezone.utc)
         session = ChargingSession(
@@ -88,18 +131,30 @@ class SessionService:
         db.add(session)
         db.flush()
 
-        order_id = generate_order_id(charge_point_id=charge_point.ocpp_identity, transaction_id=transaction_id)
-        db.add(Order(
-            id=order_id,
-            tenant_id=tenant_id,
-            session_id=session.id,
-            charge_point_id=charge_point.id,
-            user_id=user_id or id_tag,
-            app_user_id=parse_uuid(user_id),
-            id_tag=id_tag,
-            start_time=now,
-            status="ongoing",
-        ))
+        if payment_intent_order is not None:
+            payment_intent_order.session_id = session.id
+            payment_intent_order.start_time = now
+            payment_intent_order.status = "ongoing"
+            write_intent(
+                payment_intent_order,
+                parsed_intent.with_state("bound", session_id=session.id),
+            )
+            order_id = payment_intent_order.id
+        else:
+            order_id = generate_order_id(charge_point_id=charge_point.ocpp_identity, transaction_id=transaction_id)
+            db.add(Order(
+                id=order_id,
+                tenant_id=tenant_id,
+                session_id=session.id,
+                charge_point_id=charge_point.id,
+                user_id=user_id or id_tag,
+                app_user_id=parse_uuid(user_id),
+                id_tag=id_tag,
+                start_time=now,
+                status="ongoing",
+            ))
+        db.flush()
+        PricingService.create_session_snapshot(db, session, pricing)
 
         if evse_status:
             evse_status.status = "Charging"

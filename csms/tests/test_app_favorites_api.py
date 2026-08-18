@@ -29,7 +29,7 @@ def test_favorite_site_lifecycle_is_idempotent_and_personal(
     client,
     db_session,
     sample_site,
-    sample_charge_point,
+    sample_commercial_charge_point,
 ):
     first_headers, first_user = _headers(db_session, "favorite-one@example.test")
     second_headers, _ = _headers(db_session, "favorite-two@example.test")

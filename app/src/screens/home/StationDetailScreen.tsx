@@ -45,12 +45,13 @@ import {
   hasValidNavigationCoordinates,
   showExternalNavigationOptions,
 } from '../../utils/externalNavigation';
+import { formatPricing } from '../../utils/pricing';
 
 type StationDetailRouteProp = RouteProp<RootStackParamList, 'StationDetail'>;
 type StationDetailNavProp = StackNavigationProp<RootStackParamList, 'StationDetail'>;
 
 const StationDetailScreen = () => {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
 
   const dispatch = useAppDispatch();
   const navigation = useNavigation<StationDetailNavProp>();
@@ -238,11 +239,7 @@ const StationDetailScreen = () => {
                 </View>
                 <View style={styles.metricItem}>
                   <Text style={styles.metricLabel}>{t.station.price}</Text>
-                  <Text style={styles.metricValue}>
-                    {typeof site.price_per_kwh === 'number'
-                      ? `$${site.price_per_kwh.toFixed(2)}/kWh`
-                      : t.common.na}
-                  </Text>
+                  <Text style={styles.metricValue}>{formatPricing(site.pricing, t, locale) || t.common.na}</Text>
                 </View>
                 <View style={styles.metricItem}>
                   <Text style={styles.metricLabel}>{t.station.power}</Text>

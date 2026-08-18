@@ -22,6 +22,7 @@ import ChargerLifecyclePanel from '@/components/chargers/ChargerLifecyclePanel';
 import ChargingRecordsTable from '@/components/transactions/ChargingRecordsTable';
 import { formatDateTime } from '@/lib/localization';
 import { hasPermission, usePermissions } from '@/hooks/usePermissions';
+import PricingSummary from '@/components/pricing/PricingSummary';
 
 interface ChargerQrCode {
   connector_id: number;
@@ -411,12 +412,10 @@ export default function ChargerDetailPage() {
                   <p className="text-white mt-1">{charger.connector_type || t('common.notAvailable')}</p>
                 </div>
               </div>
-              {charger.price_per_kwh && (
-                <div>
-                  <label className="text-sm text-slate-400">{t('定价')}</label>
-                  <p className="text-white mt-1">¥{Number(charger.price_per_kwh).toFixed(2)}/kWh</p>
-                </div>
-              )}
+              <div className="md:col-span-2">
+                <label className="mb-2 block text-sm text-slate-400">{t('定价')}</label>
+                <PricingSummary pricing={charger.pricing} />
+              </div>
             </CardContent>
           </Card>
 

@@ -37,9 +37,10 @@ import {
   getSiteStatusColor,
   getSiteAvailability,
 } from '../../utils/siteStatus';
+import { formatPricing } from '../../utils/pricing';
 
 const HomeScreen = () => {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
 
   const dispatch = useAppDispatch();
   const { sites, loading, error } = useAppSelector((state) => state.site);
@@ -94,6 +95,7 @@ const HomeScreen = () => {
   };
 
   const renderStationCard = ({ item, index }: { item: SiteSummary; index: number }) => {
+    const priceLabel = formatPricing(item.pricing, t, locale);
     const available = item.available_connectors || 0;
     const total = item.total_connectors || 0;
     const isAvailable = available > 0;
@@ -202,8 +204,8 @@ const HomeScreen = () => {
             </Text>
           ) : <View />}
 
-          {!!item.price_per_kwh && (
-            <Text style={styles.priceText}>${item.price_per_kwh.toFixed(2)}/kWh</Text>
+          {priceLabel && (
+            <Text style={styles.priceText}>{priceLabel}</Text>
           )}
         </View>
       </Card>

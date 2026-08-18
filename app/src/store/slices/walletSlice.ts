@@ -3,7 +3,7 @@
  */
 
 import { createAsyncThunk, createSlice, PayloadAction } from '@reduxjs/toolkit';
-import type { WalletBalance, WalletTransaction } from '../../types';
+import type { CreateCheckoutSessionResponse, WalletBalance, WalletTransaction } from '../../types';
 import { getWalletBalance, getWalletTransactions, topUpWallet } from '../../api/wallet';
 import { handleApiError } from '../../api/client';
 import { getT } from '../../i18n';
@@ -101,9 +101,11 @@ const walletSlice = createSlice({
         state.toppingUp = true;
         state.error = null;
       })
-      .addCase(topUp.fulfilled, (state, action) => {
+      .addCase(topUp.fulfilled, (state, action: PayloadAction<CreateCheckoutSessionResponse>) => {
         state.toppingUp = false;
-        state.balance = action.payload;
+        // Checkout is only created here. Balance changes after the hosted
+        // Mercado Pago session is approved and the canonical result is read.
+        void action.payload;
       })
       .addCase(topUp.rejected, (state, action) => {
         state.toppingUp = false;

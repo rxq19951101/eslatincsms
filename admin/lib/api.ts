@@ -18,7 +18,14 @@ export class ApiRequestError extends Error {
     message: string,
     public readonly status: number,
     public readonly fieldErrors: Record<string, string> = {},
-    public readonly retryAfterMs?: number
+    public readonly retryAfterMs?: number,
+    public readonly canonical?: {
+      code?: string;
+      reference?: string | null;
+      retryable?: boolean;
+      retryAfterSeconds?: number | null;
+      currentVersion?: number;
+    },
   ) {
     super(message);
     this.name = 'ApiRequestError';
@@ -43,6 +50,16 @@ function parseRetryAfterMs(value: string | null): number {
   if (Number.isFinite(seconds)) return Math.max(1000, seconds * 1000);
   const date = Date.parse(value);
   return Number.isFinite(date) ? Math.max(1000, date - Date.now()) : 30000;
+}
+
+/** Accept application/json and registered structured-syntax +json media types. */
+function isJsonContentType(value: string | null): boolean {
+  if (!value) return false;
+  const mediaType = value.split(';', 1)[0]?.trim().toLowerCase() ?? '';
+  const separator = mediaType.indexOf('/');
+  if (separator <= 0 || separator === mediaType.length - 1) return false;
+  const subtype = mediaType.slice(separator + 1);
+  return subtype === 'json' || subtype.endsWith('+json');
 }
 
 function parseFieldErrors(details: unknown): Record<string, string> {
@@ -234,7 +251,16 @@ export async function apiRequest<T = unknown>(
         detail?: unknown;
         status_code?: number;
         message?: unknown;
-        error?: { message?: unknown; details?: unknown; detail?: unknown };
+        error?: {
+          code?: unknown;
+          message?: unknown;
+          reference?: unknown;
+          retryable?: unknown;
+          retry_after_seconds?: unknown;
+          current_version?: unknown;
+          details?: unknown;
+          detail?: unknown;
+        };
       };
       try {
         errorData = await response.json();
@@ -247,6 +273,21 @@ export async function apiRequest<T = unknown>(
 
       const envelopeMessage = typeof errorData.error?.message === 'string'
         ? errorData.error.message
+        : undefined;
+      const canonicalCode = typeof errorData.error?.code === 'string'
+        ? errorData.error.code
+        : undefined;
+      const canonicalReference = typeof errorData.error?.reference === 'string'
+        ? errorData.error.reference
+        : null;
+      const canonicalRetryable = typeof errorData.error?.retryable === 'boolean'
+        ? errorData.error.retryable
+        : undefined;
+      const canonicalRetryAfterSeconds = typeof errorData.error?.retry_after_seconds === 'number'
+        ? errorData.error.retry_after_seconds
+        : null;
+      const canonicalCurrentVersion = typeof errorData.error?.current_version === 'number'
+        ? errorData.error.current_version
         : undefined;
       const topLevelMessage = typeof errorData.message === 'string' ? errorData.message : undefined;
       const legacyDetail = typeof errorData.detail === 'string' ? errorData.detail : undefined;
@@ -265,13 +306,20 @@ export async function apiRequest<T = unknown>(
         envelopeMessage || topLevelMessage || legacyDetail || nestedDetail || fallback,
         response.status,
         parseFieldErrors(validationDetails),
-        retryAfterMs
+        retryAfterMs,
+        {
+          code: canonicalCode,
+          reference: canonicalReference,
+          retryable: canonicalRetryable,
+          retryAfterSeconds: canonicalRetryAfterSeconds,
+          currentVersion: canonicalCurrentVersion,
+        },
       );
     }
 
     // 解析响应
     const contentType = response.headers.get('content-type');
-    if (contentType?.includes('application/json')) {
+    if (isJsonContentType(contentType)) {
       return (await response.json()) as T;
     } else {
       return (await response.text()) as T;

@@ -166,7 +166,13 @@ class TestOCPPMessageHandler:
         assert response == {}
     
     @pytest.mark.asyncio
-    async def test_handle_start_transaction(self, handler: OCPPMessageHandler, db_session, sample_charge_point, sample_evse):
+    async def test_handle_start_transaction(
+        self,
+        handler: OCPPMessageHandler,
+        db_session,
+        sample_commercial_charge_point,
+        sample_evse,
+    ):
         """测试处理StartTransaction"""
         payload = {
             "connectorId": 1,
@@ -176,22 +182,55 @@ class TestOCPPMessageHandler:
         }
         
         response = await handler.handle_start_transaction(
-            charge_point_id=sample_charge_point.ocpp_identity,
+            charge_point_id=sample_commercial_charge_point.ocpp_identity,
             payload=payload,
             evse_id=1,
             db=db_session
         )
         
         assert "transactionId" in response
-        assert response["idTagInfo"]["status"] in ["Accepted", "Blocked", "Invalid"]
+        assert response["idTagInfo"]["status"] == "Accepted"
         
         # 检查是否创建了ChargingSession
         from app.database.models import ChargingSession
         session = db_session.query(ChargingSession).filter(
-            ChargingSession.charge_point_id == sample_charge_point.id,
+            ChargingSession.charge_point_id == sample_commercial_charge_point.id,
             ChargingSession.transaction_id == response["transactionId"]
         ).first()
         assert session is not None
+
+    @pytest.mark.asyncio
+    async def test_handle_start_transaction_rejects_uncommissioned_charger(
+        self,
+        handler: OCPPMessageHandler,
+        db_session,
+        sample_charge_point,
+        sample_evse,
+        caplog,
+    ):
+        """未验收充电桩必须因 CHARGER_NOT_COMMISSIONED 被拒绝。"""
+        payload = {
+            "connectorId": 1,
+            "idTag": "TEST_USER_UNCOMMISSIONED",
+            "meterStart": 0,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+
+        response = await handler.handle_start_transaction(
+            charge_point_id=sample_charge_point.ocpp_identity,
+            payload=payload,
+            evse_id=1,
+            db=db_session,
+        )
+
+        assert response["idTagInfo"]["status"] == "Rejected"
+        assert response["_outcome"] == "session_rejected"
+        assert "CHARGER_NOT_COMMISSIONED" in caplog.text
+
+        from app.database.models import ChargingSession
+        assert db_session.query(ChargingSession).filter(
+            ChargingSession.charge_point_id == sample_charge_point.id,
+        ).count() == 0
     
     @pytest.mark.asyncio
     async def test_handle_stop_transaction(self, handler: OCPPMessageHandler, db_session, sample_charge_point):

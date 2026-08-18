@@ -72,6 +72,33 @@ describe('API Client', () => {
         })
       );
     });
+
+    it('parses the frozen PAY-MP-002 vendor +json Audit projection as JSON', async () => {
+      setTokens('test-access-token', 'test-refresh-token');
+      const auditPage = {
+        items: [{
+          event_id: 'audit-1',
+          actor: null,
+          resource: { type: 'chargeback_case', id: 'case-1' },
+          action: 'view',
+          result: 'success',
+          scope: { type: 'platform', ref: 'platform:eslatin' },
+          reason_code: null,
+          safe_metadata: { source: 'admin' },
+          occurred_at: '2026-08-16T12:00:00Z',
+        }],
+        page: { next_cursor: null, has_more: false },
+      };
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        headers: new Headers({ 'content-type': 'Application/Vnd.Eslatin.Pay-Mp-002.V1+Json; charset=utf-8' }),
+        json: async () => auditPage,
+        text: async () => JSON.stringify(auditPage),
+      });
+
+      await expect(apiGet('/api/v1/admin/audit-events')).resolves.toEqual(auditPage);
+    });
   });
 
   describe('apiPost', () => {

@@ -180,6 +180,11 @@ def expected_audience_for_path(path: str) -> Optional[str]:
 
 def is_public_auth_path(path: str) -> bool:
     """Exact public API allowlist; webhook handlers enforce provider signatures."""
+    if path.startswith("/api/v1/app/payments/checkout/"):
+        # The signed checkout token is the authentication boundary for the
+        # hosted page and its confirm callback; no App JWT is present in the
+        # browser handoff.
+        return True
     public_paths = {
         "/api/v1/admin/auth/login",
         "/api/v1/admin/auth/refresh",
@@ -191,11 +196,63 @@ def is_public_auth_path(path: str) -> bool:
         "/api/v1/app/auth/reset-password",
         "/api/v1/app/auth/reset-password/open",
         "/api/v1/app/auth/confirm-reset-password",
-        "/api/v1/app/wallet/payments/webhook",
-        "/api/v1/app/wallet/payments/webhook-mp",
-        "/api/v1/app/wallet/payments/sim-webhook",
+        "/api/v1/app/payments/webhooks/mercadopago",
+        "/api/v1/app/payments/webhooks/sim",
     }
     return path in public_paths
+
+
+def is_checkout_session_api_path(path: str) -> bool:
+    """Match the frozen checkout API and signed BE-2C browser handoff."""
+    prefix = "/api/v1/app/payments/checkout-sessions"
+    return (
+        path == prefix
+        or path.startswith(f"{prefix}/")
+        or path.startswith("/api/v1/app/payments/checkout/")
+    )
+
+
+def authentication_error_response(
+    request: Request,
+    *,
+    status_code: int,
+    message: object,
+    headers: Optional[dict[str, str]] = None,
+) -> JSONResponse:
+    """Preserve legacy auth errors except for the frozen checkout API."""
+    if is_checkout_session_api_path(request.url.path):
+        has_credentials = bool(request.headers.get("Authorization"))
+        return JSONResponse(
+            status_code=status_code,
+            content={
+                "detail": {
+                    "code": (
+                        "AUTHENTICATION_INVALID"
+                        if has_credentials
+                        else "AUTHENTICATION_REQUIRED"
+                    ),
+                    "message": (
+                        "Authentication is invalid."
+                        if has_credentials
+                        else "Authentication is required."
+                    ),
+                }
+            },
+            headers=headers,
+        )
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "success": False,
+            "error": {
+                "code": "AUTHENTICATION_ERROR",
+                "message": message,
+                "details": [],
+                "status_code": status_code,
+            },
+        },
+        headers=headers,
+    )
 
 
 async def tenant_middleware(request: Request, call_next):
@@ -228,25 +285,28 @@ async def tenant_middleware(request: Request, call_next):
                 current_user = load_authenticated_user(token_payload)
                 request.state.current_user = current_user
         except HTTPException as exc:
-            return JSONResponse(
+            return authentication_error_response(
+                request,
                 status_code=exc.status_code,
-                content={"success": False, "error": {"code": "AUTHENTICATION_ERROR", "message": exc.detail, "details": [], "status_code": exc.status_code}},
+                message=exc.detail,
                 headers=exc.headers,
             )
         except Exception:
             if request.headers.get("Authorization"):
-                return JSONResponse(
+                return authentication_error_response(
+                    request,
                     status_code=401,
-                    content={"success": False, "error": {"code": "AUTHENTICATION_ERROR", "message": "Invalid authentication token", "details": [], "status_code": 401}},
+                    message="Invalid authentication token",
                 )
             logger.debug("No authenticated user in tenant middleware")
     
     # 所有 API v1 路由默认要求认证，只有显式白名单的认证接口公开。
     if not current_user:
         if request.url.path.startswith("/api/v1") and not is_public_auth_path(request.url.path):
-            return JSONResponse(
+            return authentication_error_response(
+                request,
                 status_code=401,
-                content={"success": False, "error": {"code": "AUTHENTICATION_ERROR", "message": "Authentication required", "details": [], "status_code": 401}},
+                message="Authentication required",
                 headers={"WWW-Authenticate": "Bearer"},
             )
         access_scope_token = database_access_scope_context.set("authentication")

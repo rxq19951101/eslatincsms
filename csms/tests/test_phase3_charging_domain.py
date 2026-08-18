@@ -13,7 +13,7 @@ def test_charging_session_state_machine_rejects_reopen():
 
 @pytest.mark.asyncio
 async def test_replayed_ocpp_messages_are_idempotent(
-    db_session, sample_charge_point, sample_evse, sample_evse_status
+    db_session, sample_commercial_charge_point, sample_evse, sample_evse_status
 ):
     handler = OCPPMessageHandler()
     start_payload = {
@@ -22,11 +22,11 @@ async def test_replayed_ocpp_messages_are_idempotent(
         "meterStart": 100,
     }
     first_start = await handler.handle_message(
-        sample_charge_point.ocpp_identity, "StartTransaction", start_payload,
+        sample_commercial_charge_point.ocpp_identity, "StartTransaction", start_payload,
         evse_id=1, message_unique_id="phase3-start-1",
     )
     second_start = await handler.handle_message(
-        sample_charge_point.ocpp_identity, "StartTransaction", start_payload,
+        sample_commercial_charge_point.ocpp_identity, "StartTransaction", start_payload,
         evse_id=1, message_unique_id="phase3-start-1",
     )
     assert first_start["idTagInfo"]["status"] == "Accepted"
@@ -48,15 +48,15 @@ async def test_replayed_ocpp_messages_are_idempotent(
             }],
         }],
     }
-    await handler.handle_message(sample_charge_point.ocpp_identity, "MeterValues", meter_payload, message_unique_id="phase3-meter-1")
-    await handler.handle_message(sample_charge_point.ocpp_identity, "MeterValues", meter_payload, message_unique_id="phase3-meter-1")
+    await handler.handle_message(sample_commercial_charge_point.ocpp_identity, "MeterValues", meter_payload, message_unique_id="phase3-meter-1")
+    await handler.handle_message(sample_commercial_charge_point.ocpp_identity, "MeterValues", meter_payload, message_unique_id="phase3-meter-1")
     session = db_session.query(ChargingSession).filter_by(transaction_id=transaction_id).one()
     assert db_session.query(MeterValue).filter_by(session_id=session.id).count() == 1
     assert db_session.query(OCPPMessageEvent).filter_by(action="MeterValues").count() == 0
 
     stop_payload = {"transactionId": transaction_id, "meterStop": 120, "reason": "Local"}
-    await handler.handle_message(sample_charge_point.ocpp_identity, "StopTransaction", stop_payload, message_unique_id="phase3-stop-1")
-    await handler.handle_message(sample_charge_point.ocpp_identity, "StopTransaction", stop_payload, message_unique_id="phase3-stop-1")
+    await handler.handle_message(sample_commercial_charge_point.ocpp_identity, "StopTransaction", stop_payload, message_unique_id="phase3-stop-1")
+    await handler.handle_message(sample_commercial_charge_point.ocpp_identity, "StopTransaction", stop_payload, message_unique_id="phase3-stop-1")
     db_session.refresh(session)
     assert session.status == "completed"
     assert session.payment_status == "unpaid"

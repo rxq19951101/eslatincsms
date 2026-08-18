@@ -51,6 +51,17 @@ vi.mock('swr', () => ({
           is_configured: true,
           has_location: true,
           has_pricing: true,
+          pricing: {
+            pricing_mode: 'free',
+            pricing_source: 'charger',
+            tariff_id: 'tariff-charger-1',
+            base_price_per_kwh: '0.00',
+            service_fee: '0.00',
+            currency: 'COP',
+            free_reason: 'Fleet launch promotion',
+            valid_from: '2026-08-01T00:00:00Z',
+            valid_until: '2099-12-31T23:59:00Z',
+          },
           evses: [{
             evse_id: 2,
             connector_type: 'Type2',
@@ -112,6 +123,17 @@ describe('charger detail remote stop', () => {
     await user.click(screen.getByRole('tab', { name: '调试与投运' }));
     expect(screen.getByText('OCPP 技术身份')).toBeInTheDocument();
     expect(screen.getByText('CO.BOGOTA:CP-01')).toBeInTheDocument();
+  });
+
+  it('shows free charger pricing metadata in COP and never uses the yen symbol', () => {
+    const { container } = render(<ChargerDetailPage />);
+
+    const summary = screen.getByTestId('pricing-summary');
+    expect(summary).toHaveTextContent('免费');
+    expect(summary).toHaveTextContent('充电桩覆盖');
+    expect(summary).toHaveTextContent('Fleet launch promotion');
+    expect(summary).toHaveTextContent('COP');
+    expect(container).not.toHaveTextContent('¥');
   });
 
   it('uses the localized connector fallback and submits only the session ID', async () => {

@@ -3,11 +3,12 @@
 """
 import pytest
 import uuid
+from datetime import datetime, timezone
 from decimal import Decimal
 from fastapi.testclient import TestClient
 
 from app.core.auth import create_access_token, get_password_hash
-from app.database.models import AppUser, ChargePoint, Site, Tenant
+from app.database.models import AppUser, ChargePoint, Site, Tariff, Tenant
 
 
 class TestChargersAPI:
@@ -59,6 +60,7 @@ class TestChargersAPI:
         client: TestClient,
         db_session,
         sample_charge_point,
+        sample_commercial_charge_point,
     ):
         app_user = AppUser(
             id=uuid.uuid4(),
@@ -99,6 +101,7 @@ class TestChargersAPI:
         client: TestClient,
         db_session,
         sample_charge_point,
+        sample_commercial_charge_point,
         sample_tenant,
     ):
         other_tenant = Tenant(name="App public other tenant", status="active")
@@ -119,6 +122,7 @@ class TestChargersAPI:
             site_id=other_site.id,
             ocpp_identity="CP-APP-PUBLIC-OTHER",
             is_active=True,
+            commissioning_status="commissioned",
         )
         app_user = AppUser(
             email="app-cross-tenant@example.test",
@@ -127,7 +131,16 @@ class TestChargersAPI:
             balance=Decimal("0.00"),
             status="active",
         )
-        db_session.add_all([other_charge_point, app_user])
+        other_tariff = Tariff(
+            tenant_id=other_tenant.id,
+            site_id=other_site.id,
+            name="Other public paid tariff",
+            base_price_per_kwh=Decimal("2700.00"),
+            service_fee=Decimal("0.00"),
+            valid_from=datetime.now(timezone.utc),
+            is_active=True,
+        )
+        db_session.add_all([other_charge_point, other_tariff, app_user])
         db_session.commit()
 
         token = create_access_token({

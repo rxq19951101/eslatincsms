@@ -1,5 +1,6 @@
 import apiClient from './client';
 import { API_ENDPOINTS } from '../constants/config';
+import type { PricingInfo } from '../utils/pricing';
 
 export interface SiteSummary {
   id: string;
@@ -16,6 +17,7 @@ export interface SiteSummary {
   charging_options: SiteChargingOption[];
   max_power_kw?: number | null;
   price_per_kwh?: number | null;
+  pricing?: PricingInfo;
   has_pricing: boolean;
   distance_km?: number;
   is_favorite: boolean;

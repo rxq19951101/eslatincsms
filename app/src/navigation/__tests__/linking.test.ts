@@ -23,4 +23,34 @@ describe('App password recovery deep linking', () => {
       },
     ]);
   });
+
+  it('routes payment returns using only the opaque checkout reference and safe status', () => {
+    const state = linking.getStateFromPath?.(
+      'payment-return?checkout_session_id=checkout-1&status=processing&token=ignored',
+      linking.config,
+    );
+
+    expect(state?.routes).toEqual([
+      {
+        name: 'PaymentResult',
+        path: 'payment-return',
+        params: { checkout_session_id: 'checkout-1', status: 'processing' },
+      },
+    ]);
+  });
+
+  it('routes localhost web payment returns to the same result screen', () => {
+    const state = linking.getStateFromPath?.(
+      'payment-return?checkout_session_id=checkout-web-1&status=approved',
+      linking.config,
+    );
+
+    expect(state?.routes).toEqual([
+      {
+        name: 'PaymentResult',
+        path: 'payment-return',
+        params: { checkout_session_id: 'checkout-web-1', status: 'approved' },
+      },
+    ]);
+  });
 });

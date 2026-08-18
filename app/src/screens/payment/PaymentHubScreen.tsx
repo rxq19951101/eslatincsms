@@ -16,7 +16,6 @@ import Card from '../../components/ui/Card';
 import ScreenHeader from '../../components/ui/ScreenHeader';
 import Screen from '../../components/ui/Screen';
 import ListItem from '../../components/ui/ListItem';
-import { createWompiPayment } from '../../api/payments';
 import { useI18n } from '../../i18n';
 
 type Nav = StackNavigationProp<RootStackParamList, 'PaymentHub'>;
@@ -41,19 +40,6 @@ const PaymentHubScreen = () => {
   );
 
   const bal = balance?.balance ?? 0;
-
-  const topUpWompi = async (amount: number) => {
-    try {
-      const res = await createWompiPayment({ amount, type: 'top_up', currency: 'COP' });
-      navigation.navigate('WompiPayment', {
-        orderId: res.order_id,
-        checkoutUrl: res.checkout_url,
-        amount,
-      });
-    } catch (e: any) {
-      alert(e?.message || t.payment.createFailed);
-    }
-  };
 
   return (
     <Screen>
@@ -101,20 +87,6 @@ const PaymentHubScreen = () => {
               ))}
             </View>
 
-            <Text style={styles.sectionTitle}>{t.payment.topUpWompi}</Text>
-            <View style={styles.chips}>
-              {TOP_UP_AMOUNTS.map((amt) => (
-                <Button
-                  key={`wompi-${amt}`}
-                  title={`Wompi ${formatMoneyCOP(amt, { decimals: 0 })}`}
-                  onPress={() => topUpWompi(amt)}
-                  variant="secondary"
-                  size="small"
-                  style={styles.chip}
-                />
-              ))}
-            </View>
-
             <View style={styles.demoBanner}>
               <Text style={styles.demoText}>{t.payment.demoNote}</Text>
             </View>
@@ -124,7 +96,6 @@ const PaymentHubScreen = () => {
         )}
 
         <View style={styles.links}>
-          <ListItem label={t.wallet.unpaidTitle} onPress={() => navigation.navigate('UnpaidBills')} />
           <ListItem label={t.payment.viewWalletTransactions} onPress={() => navigation.navigate('MainTabs', { screen: 'MyWallet' })} />
         </View>
       </ScrollView>

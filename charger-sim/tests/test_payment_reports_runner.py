@@ -84,7 +84,7 @@ class FakePaymentTests(unittest.IsolatedAsyncioTestCase):
             {
                 "environment": "test",
                 "base_url": "http://localhost:9000",
-                "webhook_path": "/api/v1/app/wallet/payments/sim-webhook",
+                "webhook_path": "/api/v1/app/payments/webhooks/sim",
                 "webhook_secret": secret,
             },
             "run-1",
@@ -119,7 +119,7 @@ class FakePaymentTests(unittest.IsolatedAsyncioTestCase):
             {
                 "environment": "test",
                 "base_url": "http://localhost:9000",
-                "webhook_path": "/api/v1/app/wallet/payments/sim-webhook",
+                "webhook_path": "/api/v1/app/payments/webhooks/sim",
                 "webhook_secret": "unit-secret",
             },
             "run-1",
@@ -143,7 +143,7 @@ class FakePaymentTests(unittest.IsolatedAsyncioTestCase):
             {
                 "environment": "development",
                 "base_url": "http://localhost:9000",
-                "webhook_path": "/api/v1/app/wallet/payments/sim-webhook",
+                "webhook_path": "/api/v1/app/payments/webhooks/sim",
             },
             "run-2",
         )

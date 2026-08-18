@@ -4,6 +4,89 @@
 
 import apiClient from './client';
 import { API_ENDPOINTS } from '../constants/config';
+import type { PricingInfo } from '../utils/pricing';
+import type { CreateCheckoutSessionRequest } from '../types';
+
+export type ChargingSettlementMethod = 'wallet' | 'direct_card';
+
+export interface ChargingPreflightResult {
+  resource: {
+    charge_point_id: string;
+    site_id: string;
+    connector_id: number;
+    pricing_mode: 'paid' | 'free' | 'unavailable';
+  };
+  financial_eligibility: {
+    operation: string;
+    status: 'eligible' | 'blocked' | 'recheck_required' | 'unknown';
+    reason_codes: string[];
+    blocking_resources: Array<Record<string, string>>;
+    allowed_actions: string[];
+    evaluated_at: string;
+    version: number;
+  };
+  rail_eligibility: {
+    axis: string;
+    status: 'open' | 'closed' | 'not_applicable' | 'unknown';
+    matched_scope_refs: string[];
+    evaluated_at: string;
+    version: number;
+  };
+  decision: 'allowed' | 'blocked';
+  allowed_actions: string[];
+}
+
+export async function chargingPreflight(params: {
+  qrToken: string;
+  settlementMethod: ChargingSettlementMethod;
+}): Promise<ChargingPreflightResult> {
+  const res = await apiClient.post<ChargingPreflightResult>('/api/v1/app/charging/preflight', {
+    qr_token: params.qrToken,
+    settlement_method: params.settlementMethod,
+  });
+  return res.data;
+}
+
+export function buildChargingDirectCheckoutRequest(params: {
+  chargePointId: string;
+  connectorId: number;
+  savedPaymentMethodId?: string | null;
+}): Omit<CreateCheckoutSessionRequest, 'idempotency_key' | 'return_url'> {
+  const hasSavedPaymentMethod = Boolean(params.savedPaymentMethodId);
+  return {
+    purpose: 'charging_direct',
+    payment_method_mode: hasSavedPaymentMethod ? 'saved_card' : 'new_card',
+    saved_payment_method_id: params.savedPaymentMethodId ?? null,
+    save_card: false,
+    charge_point_id: params.chargePointId,
+    connector_id: params.connectorId,
+  };
+}
+
+const MERCADO_PAGO_ACTION_HOSTS = new Set([
+  'mercadopago.com',
+  'mercadopago.com.co',
+  'mercadopago.com.ar',
+  'mercadopago.com.br',
+  'mercadopago.com.mx',
+  'mercadopago.com.pe',
+  'mercadopago.com.uy',
+  'mercadopago.cl',
+  'mercadopago.com.ec',
+  'mercadopago.com.ve',
+]);
+
+function isAllowedChargingActionUrl(value: unknown): value is string {
+  if (typeof value !== 'string' || !value.trim()) return false;
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === 'https:' && [...MERCADO_PAGO_ACTION_HOSTS].some(
+      (host) => parsed.hostname === host || parsed.hostname.endsWith(`.${host}`),
+    );
+  } catch {
+    return false;
+  }
+}
 
 export interface RemoteResponse {
   success: boolean;
@@ -48,16 +131,27 @@ export interface ChargerStatusCheck {
     model?: string;
     site_name?: string;
     site_address?: string;
-    price_per_kwh?: number;
+    price_per_kwh?: number | null;
+    pricing?: PricingInfo;
   };
 }
 
 export async function startChargingByScan(params: {
   qrToken: string;
+  settlementMethod?: ChargingSettlementMethod;
+  paymentIntentId?: string | null;
 }): Promise<RemoteResponse> {
-  const res = await apiClient.post<RemoteResponse>(API_ENDPOINTS.CHARGING.START, {
+  const payload: {
+    qr_token: string;
+    settlement_method?: ChargingSettlementMethod;
+    payment_intent_id?: string;
+  } = {
     qr_token: params.qrToken,
-  });
+  };
+  if (params.settlementMethod) payload.settlement_method = params.settlementMethod;
+  if (params.paymentIntentId) payload.payment_intent_id = params.paymentIntentId;
+
+  const res = await apiClient.post<RemoteResponse>(API_ENDPOINTS.CHARGING.START, payload);
   return {
     ...res.data,
     session: normalizeActiveSession(res.data.session),
@@ -126,18 +220,53 @@ export async function stopCharging(sessionId: string): Promise<RemoteResponse> {
 
 export interface SettleResult {
   already_settled: boolean;
-  balance: number;
+  balance: string | null;
   currency: string;
-  charged_amount: number;
-  energy_kwh?: number;
-  price_per_kwh?: number;
+  charged_amount: string;
+  energy_kwh: string;
+  price_per_kwh: string;
+  invoice_id?: string | null;
+  settlement_method: 'wallet' | 'direct_card' | 'free';
+  payment_status: 'processing' | 'action_required' | 'paid' | 'unpaid';
+  payment_order_id?: string | null;
+  next_action?: { type: 'open_url'; url: string } | null;
 }
 
 export async function settleCharging(sessionId: string): Promise<SettleResult> {
-  const res = await apiClient.post<SettleResult>(API_ENDPOINTS.CHARGING.SETTLE, {
+  const res = await apiClient.post<Partial<SettleResult> & {
+    charged_amount?: string | number;
+    balance?: string | number | null;
+    energy_kwh?: string | number;
+    price_per_kwh?: string | number;
+    next_action?: { type?: string; url?: string } | null;
+  }>(API_ENDPOINTS.CHARGING.SETTLE, {
     session_id: sessionId,
   });
-  return res.data;
+  const data = res.data;
+  const nextAction = data.next_action?.type === 'open_url' &&
+    isAllowedChargingActionUrl(data.next_action.url)
+    ? { type: 'open_url' as const, url: data.next_action.url }
+    : null;
+
+  return {
+    already_settled: Boolean(data.already_settled),
+    balance: data.balance === null || data.balance === undefined ? null : String(data.balance),
+    currency: data.currency || 'COP',
+    charged_amount: String(data.charged_amount ?? '0.00'),
+    energy_kwh: String(data.energy_kwh ?? '0'),
+    price_per_kwh: String(data.price_per_kwh ?? '0.00'),
+    invoice_id: data.invoice_id ?? null,
+    settlement_method: data.settlement_method === 'direct_card' || data.settlement_method === 'free'
+      ? data.settlement_method
+      : 'wallet',
+    payment_status: data.payment_status === 'processing' ||
+      data.payment_status === 'action_required' ||
+      data.payment_status === 'unpaid'
+      ? data.payment_status
+      : 'paid',
+    payment_order_id: data.payment_order_id ?? null,
+    next_action: nextAction,
+  };
 }
 
 export interface MeterValuePoint {

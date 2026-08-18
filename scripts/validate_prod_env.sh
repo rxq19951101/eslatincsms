@@ -105,11 +105,13 @@ for key in \
     PUBLIC_HTTP_PORT PUBLIC_HTTPS_PORT DB_USER DB_PASSWORD DB_NAME DATABASE_URL \
     REDIS_PASSWORD REDIS_URL SECRET_KEY ENCRYPTION_KEY ENCRYPTION_SALT \
     CORS_ALLOW_ORIGINS PUBLIC_API_BASE_URL NEXT_PUBLIC_CSMS_HTTP \
-    NEXT_PUBLIC_API_BASE_URL SMTP_HOST SMTP_USER SMTP_PASSWORD SMTP_FROM; do
+    NEXT_PUBLIC_API_BASE_URL SMTP_HOST SMTP_USER SMTP_PASSWORD SMTP_FROM \
+    PAYMENT_RAILS_ENABLED; do
     require_value "$key"
 done
 
 [ "$(value_for ENVIRONMENT)" = "production" ] || fail "ENVIRONMENT must be production"
+[ "$(value_for PAYMENT_RAILS_ENABLED)" = "false" ] || fail "PAYMENT_RAILS_ENABLED must remain false until human release approval"
 require_public_hostname ADMIN_DOMAIN
 require_public_hostname API_DOMAIN
 admin_domain="$(value_for ADMIN_DOMAIN)"

@@ -11,7 +11,7 @@ import hashlib
 import os
 import re
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
@@ -22,7 +22,6 @@ from app.core.auth import get_current_user
 from app.database.base import get_db, SuperSessionLocal
 from app.database.models import (
     AppUser,
-    AppUserPaymentMethod,
     AppWalletTransaction,
     ChargePoint,
     ChargingSession,
@@ -31,6 +30,7 @@ from app.database.models import (
     Tenant,
 )
 from app.core.id_generator import generate_order_id
+from app.services.billing_service import BillingService
 
 logger = get_logger("ocpp_csms")
 
@@ -97,7 +97,7 @@ def get_app_wallet_db():
 
 
 class TopUpRequest(BaseModel):
-    amount: Decimal = Field(..., gt=0, description="充值金额（正数）")
+    amount: Decimal = Field(..., gt=0, max_digits=12, decimal_places=2, description="充值金额（正数）")
     idempotency_key: str = Field(..., min_length=8, description="充值幂等键")
 
 
@@ -139,54 +139,6 @@ def get_wallet_balance(
             current_user=current_user_obj
         )
         raise
-
-
-class SavedPaymentMethodItem(BaseModel):
-    id: str
-    provider: str
-    last_four: Optional[str] = None
-    payment_method_brand: Optional[str] = None
-    is_default: bool = False
-
-
-class SavedPaymentMethodsResponse(BaseModel):
-    items: List[SavedPaymentMethodItem]
-    hint: str = (
-        "云端绑卡（Mercado Pago Customers / Checkout Pro）接入后可在此列出；"
-        "Webhook 处理支付成功后可同步 card 信息至本表。"
-    )
-
-
-@router.get(
-    "/saved-payment-methods",
-    response_model=SavedPaymentMethodsResponse,
-    summary="已保存支付方式（占位，供 MP 绑卡后回填）",
-)
-def list_saved_payment_methods(
-    current_user_obj: AppUser = Depends(get_current_app_user),
-) -> SavedPaymentMethodsResponse:
-    """查询当前用户已保存卡。表结构已就绪，业务写入待 MP Customers + Webhook 扩展。"""
-    db = SuperSessionLocal()
-    try:
-        rows = (
-            db.query(AppUserPaymentMethod)
-            .filter(AppUserPaymentMethod.app_user_id == current_user_obj.id)
-            .order_by(AppUserPaymentMethod.is_default.desc(), AppUserPaymentMethod.created_at.desc())
-            .all()
-        )
-        items = [
-            SavedPaymentMethodItem(
-                id=str(r.id),
-                provider=r.provider,
-                last_four=r.last_four,
-                payment_method_brand=r.payment_method_brand,
-                is_default=bool(r.is_default),
-            )
-            for r in rows
-        ]
-        return SavedPaymentMethodsResponse(items=items)
-    finally:
-        db.close()
 
 
 @router.get("/transactions", response_model=List[WalletTransactionResponse], summary="获取钱包交易记录（终端用户）")
@@ -429,7 +381,7 @@ def get_unpaid_charges(
             unpaid_sessions = (
                 sdb.query(ChargingSession)
                 .filter(
-                    ChargingSession.user_id == user_id,
+                    ChargingSession.app_user_id == current_user_obj.id,
                     ChargingSession.payment_status == "unpaid",
                 )
                 .order_by(ChargingSession.created_at.desc())
@@ -438,13 +390,24 @@ def get_unpaid_charges(
 
             result = []
             for session in unpaid_sessions:
-                amount = Decimal("0")
+                invoice = (
+                    sdb.query(Invoice)
+                    .filter(
+                        Invoice.session_id == session.id,
+                        Invoice.tenant_id == session.tenant_id,
+                        Invoice.status == "pending",
+                    )
+                    .first()
+                )
+                if invoice is None or Decimal(str(invoice.total_amount)) <= Decimal("0.00"):
+                    continue
+                amount = Decimal(str(invoice.total_amount))
 
                 result.append(
                     UnpaidChargeResponse(
                         session_id=str(session.id),
                         charge_point_id=str(session.charge_point_id),
-                        amount=float(amount),
+                        amount=amount,
                         currency="COP",
                         created_at=session.created_at.isoformat() if session.created_at else "",
                         payment_order_id=str(session.payment_order_id) if session.payment_order_id else None,
@@ -491,8 +454,9 @@ class PayUnpaidChargeRequest(BaseModel):
 def pay_unpaid_charge(
     req: PayUnpaidChargeRequest,
     current_user_obj: AppUser = Depends(get_current_app_user),
+    idempotency_key: str = Header(..., alias="Idempotency-Key"),
 ):
-    """补缴欠费：为未支付的充电会话创建新的 Wompi 支付订单"""
+    """Use the wallet to atomically settle the current Invoice fact."""
     try:
         log_api_request(
             method="POST",
@@ -502,57 +466,35 @@ def pay_unpaid_charge(
             params={"session_id": req.session_id}
         )
         
-        from app.database.models import ChargingSession
-        from app.api.v1.app.payments import CreatePaymentRequest
-        
         sdb = SuperSessionLocal()
         try:
-            user_id = str(current_user_obj.id)
-
-            session = (
-                sdb.query(ChargingSession)
-                .filter(
-                    ChargingSession.id == req.session_id,
-                    ChargingSession.user_id == user_id,
-                    ChargingSession.payment_status == "unpaid",
+            result = BillingService.pay_unpaid_charge(
+                sdb,
+                app_user_id=current_user_obj.id,
+                session_id=req.session_id,
+                idempotency_key=idempotency_key,
+            )
+            if result.payment_status == "unpaid":
+                raise HTTPException(
+                    status_code=402,
+                    detail={
+                        "code": "INSUFFICIENT_WALLET_BALANCE",
+                        "message": "Wallet balance is insufficient to pay this charging invoice.",
+                    },
                 )
-                .first()
-            )
-
-            if not session:
-                log_api_error(
-                    method="POST",
-                    path="/api/v1/app/wallet/pay-unpaid-charge",
-                    operation="pay_unpaid_charge",
-                    error=HTTPException(status_code=404, detail="Unpaid charging session not found"),
-                    current_user=current_user_obj,
-                    params={"session_id": req.session_id}
-                )
-                raise HTTPException(status_code=404, detail="Unpaid charging session not found")
-
-            amount = Decimal("10000")
-
-            payment_req = CreatePaymentRequest(
-                type="charging",
-                amount=float(amount),
-                currency="COP",
-                metadata={"session_id": str(session.id)},
-            )
-
-            log_api_response(
-                method="POST",
-                path="/api/v1/app/wallet/pay-unpaid-charge",
-                operation="pay_unpaid_charge",
-                result="redirect_required",
-                current_user=current_user_obj,
-                details={"session_id": session.id, "estimated_amount": float(amount)}
-            )
-
             return {
-                "message": "Please use /api/v1/app/wallet/payments/create to create payment order",
-                "session_id": str(session.id),
-                "estimated_amount": float(amount),
+                "session_id": str(req.session_id),
+                "invoice_id": result.invoice_id,
+                "payment_status": result.payment_status,
+                "charged_amount": format(result.charged_amount, ".2f"),
+                "currency": result.currency,
+                "balance": format(result.balance or Decimal("0.00"), ".2f"),
+                "already_settled": result.already_settled,
             }
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail="Unpaid charging session not found") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except HTTPException:
             raise
         except Exception as e:

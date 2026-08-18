@@ -3,10 +3,13 @@
 # 使用pydantic-settings进行配置验证和管理
 #
 
-from pydantic import field_validator, model_validator
+from pydantic import SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import List, Optional
 from functools import lru_cache
+from decimal import Decimal
+from urllib.parse import urlparse
+from cryptography.fernet import Fernet
 import os
 
 
@@ -88,6 +91,7 @@ class Settings(BaseSettings):
     
     # API配置
     api_v1_prefix: str = "/api/v1"
+    public_api_base_url: str = "http://localhost:9000"
     docs_url: Optional[str] = "/docs"
     redoc_url: Optional[str] = "/redoc"
 
@@ -106,10 +110,68 @@ class Settings(BaseSettings):
     default_charging_rate: float = 7.0  # kW
     default_price_per_kwh: float = 2700.0  # COP/kWh
 
-    # 支付轨：默认关闭（上架极简方案）；打开后才允许 create / create-mp
+    # 支付轨：默认关闭；打开后才允许创建 Provider/Checkout 支付。
     payment_rails_enabled: bool = False
+    mercadopago_environment: str = "sandbox"
+    mercadopago_access_token: SecretStr = SecretStr("")
+    mercadopago_public_key: SecretStr = SecretStr("")
+    mercadopago_webhook_secret: SecretStr = SecretStr("")
+    # Mercado Pago's direct-card sandbox rejects test-account nickname emails.
+    # This value is used only when MERCADOPAGO_ENVIRONMENT=sandbox; production
+    # payments always use the authenticated app user's email.
+    mercadopago_sandbox_payer_email: str = "test_payer@example.com"
+    checkout_session_ttl_seconds: int = 900
+    payment_token_encryption_key: SecretStr = SecretStr("")
+    checkout_signing_key: SecretStr = SecretStr("")
+    checkout_return_url_allowlist: str = "eslatin://payment-return"
+    checkout_next_action_host_allowlist: str = "mercadopago.com,mercadopago.com.co"
+    wallet_top_up_min_amount: Decimal = Decimal("0.01")
+    wallet_top_up_max_amount: Decimal = Decimal("99999999.99")
     # 启动充电所需最低钱包余额（COP）
     min_wallet_balance_to_start: float = 5000.0
+
+    @model_validator(mode="after")
+    def validate_checkout_limits(self) -> "Settings":
+        if not 60 <= self.checkout_session_ttl_seconds <= 3600:
+            raise ValueError("CHECKOUT_SESSION_TTL_SECONDS must be between 60 and 3600")
+        if (
+            self.wallet_top_up_min_amount <= 0
+            or self.wallet_top_up_max_amount > Decimal("99999999.99")
+            or self.wallet_top_up_min_amount > self.wallet_top_up_max_amount
+        ):
+            raise ValueError("Wallet top-up amount limits are invalid")
+        return_urls = [
+            item.strip()
+            for item in self.checkout_return_url_allowlist.split(",")
+            if item.strip()
+        ]
+        if not return_urls:
+            raise ValueError("CHECKOUT_RETURN_URL_ALLOWLIST must not be empty")
+        for return_url in return_urls:
+            parsed = urlparse(return_url)
+            if (
+                parsed.scheme not in {"eslatin", "http", "https"}
+                or not parsed.netloc
+                or parsed.query
+                or parsed.fragment
+            ):
+                raise ValueError(
+                    "CHECKOUT_RETURN_URL_ALLOWLIST must contain valid deep links or HTTP(S) URLs"
+                )
+            if self.environment.lower() == "production" and parsed.scheme not in {"https", "eslatin"}:
+                raise ValueError(
+                    "Production CHECKOUT_RETURN_URL_ALLOWLIST must use HTTPS or an EsLatin deep link"
+                )
+        next_action_hosts = [
+            item.strip().lower().lstrip(".")
+            for item in self.checkout_next_action_host_allowlist.split(",")
+            if item.strip()
+        ]
+        if not next_action_hosts or any(
+            "://" in host or "/" in host for host in next_action_hosts
+        ):
+            raise ValueError("CHECKOUT_NEXT_ACTION_HOST_ALLOWLIST is invalid")
+        return self
 
     @model_validator(mode="after")
     def validate_production_security(self) -> "Settings":
@@ -130,6 +192,48 @@ class Settings(BaseSettings):
 
         if os.getenv("OCPP_WS_REQUIRE_PRE_REGISTERED", "true").lower() not in {"true", "1", "yes"}:
             raise ValueError("Production OCPP_WS_REQUIRE_PRE_REGISTERED must remain enabled")
+
+        if self.payment_rails_enabled:
+            if not all(
+                secret.get_secret_value().strip()
+                for secret in (
+                    self.mercadopago_access_token,
+                    self.mercadopago_public_key,
+                    self.mercadopago_webhook_secret,
+                )
+            ):
+                raise ValueError(
+                    "Production Mercado Pago credentials are required when payment rails are enabled"
+                )
+            payment_token_key = (
+                self.payment_token_encryption_key.get_secret_value().strip()
+            )
+            if not payment_token_key:
+                raise ValueError(
+                    "Production PAYMENT_TOKEN_ENCRYPTION_KEY is required when payment rails are enabled"
+                )
+            try:
+                Fernet(payment_token_key.encode("ascii"))
+            except (TypeError, ValueError, UnicodeEncodeError) as exc:
+                raise ValueError(
+                    "Production PAYMENT_TOKEN_ENCRYPTION_KEY must be a valid Fernet key"
+                ) from exc
+            if len(self.checkout_signing_key.get_secret_value().strip()) < 32:
+                raise ValueError(
+                    "Production CHECKOUT_SIGNING_KEY must contain at least 32 characters"
+                )
+            public_url = urlparse(self.public_api_base_url)
+            if (
+                public_url.scheme != "https"
+                or not public_url.netloc
+                or public_url.username is not None
+                or public_url.password is not None
+                or public_url.query
+                or public_url.fragment
+            ):
+                raise ValueError(
+                    "Production PUBLIC_API_BASE_URL must use HTTPS when payment rails are enabled"
+                )
 
         return self
 

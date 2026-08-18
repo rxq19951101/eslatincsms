@@ -103,7 +103,7 @@ def test_failed_database_write_can_release_redis_claims_for_retry():
 @pytest.mark.asyncio
 async def test_meter_values_use_redis_and_minute_database_sample(
     db_session,
-    sample_charge_point,
+    sample_commercial_charge_point,
     sample_evse,
     sample_evse_status,
 ):
@@ -111,7 +111,7 @@ async def test_meter_values_use_redis_and_minute_database_sample(
     service = MeterTelemetryService(fake)
     handler = OCPPMessageHandler(telemetry_service=service)
     start = await handler.handle_message(
-        sample_charge_point.ocpp_identity,
+        sample_commercial_charge_point.ocpp_identity,
         "StartTransaction",
         {"connectorId": 1, "idTag": "REDIS_TAG", "meterStart": 0},
         evse_id=1,
@@ -133,19 +133,19 @@ async def test_meter_values_use_redis_and_minute_database_sample(
         }
 
     first = await handler.handle_message(
-        sample_charge_point.ocpp_identity,
+        sample_commercial_charge_point.ocpp_identity,
         "MeterValues",
         payload(100, "2026-01-01T00:00:00Z"),
         message_unique_id="redis-meter-1",
     )
     second = await handler.handle_message(
-        sample_charge_point.ocpp_identity,
+        sample_commercial_charge_point.ocpp_identity,
         "MeterValues",
         payload(110, "2026-01-01T00:00:05Z"),
         message_unique_id="redis-meter-2",
     )
     replay = await handler.handle_message(
-        sample_charge_point.ocpp_identity,
+        sample_commercial_charge_point.ocpp_identity,
         "MeterValues",
         payload(110, "2026-01-01T00:00:05Z"),
         message_unique_id="redis-meter-2",
@@ -157,7 +157,7 @@ async def test_meter_values_use_redis_and_minute_database_sample(
     assert db_session.query(MeterValue).count() == 1
     assert db_session.query(OCPPMessageEvent).filter_by(action="MeterValues").count() == 0
     latest = service.get_latest(
-        tenant_id=sample_charge_point.tenant_id,
+        tenant_id=sample_commercial_charge_point.tenant_id,
         session_id=db_session.query(MeterValue.session_id).scalar(),
     )
     assert latest["value_wh"] == 110

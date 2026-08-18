@@ -67,6 +67,8 @@ export function localizeChargingFailure(
     return t.charging.sessionLoadFailed;
   }
   if (failure.operation === 'stop') return t.charging.stopFailedGeneric;
+  if (code === 'TARIFF_NOT_CONFIGURED') return t.charging.tariffNotConfigured;
+  if (code === 'CHARGER_NOT_COMMISSIONED') return t.charging.chargerNotCommissioned;
   if (failure.status === 504 || code.includes('TIMEOUT')) return t.charging.startTimeout;
   if (failure.status === 409 || code.includes('REJECT')) return t.charging.startRejected;
   if (failure.status === 402 || code.includes('BALANCE')) return t.charging.insufficientBalance;

@@ -1,249 +1,276 @@
 /**
- * 支付相关 API（支持 Wompi 和 Mercado Pago）
+ * 支付相关 API。
+ *
+ * App 只使用 Checkout Session；Provider 选择和凭证解析留在服务端。
  */
 
 import axios from 'axios';
-import apiClient, { handleApiError } from './client';
-import { API_ENDPOINTS, MERCADOPAGO_PUBLIC_KEY } from '../constants/config';
+import apiClient from './client';
+import { API_ENDPOINTS, API_BASE_URL } from '../constants/config';
 import type { 
-  CreatePaymentRequest, 
-  CreatePaymentResponse, 
-  CreateMercadoPagoPaymentRequest,
-  MercadoPagoPaymentResponse,
-  PaymentProviderCode,
-  PaymentProviderOption,
+  CreatePaymentRequest,
+  CreatePaymentResponse,
   PaymentStatusResponse, 
   UnpaidCharge,
-  CardData,
-  MercadoPagoCardTokenResult,
+  CanonicalPaymentMethod,
+  CanonicalPaymentMethodsResponse,
+  SaveCardCheckoutSessionRequest,
+  SaveCardCheckoutSessionResponse,
+  CreateCheckoutSessionRequest,
+  CreateCheckoutSessionResponse,
+  CheckoutSessionResponse,
+  PaymentCheckoutStatus,
 } from '../types';
-import { getT } from '../i18n';
 
 export type { UnpaidCharge } from '../types';
 
-/**
- * BIN 回退推断 MP payment_method_id（优先以 card_tokens 响应为准）
- */
-function inferPaymentMethodIdFromPan(panDigits: string): string {
-  const d = panDigits.replace(/\D/g, '');
-  if (d.length < 4) return 'visa';
+const PAYMENT_METHODS_ENDPOINT = '/api/v1/app/payment-methods';
+const CHECKOUT_SESSIONS_ENDPOINT = '/api/v1/app/payments/checkout-sessions';
+const NATIVE_PAYMENT_RETURN_URL = 'eslatin://payment-return';
+const CONFIGURED_WEB_PAYMENT_RETURN_URL = process.env.EXPO_PUBLIC_WEB_PAYMENT_RETURN_URL?.trim();
+const WEB_PAYMENT_RETURN_URL =
+  CONFIGURED_WEB_PAYMENT_RETURN_URL ||
+  (process.env.NODE_ENV === 'production' ? undefined : 'http://localhost:8081/payment-return');
+export const PAYMENT_RETURN_URL =
+  typeof window !== 'undefined' && window.location?.protocol.startsWith('http')
+    ? WEB_PAYMENT_RETURN_URL || NATIVE_PAYMENT_RETURN_URL
+    : NATIVE_PAYMENT_RETURN_URL;
 
-  const first = d[0];
-  const firstTwo = parseInt(d.slice(0, 2), 10);
-  const firstThree = parseInt(d.slice(0, 3), 10);
-  const firstFour = parseInt(d.slice(0, 4), 10);
-  const firstSix = parseInt(d.slice(0, 6), 10);
+export type PaymentMethodTypeLabelKey =
+  | 'creditCard'
+  | 'debitCard'
+  | 'prepaidCard'
+  | 'bankCard';
 
-  if (first === '4') return 'visa';
+export type CheckoutQueryErrorKind =
+  | 'expired_or_missing'
+  | 'already_submitted'
+  | 'temporarily_unavailable'
+  | 'network_unknown';
 
-  if ((firstTwo >= 51 && firstTwo <= 55) || (firstFour >= 2221 && firstFour <= 2720)) {
-    return 'master';
-  }
-
-  if (firstTwo === 34 || firstTwo === 37) return 'amex';
-
-  if (firstFour === 6011 || firstTwo === 65) return 'master';
-
-  if (firstTwo === 36 || firstTwo === 38 || firstThree === 300 || firstThree === 305) {
-    return 'diners_club_international';
-  }
-
-  if (firstSix >= 506776 && firstSix <= 506778) return 'master';
-
-  return 'visa';
+/** Keep credit/debit/prepaid/null and unexpected runtime values consistent across screens. */
+export function getPaymentMethodTypeLabelKey(value: unknown): PaymentMethodTypeLabelKey {
+  if (value === 'credit_card') return 'creditCard';
+  if (value === 'debit_card') return 'debitCard';
+  if (value === 'prepaid_card') return 'prepaidCard';
+  return 'bankCard';
 }
 
-function extractPaymentMethodIdFromTokenPayload(
-  data: Record<string, unknown>,
-  panDigits: string
-): string {
-  const direct = data.payment_method_id;
-  if (typeof direct === 'string' && direct.trim()) return direct.trim();
+/** Map transport failures to safe recovery decisions without exposing provider messages. */
+export function classifyCheckoutQueryError(error: unknown): CheckoutQueryErrorKind {
+  if (!axios.isAxiosError(error)) return 'network_unknown';
 
-  const pm = data.payment_method;
-  if (pm && typeof pm === 'object') {
-    const id = (pm as { id?: string }).id;
-    if (typeof id === 'string' && id.trim()) return id.trim();
-  }
+  const status = error.response?.status;
+  const data = error.response?.data as { detail?: { code?: unknown } } | undefined;
+  const code = typeof data?.detail?.code === 'string' ? data.detail.code : '';
 
-  const bin = data.first_six_digits;
-  if (typeof bin === 'string' && bin.replace(/\D/g, '').length >= 6) {
-    return inferPaymentMethodIdFromPan(bin);
-  }
-
-  return inferPaymentMethodIdFromPan(panDigits);
+  if (status === 404 || code === 'CHECKOUT_SESSION_NOT_FOUND') return 'expired_or_missing';
+  if (status === 409 || code === 'CHECKOUT_ALREADY_CONFIRMED') return 'already_submitted';
+  if (status === 503 || code === 'CHECKOUT_UNAVAILABLE') return 'temporarily_unavailable';
+  return 'network_unknown';
 }
 
-// Wompi 支付（保留兼容）
-export async function createWompiPayment(req: CreatePaymentRequest): Promise<CreatePaymentResponse> {
-  const res = await apiClient.post<CreatePaymentResponse>(API_ENDPOINTS.PAYMENTS.CREATE, req);
+export function createIdempotencyKey(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (character) => {
+    const random = Math.random() * 16 | 0;
+    const value = character === 'x' ? random : (random & 0x3) | 0x8;
+    return value.toString(16);
+  });
+}
+
+function isNotFoundError(error: unknown): boolean {
+  return axios.isAxiosError(error) && error.response?.status === 404;
+}
+
+/** Read the server-owned payment-method projection. No local demo storage is consulted. */
+export async function listPaymentMethods(): Promise<CanonicalPaymentMethod[]> {
+  const res = await apiClient.get<CanonicalPaymentMethodsResponse>(PAYMENT_METHODS_ENDPOINT);
+  return res.data.items;
+}
+
+/** Set a payment method as default using the contract's idempotency header. */
+export async function setPaymentMethodDefault(paymentMethodId: string): Promise<CanonicalPaymentMethod> {
+  const res = await apiClient.patch<CanonicalPaymentMethod>(
+    `${PAYMENT_METHODS_ENDPOINT}/${encodeURIComponent(paymentMethodId)}`,
+    { is_default: true },
+    { headers: { 'Idempotency-Key': createIdempotencyKey() } },
+  );
   return res.data;
 }
 
-export const PAYMENT_PROVIDER_OPTIONS: PaymentProviderOption[] = [
-  {
-    code: 'mercadopago',
-    get name() { return getT().payment.cardPayment; },
-    get description() { return getT().payment.secureProviderDescription; },
-    enabled: true,
-    supportedTypes: ['top_up', 'charging'],
-  },
-  {
-    code: 'wompi',
-    name: 'Wompi',
-    get description() { return getT().payment.webCheckoutDescription; },
-    enabled: true,
-    supportedTypes: ['top_up', 'charging'],
-  },
-];
-
-// Mercado Pago 支付
 /**
- * 获取 Card Token（前端直接调用 Mercado Pago API）
- * 
- * 注意：不要直接使用 fetch，建议使用官方 SDK 或 WebView + Secure Fields
- * 这里提供一个基础实现示例，生产环境应使用更安全的方式
+ * Delete a payment method. A server/provider 404 is intentionally idempotent:
+ * the card is already absent from the user's canonical projection.
  */
-export async function getCardToken(cardData: CardData): Promise<MercadoPagoCardTokenResult> {
-  if (!MERCADOPAGO_PUBLIC_KEY?.trim()) {
-    throw new Error(getT().payment.providerConfigMissing);
-  }
-  const response = await fetch(
-    `https://api.mercadopago.com/v1/card_tokens?public_key=${encodeURIComponent(MERCADOPAGO_PUBLIC_KEY.trim())}`,
-    {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        card_number: cardData.number.replace(/\s/g, ''),
-        expiration_month: cardData.expMonth,
-        expiration_year: cardData.expYear,
-        security_code: cardData.cvc,
-        cardholder: {
-          name: cardData.holderName,
-        },
-      }),
-    }
-  );
-
-  const panDigits = cardData.number.replace(/\s/g, '');
-  
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({}));
-    throw new Error(
-      typeof error.message === 'string' ? error.message : getT().payment.tokenCreateFailed
-    );
-  }
-  
-  const data = (await response.json()) as Record<string, unknown>;
-  const tokenId = data.id;
-  if (typeof tokenId !== 'string' || !tokenId) {
-    throw new Error(getT().payment.tokenMissing);
-  }
-
-  const payment_method_id = extractPaymentMethodIdFromTokenPayload(data, panDigits);
-
-  return { tokenId, payment_method_id };
-}
-
-/**
- * 创建 Mercado Pago 支付
- * 
- * 流程：
- * 1. 前端收集卡信息
- * 2. 调用 getCardToken 获取 token
- * 3. 生成 idempotency_key (UUID v4)
- * 4. 调用后端创建支付
- */
-export async function createMercadoPagoPayment(
-  amount: number,
-  cardData: CardData,
-  email: string,
-  type: 'top_up' | 'charging',
-  metadata?: { session_id?: string; charge_point_id?: string; site_id?: string }
-): Promise<MercadoPagoPaymentResponse> {
+export async function deletePaymentMethodRemote(paymentMethodId: string): Promise<void> {
   try {
-    // 1. 获取 Card Token（含 MP 返回的 payment_method_id，非 Visa/Master 时避免乱猜）
-    const { tokenId: token, payment_method_id } = await getCardToken(cardData);
-    
-    // 2. 生成幂等性键（UUID v4）
-    const generateUUID = (): string => {
-      // 使用 crypto.randomUUID 如果可用，否则生成 UUID v4
-      if (typeof crypto !== 'undefined' && crypto.randomUUID) {
-        return crypto.randomUUID();
-      }
-      // Fallback: 生成 UUID v4 格式
-      return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
-        const r = Math.random() * 16 | 0;
-        const v = c === 'x' ? r : (r & 0x3 | 0x8);
-        return v.toString(16);
-      });
-    };
-    const idempotency_key = generateUUID();
-
-    // 3. payment_method_id 已由 getCardToken（MP 响应或 BIN 回退）给出
-
-    // 4. 调用后端创建支付
-    const req: CreateMercadoPagoPaymentRequest = {
-      type,
-      amount,
-      currency: 'COP',
-      token,
-      email,
-      payment_method_id,
-      idempotency_key,
-      metadata,
-    };
-    
-    const res = await apiClient.post<MercadoPagoPaymentResponse>(
-      API_ENDPOINTS.PAYMENTS.CREATE_MP,
-      req
-    );
-    return res.data;
-  } catch (error: unknown) {
-    if (axios.isAxiosError(error) && error.response?.data != null) {
-      console.error(
-        '[create-mp] 后端响应:',
-        JSON.stringify(error.response.data, null, 2),
-        'HTTP',
-        error.response.status
-      );
-    }
-    const { message } = handleApiError(error);
-    console.error('Error creating MercadoPago payment:', message);
-    throw new Error(message || getT().payment.createFailed);
+    await apiClient.delete(`${PAYMENT_METHODS_ENDPOINT}/${encodeURIComponent(paymentMethodId)}`, {
+      headers: { 'Idempotency-Key': createIdempotencyKey() },
+    });
+  } catch (error) {
+    if (isNotFoundError(error)) return;
+    throw error;
   }
 }
 
-export async function createPaymentByProvider(
-  provider: PaymentProviderCode = 'mercadopago',
-  params: {
-    amount: number;
-    type: 'top_up' | 'charging';
-    metadata?: { session_id?: string; charge_point_id?: string; site_id?: string };
-    cardData?: CardData;
-    email?: string;
-  }
-): Promise<CreatePaymentResponse | MercadoPagoPaymentResponse> {
-  if (provider === 'mercadopago') {
-    if (!params.cardData || !params.email) {
-      throw new Error(getT().payment.cardInfoRequired);
-    }
-    return createMercadoPagoPayment(
-      params.amount,
-      params.cardData,
-      params.email,
-      params.type,
-      params.metadata
-    );
-  }
-  return createWompiPayment({
-    type: params.type,
-    amount: params.amount,
+/** Create the hosted save-card session. Card fields never cross the App API boundary. */
+export async function createSaveCardCheckoutSession(): Promise<SaveCardCheckoutSessionResponse> {
+  const payload: SaveCardCheckoutSessionRequest = {
+    purpose: 'save_card',
+    payment_method_mode: 'new_card',
+    save_card: true,
     currency: 'COP',
-    metadata: params.metadata,
+    return_url: PAYMENT_RETURN_URL,
+    idempotency_key: createIdempotencyKey(),
+  };
+  const res = await apiClient.post<SaveCardCheckoutSessionResponse>(
+    CHECKOUT_SESSIONS_ENDPOINT,
+    payload,
+  );
+  return res.data;
+}
+
+/** Create any contract-defined hosted checkout session without card data. */
+export async function createCheckoutSession(
+  request: Omit<CreateCheckoutSessionRequest, 'idempotency_key' | 'return_url'> & {
+    idempotency_key?: string;
+    return_url?: string;
+  },
+): Promise<CreateCheckoutSessionResponse> {
+  const payload: CreateCheckoutSessionRequest = {
+    ...request,
+    return_url: request.return_url ?? PAYMENT_RETURN_URL,
+    idempotency_key: request.idempotency_key ?? createIdempotencyKey(),
+  };
+  const res = await apiClient.post<CreateCheckoutSessionResponse>(
+    CHECKOUT_SESSIONS_ENDPOINT,
+    payload,
+  );
+  return res.data;
+}
+
+export async function createWalletTopUpCheckoutSession(
+  amount: string,
+): Promise<CreateCheckoutSessionResponse> {
+  if (!/^\d+(?:\.\d{1,2})?$/.test(amount) || Number(amount) <= 0) {
+    throw new Error('invalid_top_up_amount');
+  }
+  return createCheckoutSession({
+    purpose: 'wallet_top_up',
+    payment_method_mode: 'new_card',
+    save_card: false,
+    amount,
+    currency: 'COP',
   });
+}
+
+/** Convert the numeric amount used by the existing App navigation into a COP decimal string. */
+export function formatWalletTopUpAmount(amount: number): string {
+  if (!Number.isFinite(amount) || amount <= 0) {
+    throw new Error('invalid_top_up_amount');
+  }
+  return amount.toFixed(2);
+}
+
+export async function getCheckoutSession(
+  checkoutSessionId: string,
+): Promise<CheckoutSessionResponse> {
+  const res = await apiClient.get<CheckoutSessionResponse>(
+    `${CHECKOUT_SESSIONS_ENDPOINT}/${encodeURIComponent(checkoutSessionId)}`,
+  );
+  const session = res.data;
+  const status = isPaymentCheckoutStatus(session.status) ? session.status : 'error';
+
+  // Never expose an untrusted 3DS URL to navigation or a WebView.
+  if (session.next_action && !isAllowedMercadoPagoActionUrl(session.next_action.url)) {
+    return { ...session, status, next_action: null };
+  }
+  return { ...session, status };
+}
+
+export function isPaymentCheckoutStatus(value: unknown): value is PaymentCheckoutStatus {
+  return [
+    'created',
+    'ready',
+    'processing',
+    'action_required',
+    'approved',
+    'declined',
+    'expired',
+    'error',
+  ].includes(value as PaymentCheckoutStatus);
+}
+
+export function normalizePaymentReturnStatus(value: unknown): PaymentCheckoutStatus | undefined {
+  return isPaymentCheckoutStatus(value) ? value : undefined;
+}
+
+const MERCADO_PAGO_ACTION_HOSTS = new Set([
+  'mercadopago.com',
+  'mercadopago.com.co',
+  'mercadopago.com.ar',
+  'mercadopago.com.br',
+  'mercadopago.com.mx',
+  'mercadopago.com.pe',
+  'mercadopago.com.uy',
+  'mercadopago.cl',
+  'mercadopago.com.ec',
+  'mercadopago.com.ve',
+]);
+
+export function isAllowedMercadoPagoActionUrl(value: unknown): value is string {
+  if (typeof value !== 'string' || !value.trim()) return false;
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol !== 'https:') return false;
+    return [...MERCADO_PAGO_ACTION_HOSTS].some(
+      (host) => parsed.hostname === host || parsed.hostname.endsWith(`.${host}`),
+    );
+  } catch {
+    return false;
+  }
+}
+
+export function isSecureCheckoutUrl(value: string): boolean {
+  try {
+    return new URL(value).protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+/** Hosted checkout must remain on the configured EsLatin API origin. */
+export function isServerCheckoutUrl(value: string): boolean {
+  try {
+    const checkoutUrl = new URL(value);
+    const apiUrl = new URL(API_BASE_URL);
+
+    if (checkoutUrl.origin !== apiUrl.origin) return false;
+    if (checkoutUrl.protocol === 'https:') return true;
+
+    // Local sandbox testing is intentionally limited to loopback HTTP. Production
+    // builds still require HTTPS because a non-loopback HTTP checkout is never
+    // accepted here.
+    const loopbackHosts = new Set(['localhost', '127.0.0.1']);
+    return (
+      checkoutUrl.protocol === 'http:' &&
+      loopbackHosts.has(checkoutUrl.hostname) &&
+      loopbackHosts.has(apiUrl.hostname)
+    );
+  } catch {
+    return false;
+  }
+}
+
+// Legacy implementation retained only for the unregistered Wompi screen.
+// No current App flow calls this function; new payment work must use
+// createCheckoutSession/createWalletTopUpCheckoutSession.
+export async function createWompiPayment(req: CreatePaymentRequest): Promise<CreatePaymentResponse> {
+  const res = await apiClient.post<CreatePaymentResponse>(API_ENDPOINTS.PAYMENTS.CREATE, req);
+  return res.data;
 }
 
 export async function getPaymentOrderStatus(orderId: string): Promise<PaymentStatusResponse> {

@@ -176,9 +176,25 @@ export interface ChargePoint {
     address?: string;
   };
   price_per_kwh?: number;
+  pricing?: PricingDetails | null;
   is_configured: boolean;
   has_location: boolean;
   has_pricing: boolean;
+}
+
+export type PricingMode = 'inherit' | 'paid' | 'free' | 'unavailable';
+export type PricingSource = 'charger' | 'site' | 'none';
+
+export interface PricingDetails {
+  pricing_mode: PricingMode;
+  pricing_source: PricingSource;
+  tariff_id?: string | null;
+  base_price_per_kwh?: string | number | null;
+  service_fee?: string | number | null;
+  currency: string;
+  free_reason?: string | null;
+  valid_from?: string | null;
+  valid_until?: string | null;
 }
 
 export interface ChargePointDetail extends ChargePoint {
@@ -271,6 +287,7 @@ export interface SiteDetail {
   operating_hours?: string | null;
   domain?: string | null;
   price_per_kwh?: number | null;
+  pricing?: PricingDetails | null;
   charge_points: SiteDetailChargePoint[];
   lifecycle_status?: 'active' | 'archived';
   archived_at?: string | null;

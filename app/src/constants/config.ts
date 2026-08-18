@@ -165,12 +165,16 @@ export const API_ENDPOINTS = {
     TRANSACTIONS: '/api/v1/app/wallet/transactions',
     UNPAID_CHARGES: '/api/v1/app/wallet/unpaid-charges',
     PAY_UNPAID_CHARGE: '/api/v1/app/wallet/pay-unpaid-charge',
+    // Legacy endpoint kept only for unregistered code paths; active App code
+    // uses /api/v1/app/payment-methods.
     SAVED_PAYMENT_METHODS: '/api/v1/app/wallet/saved-payment-methods',
   },
   // 支付相关
   PAYMENTS: {
-    CREATE: '/api/v1/app/wallet/payments/create',  // Wompi（保留兼容）
-    CREATE_MP: '/api/v1/app/wallet/payments/create-mp',  // Mercado Pago
+    // Legacy endpoints are not registered in the current App API. New flows
+    // must use /api/v1/app/payments/checkout-sessions.
+    CREATE: '/api/v1/app/wallet/payments/create',
+    CREATE_MP: '/api/v1/app/wallet/payments/create-mp',
     STATUS: (orderId: string) => `/api/v1/app/wallet/payments/${orderId}/status`,
   },
   // 充电记录（订单记录）
@@ -231,19 +235,6 @@ export const MAP_CONFIG = {
     UNKNOWN: '#6B7280',   // 灰色 - 未知
   },
 } as const;
-
-function resolveMercadoPagoPublicKey(): string {
-  const fromEnv = process.env.EXPO_PUBLIC_MERCADOPAGO_PUBLIC_KEY?.trim();
-  if (fromEnv) return fromEnv;
-
-  const fromExtra = extra?.mercadopagoPublicKey;
-  if (typeof fromExtra === 'string' && fromExtra.trim()) return fromExtra.trim();
-
-  if (!isProductionBuild) {
-    return process.env.EXPO_PUBLIC_MERCADOPAGO_PUBLIC_KEY_SANDBOX?.trim() || '';
-  }
-  return '';
-}
 
 // 应用主题色
 export const COLORS = {
@@ -341,12 +332,4 @@ export const IOS_STYLES = {
     CHECKOUT_URL: process.env.EXPO_PUBLIC_WOMPI_CHECKOUT_URL || 'https://checkout.wompi.co/l',
     ENVIRONMENT: process.env.EXPO_PUBLIC_WOMPI_ENVIRONMENT || 'sandbox',
   },
-  // Mercado Pago 支付配置
-  MERCADOPAGO: {
-    PUBLIC_KEY: resolveMercadoPagoPublicKey(),
-    ENVIRONMENT: process.env.EXPO_PUBLIC_MERCADOPAGO_ENVIRONMENT || 'sandbox',
-  },
 } as const;
-
-// 导出 Mercado Pago Public Key（用于 API 调用）
-export const MERCADOPAGO_PUBLIC_KEY = IOS_STYLES.MERCADOPAGO.PUBLIC_KEY;

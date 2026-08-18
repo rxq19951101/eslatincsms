@@ -6,7 +6,7 @@
 from typing import List, Dict, Any, Optional
 from decimal import Decimal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Body
+from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
@@ -17,10 +17,18 @@ from app.core.auth import get_current_user
 from app.core.permissions import get_current_admin_user as get_verified_admin_user
 from app.database.base import get_db, SuperSessionLocal
 from app.database.models import PaymentOrder, PaymentWebhookEvent, AppUser
-from app.api.v1.app.payments import _apply_refund_ledger
-from app.domain.payment import transition_status
 from app.services.wompi_service import get_wompi_service
-from app.services.mercadopago_service import get_mercadopago_service
+from app.services.payment_reconciliation import (
+    PaymentReconciliationError,
+    PaymentReconciliationService,
+)
+from app.services.payment_providers.base import PaymentProviderError
+from app.services.payment_refunds import (
+    PaymentRefundService,
+    RefundManualReviewRequired,
+    RefundRequestInvalid,
+    RefundRetryable,
+)
 
 logger = get_logger("ocpp_csms")
 
@@ -326,8 +334,6 @@ async def reconcile_payment_order(
         
         # Mercado Pago 对账
         elif payment_provider == "mercadopago":
-            mp_service = get_mercadopago_service()
-            
             if not order.mercadopago_payment_id:
                 return ReconcileResponse(
                     success=False,
@@ -336,22 +342,21 @@ async def reconcile_payment_order(
                     provider_status=None,
                 )
             
-            payment_info = mp_service.get_payment_status(order.mercadopago_payment_id)
-            
-            if not payment_info.get("success"):
+            try:
+                result = PaymentReconciliationService().query_and_reconcile(
+                    sdb,
+                    payment_order_id=order.id,
+                )
+            except (PaymentReconciliationError, PaymentProviderError):
                 return ReconcileResponse(
                     success=False,
                     message="Failed to query payment from Mercado Pago",
                     order_status=order.status,
                     provider_status=None,
                 )
-            
-            mp_payment = payment_info.get("payment", {})
-            provider_status = mp_payment.get("status")
+            provider_status = result.api_status
             status_message = provider_status
-            
-            # 状态映射
-            new_status = mp_service.map_status(provider_status)
+            new_status = result.order_status
         
         else:
             return ReconcileResponse(
@@ -398,6 +403,7 @@ async def reconcile_payment_order(
 async def refund_payment_order(
     order_id: str,
     refund_req: RefundRequest = Body(...),
+    idempotency_key: str = Header(..., alias="Idempotency-Key"),
     current_user: Dict[str, Any] = Depends(require_platform_payment_admin),
     db: Session = Depends(get_db),
 ) -> RefundResponse:
@@ -408,83 +414,24 @@ async def refund_payment_order(
     """
     sdb = SuperSessionLocal()
     try:
-        order = sdb.query(PaymentOrder).filter(PaymentOrder.id == order_id).first()
-        if not order:
-            raise HTTPException(status_code=404, detail="Payment order not found")
-        
-        # 只有已批准的订单才能退款
-        if order.status != "approved":
-            return RefundResponse(
-                success=False,
-                message=f"Cannot refund: order status is {order.status}, only approved orders can be refunded",
-                refund_id=None,
-                status=None,
+        try:
+            result = PaymentRefundService().refund_payment_order(
+                sdb,
+                payment_order_id=order_id,
+                amount=(Decimal(str(refund_req.amount)) if refund_req.amount is not None else None),
+                idempotency_key=idempotency_key,
             )
-        
-        payment_provider = order.payment_provider or "wompi"
-        
-        # Mercado Pago 退款
-        if payment_provider == "mercadopago":
-            mp_service = get_mercadopago_service()
-            
-            if not order.mercadopago_payment_id:
-                return RefundResponse(
-                    success=False,
-                    message="Cannot refund: no Mercado Pago payment ID found",
-                    refund_id=None,
-                    status=None,
-                )
-            
-            refund_amount = None
-            if refund_req.amount is not None:
-                from decimal import Decimal
-                refund_amount = Decimal(str(refund_req.amount))
-            
-            refund_result = mp_service.refund_payment(order.mercadopago_payment_id, refund_amount)
-            
-            if refund_result.get("success"):
-                # 更新订单状态
-                settled_refund_amount = refund_amount or Decimal(str(order.amount))
-                _apply_refund_ledger(sdb, order, settled_refund_amount)
-                order.status = transition_status(order.status, "refunded")
-                sdb.commit()
-                
-                logger.info(
-                    f"[Admin API] Payment refunded: order_id={order_id}, "
-                    f"refund_id={refund_result.get('refund_id')}, amount={refund_amount}"
-                )
-                
-                return RefundResponse(
-                    success=True,
-                    message="Refund processed successfully",
-                    refund_id=refund_result.get("refund_id"),
-                    status=refund_result.get("status"),
-                )
-            else:
-                error_msg = refund_result.get("error", "Unknown error")
-                return RefundResponse(
-                    success=False,
-                    message=f"Refund failed: {error_msg}",
-                    refund_id=None,
-                    status=None,
-                )
-        
-        # Wompi 退款（如果支持）
-        elif payment_provider == "wompi":
-            # TODO: 实现 Wompi 退款（如果 Wompi 支持）
-            return RefundResponse(
-                success=False,
-                message="Wompi refund not yet implemented",
-                refund_id=None,
-                status=None,
-            )
-        
-        else:
-            return RefundResponse(
-                success=False,
-                message=f"Unknown payment provider: {payment_provider}",
-                refund_id=None,
-                status=None,
-            )
+        except RefundRequestInvalid as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except RefundManualReviewRequired as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except RefundRetryable as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        return RefundResponse(
+            success=True,
+            message="Refund processed successfully",
+            refund_id=result.refund_id,
+            status=result.status,
+        )
     finally:
         sdb.close()

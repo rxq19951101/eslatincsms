@@ -5,8 +5,9 @@
 
 from datetime import datetime, timezone
 from sqlalchemy import (
-    Column, Integer, String, Float, Boolean, 
-    DateTime, Text, ForeignKey, JSON, Index, Numeric, UniqueConstraint, CheckConstraint
+    Column, Integer, String, Float, Boolean,
+    Date, DateTime, Text, ForeignKey, ForeignKeyConstraint, JSON, Index,
+    Numeric, UniqueConstraint, CheckConstraint, text,
 )
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import relationship
@@ -91,6 +92,7 @@ class Site(Base):
     charge_points = relationship("ChargePoint", back_populates="site", cascade="all, delete-orphan")
     
     __table_args__ = (
+        UniqueConstraint('id', 'tenant_id', name='uq_sites_id_tenant'),
         Index('idx_sites_location', 'latitude', 'longitude'),
         Index('idx_sites_tenant_id', 'tenant_id'),
         CheckConstraint(
@@ -370,6 +372,7 @@ class ChargingSession(Base):
             "status IN ('ongoing', 'completed', 'cancelled')",
             name='ck_charging_sessions_status'
         ),
+        UniqueConstraint('id', 'tenant_id', name='uq_charging_sessions_id_tenant'),
     )
 
 
@@ -443,8 +446,20 @@ class OutboxEvent(Base):
     """事务 Outbox：领域状态变更和待发送设备命令的可靠事件记录。"""
     __tablename__ = "outbox_events"
 
+    def __init__(self, **kwargs):
+        # Preserve existing tenant-scoped call sites while making delivery scope
+        # explicit. Platform events must always provide their scope explicitly.
+        tenant_id = kwargs.get("tenant_id")
+        if kwargs.get("scope_type") is None and tenant_id is not None:
+            kwargs["scope_type"] = "tenant"
+        if kwargs.get("scope_ref") is None and tenant_id is not None:
+            kwargs["scope_ref"] = f"tenant:{tenant_id}"
+        super().__init__(**kwargs)
+
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
-    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="RESTRICT"), nullable=True, index=True)
+    scope_type = Column(String(20), nullable=False)
+    scope_ref = Column(String(100), nullable=False)
     aggregate_type = Column(String(100), nullable=False)
     aggregate_id = Column(String(100), nullable=False)
     event_type = Column(String(100), nullable=False)
@@ -460,9 +475,19 @@ class OutboxEvent(Base):
     tenant = relationship("Tenant")
 
     __table_args__ = (
-        UniqueConstraint('tenant_id', 'idempotency_key', name='uq_outbox_tenant_idempotency'),
+        UniqueConstraint('scope_type', 'scope_ref', 'idempotency_key', name='uq_outbox_scope_idempotency'),
+        CheckConstraint(
+            "(scope_type = 'platform' AND tenant_id IS NULL AND scope_ref = 'platform:eslatin') OR "
+            "(scope_type = 'tenant' AND tenant_id IS NOT NULL AND length(scope_ref) = 43 "
+            "AND substr(scope_ref, 1, 7) = 'tenant:' "
+            "AND substr(scope_ref, 16, 1) = '-' AND substr(scope_ref, 21, 1) = '-' "
+            "AND substr(scope_ref, 26, 1) = '-' AND substr(scope_ref, 31, 1) = '-' "
+            "AND replace(substr(scope_ref, 8), '-', '') = replace(CAST(tenant_id AS VARCHAR), '-', ''))",
+            name='ck_outbox_scope_ownership',
+        ),
         Index('idx_outbox_pending', 'status', 'available_at'),
         Index('idx_outbox_aggregate', 'aggregate_type', 'aggregate_id'),
+        Index('idx_outbox_scope_status_available', 'scope_type', 'scope_ref', 'status', 'available_at'),
     )
 
 
@@ -655,6 +680,8 @@ class Invoice(Base):
         Index('idx_invoices_issued_at', 'issued_at'),
         Index('idx_invoices_tenant_id', 'tenant_id'),
         UniqueConstraint('session_id', name='uq_invoices_session'),
+        UniqueConstraint('id', 'tenant_id', name='uq_invoices_id_tenant'),
+        UniqueConstraint('id', 'session_id', 'tenant_id', name='uq_invoices_id_session_tenant'),
     )
 
 
@@ -879,6 +906,1073 @@ class PaymentWebhookEvent(Base):
         Index("idx_webhook_events_order", "payment_order_id"),
         Index("idx_webhook_events_processed", "processed"),
         Index("idx_webhook_events_provider", "payment_provider"),
+    )
+
+
+# ==================== PAY-MP-002 typed financial facts ====================
+
+class RiskPolicyVersion(Base):
+    """Immutable D-204-B policy snapshot used by risk sessions."""
+    __tablename__ = "risk_policy_versions"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    policy_version = Column(String(100), nullable=False, unique=True)
+    schema_version = Column(Integer, nullable=False, default=1)
+    status = Column(String(20), nullable=False, default="active")
+    effective_at = Column(DateTime(timezone=True), nullable=False)
+    approved_reference = Column(String(255), nullable=False)
+    session_amount_cop = Column(Numeric(18, 2), nullable=False)
+    session_energy_kwh = Column(Numeric(18, 3), nullable=False)
+    session_duration_minutes = Column(Integer, nullable=False)
+    user_open_cop = Column(Numeric(18, 2), nullable=False)
+    site_window_cop = Column(Numeric(18, 2), nullable=False)
+    platform_window_cop = Column(Numeric(18, 2), nullable=False)
+    meter_degraded_after_seconds = Column(Integer, nullable=False)
+    meter_stop_after_seconds = Column(Integer, nullable=False)
+    offline_unknown_amount_cop = Column(Numeric(18, 2), nullable=False)
+    offline_unknown_duration_seconds = Column(Integer, nullable=False)
+    remote_stop_first_attempt_seconds = Column(Integer, nullable=False)
+    remote_stop_max_attempts = Column(Integer, nullable=False)
+    stop_transaction_timeout_seconds = Column(Integer, nullable=False)
+    recovery_check_after_seconds = Column(Integer, nullable=False)
+    final_resolution_after_seconds = Column(Integer, nullable=False)
+    aggregate_window_kind = Column(String(20), nullable=False, default="rolling")
+    aggregate_window_seconds = Column(Integer, nullable=False, default=86400)
+    time_basis = Column(String(30), nullable=False, default="utc_timestamp")
+    calendar_midnight_reset = Column(Boolean, nullable=False, default=False)
+    included_exposure = Column(PortableJSON, nullable=False, default=lambda: ["active_reservations", "unresolved_exposure"])
+    excluded_exposure = Column(PortableJSON, nullable=False, default=lambda: ["released_exposure", "settled_exposure"])
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        CheckConstraint("status IN ('active', 'retired')", name="ck_risk_policy_status"),
+        CheckConstraint("schema_version >= 1", name="ck_risk_policy_schema_version"),
+        CheckConstraint("session_amount_cop > 0 AND session_energy_kwh > 0 AND session_duration_minutes > 0", name="ck_risk_policy_session_limits"),
+        CheckConstraint("user_open_cop > 0 AND site_window_cop > 0 AND platform_window_cop > 0", name="ck_risk_policy_exposure_limits"),
+        CheckConstraint("meter_degraded_after_seconds > 0 AND meter_stop_after_seconds > meter_degraded_after_seconds", name="ck_risk_policy_meter_sla"),
+        CheckConstraint("offline_unknown_amount_cop > 0 AND offline_unknown_duration_seconds > 0", name="ck_risk_policy_unknown_buffer"),
+        CheckConstraint("remote_stop_first_attempt_seconds > 0 AND remote_stop_max_attempts BETWEEN 1 AND 3", name="ck_risk_policy_stop_attempts"),
+        CheckConstraint("stop_transaction_timeout_seconds > 0 AND recovery_check_after_seconds > 0 AND final_resolution_after_seconds > 0", name="ck_risk_policy_recovery_sla"),
+        CheckConstraint("aggregate_window_kind = 'rolling' AND aggregate_window_seconds = 86400 AND time_basis = 'utc_timestamp' AND calendar_midnight_reset = false", name="ck_risk_policy_window"),
+        Index("idx_risk_policy_effective", "status", "effective_at"),
+    )
+
+
+class RiskExposureBalance(Base):
+    """Rebuildable lock/index row; RiskLedgerEntry remains the authority."""
+    __tablename__ = "risk_exposure_balances"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    scope_type = Column(String(20), nullable=False)
+    scope_ref = Column(String(255), nullable=False)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="RESTRICT"), nullable=True)
+    app_user_id = Column(UUID(as_uuid=True), ForeignKey("app_users.id", ondelete="RESTRICT"), nullable=True)
+    site_id = Column(UUID(as_uuid=True), ForeignKey("sites.id", ondelete="RESTRICT"), nullable=True)
+    policy_version_id = Column(UUID(as_uuid=True), ForeignKey("risk_policy_versions.id", ondelete="RESTRICT"), nullable=False)
+    current_exposure_cop = Column(Numeric(18, 2), nullable=False, default=0)
+    window_started_at = Column(DateTime(timezone=True), nullable=False)
+    window_ends_at = Column(DateTime(timezone=True), nullable=False)
+    version = Column(Integer, nullable=False, default=1)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        UniqueConstraint("scope_type", "scope_ref", "policy_version_id", name="uq_risk_exposure_scope_policy"),
+        CheckConstraint("scope_type IN ('user', 'site', 'platform')", name="ck_risk_exposure_scope_type"),
+        CheckConstraint("current_exposure_cop >= 0 AND version >= 1", name="ck_risk_exposure_values"),
+        Index("idx_risk_exposure_scope", "scope_type", "scope_ref"),
+    )
+
+
+class RiskReservation(Base):
+    """Lifecycle projection for one charging session/pinned policy."""
+    __tablename__ = "risk_reservations"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="RESTRICT"), nullable=False)
+    app_user_id = Column(UUID(as_uuid=True), ForeignKey("app_users.id", ondelete="RESTRICT"), nullable=False)
+    site_id = Column(UUID(as_uuid=True), ForeignKey("sites.id", ondelete="RESTRICT"), nullable=False)
+    charge_point_id = Column(UUID(as_uuid=True), ForeignKey("charge_points.id", ondelete="RESTRICT"), nullable=False)
+    session_id = Column(UUID(as_uuid=True), ForeignKey("charging_sessions.id", ondelete="RESTRICT"), nullable=False)
+    invoice_id = Column(UUID(as_uuid=True), ForeignKey("invoices.id", ondelete="RESTRICT"), nullable=True)
+    policy_version_id = Column(UUID(as_uuid=True), ForeignKey("risk_policy_versions.id", ondelete="RESTRICT"), nullable=False)
+    policy_version = Column(String(100), nullable=False)
+    state = Column(String(40), nullable=False, default="reserved")
+    reserved_cop = Column(Numeric(18, 2), nullable=False)
+    consumed_cop = Column(Numeric(18, 2), nullable=False, default=0)
+    unresolved_cop = Column(Numeric(18, 2), nullable=False, default=0)
+    reserved_energy_kwh = Column(Numeric(18, 3), nullable=False)
+    consumed_energy_kwh = Column(Numeric(18, 3), nullable=False, default=0)
+    elapsed_minutes = Column(Numeric(18, 2), nullable=False, default=0)
+    last_meter_wh = Column(Integer, nullable=True)
+    last_meter_at = Column(DateTime(timezone=True), nullable=True)
+    meter_freshness = Column(String(20), nullable=False, default="unknown")
+    unknown_started_at = Column(DateTime(timezone=True), nullable=True)
+    unknown_cop = Column(Numeric(18, 2), nullable=False, default=0)
+    physical_stop_confirmed = Column(Boolean, nullable=False, default=False)
+    final_invoice_confirmed = Column(Boolean, nullable=False, default=False)
+    provider_resolved = Column(Boolean, nullable=False, default=False)
+    idempotency_key = Column(String(255), nullable=False)
+    request_fingerprint = Column(String(128), nullable=False)
+    source_event_id = Column(String(255), nullable=False)
+    version = Column(Integer, nullable=False, default=1)
+    schema_version = Column(Integer, nullable=False, default=1)
+    audit_reference = Column(String(255), nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        UniqueConstraint("session_id", "policy_version_id", name="uq_risk_reservation_session_policy"),
+        UniqueConstraint("id", "tenant_id", name="uq_risk_reservation_id_tenant"),
+        CheckConstraint("state IN ('reserved', 'consuming', 'stop_requested', 'physical_stop_pending', 'settlement_pending', 'release_pending', 'released', 'unresolved', 'resolving')", name="ck_risk_reservation_state"),
+        CheckConstraint("reserved_cop > 0 AND consumed_cop >= 0 AND unresolved_cop >= 0 AND consumed_cop <= reserved_cop", name="ck_risk_reservation_money"),
+        CheckConstraint("reserved_energy_kwh > 0 AND consumed_energy_kwh >= 0 AND consumed_energy_kwh <= reserved_energy_kwh AND elapsed_minutes >= 0", name="ck_risk_reservation_usage"),
+        CheckConstraint("meter_freshness IN ('fresh', 'degraded', 'stale', 'unknown')", name="ck_risk_reservation_meter_freshness"),
+        CheckConstraint("version >= 1 AND schema_version >= 1", name="ck_risk_reservation_versions"),
+        Index("idx_risk_reservation_scope_state", "site_id", "state", "created_at"),
+        Index("idx_risk_reservation_user_state", "app_user_id", "state"),
+        Index("idx_risk_reservation_platform_window", "created_at", "state"),
+    )
+
+
+class RiskLedgerEntry(Base):
+    """Append-only risk action fact; never update or delete."""
+    __tablename__ = "risk_ledger_entries"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    scope_type = Column(String(20), nullable=False)
+    scope_ref = Column(String(255), nullable=False)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="RESTRICT"), nullable=True)
+    app_user_id = Column(UUID(as_uuid=True), ForeignKey("app_users.id", ondelete="RESTRICT"), nullable=True)
+    site_id = Column(UUID(as_uuid=True), ForeignKey("sites.id", ondelete="RESTRICT"), nullable=True)
+    session_id = Column(UUID(as_uuid=True), ForeignKey("charging_sessions.id", ondelete="RESTRICT"), nullable=True)
+    invoice_id = Column(UUID(as_uuid=True), ForeignKey("invoices.id", ondelete="RESTRICT"), nullable=True)
+    policy_version_id = Column(UUID(as_uuid=True), ForeignKey("risk_policy_versions.id", ondelete="RESTRICT"), nullable=False)
+    policy_version = Column(String(100), nullable=False)
+    action = Column(String(20), nullable=False)
+    amount_cop = Column(Numeric(18, 2), nullable=False, default=0)
+    delta_cop = Column(Numeric(18, 2), nullable=False, default=0)
+    currency = Column(String(3), nullable=False, default="COP")
+    energy_kwh = Column(Numeric(18, 3), nullable=False, default=0)
+    duration_minutes = Column(Numeric(18, 2), nullable=False, default=0)
+    source_event_id = Column(String(255), nullable=False)
+    idempotency_key = Column(String(255), nullable=False)
+    before_balance_cop = Column(Numeric(18, 2), nullable=False, default=0)
+    after_balance_cop = Column(Numeric(18, 2), nullable=False, default=0)
+    data_quality = Column(String(20), nullable=False, default="authoritative")
+    reason_code = Column(String(100), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), index=True)
+
+    __table_args__ = (
+        UniqueConstraint("scope_type", "scope_ref", "action", "source_event_id", name="uq_risk_ledger_scope_action_source"),
+        UniqueConstraint("scope_type", "scope_ref", "idempotency_key", name="uq_risk_ledger_scope_idempotency"),
+        CheckConstraint("scope_type IN ('user', 'site', 'platform')", name="ck_risk_ledger_scope_type"),
+        CheckConstraint("action IN ('reserve', 'consume', 'release', 'unresolved', 'correction')", name="ck_risk_ledger_action"),
+        CheckConstraint("amount_cop >= 0 AND delta_cop >= 0 AND energy_kwh >= 0 AND duration_minutes >= 0", name="ck_risk_ledger_values"),
+        CheckConstraint("currency = 'COP'", name="ck_risk_ledger_currency"),
+        CheckConstraint("data_quality IN ('authoritative', 'degraded', 'unknown')", name="ck_risk_ledger_quality"),
+        Index("idx_risk_ledger_session_action", "session_id", "action", "created_at"),
+        Index("idx_risk_ledger_scope_created", "scope_type", "scope_ref", "created_at"),
+    )
+
+
+class RiskStopAction(Base):
+    """Durable RemoteStop command lifecycle; Accepted is not physical stop."""
+    __tablename__ = "risk_stop_actions"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="RESTRICT"), nullable=False)
+    reservation_id = Column(UUID(as_uuid=True), ForeignKey("risk_reservations.id", ondelete="RESTRICT"), nullable=False)
+    session_id = Column(UUID(as_uuid=True), ForeignKey("charging_sessions.id", ondelete="RESTRICT"), nullable=False)
+    charge_point_id = Column(UUID(as_uuid=True), ForeignKey("charge_points.id", ondelete="RESTRICT"), nullable=False)
+    policy_version_id = Column(UUID(as_uuid=True), ForeignKey("risk_policy_versions.id", ondelete="RESTRICT"), nullable=False)
+    transaction_id = Column(Integer, nullable=False)
+    status = Column(String(40), nullable=False, default="queued")
+    reason_code = Column(String(100), nullable=False)
+    attempts = Column(Integer, nullable=False, default=0)
+    max_automatic_attempts = Column(Integer, nullable=False, default=3)
+    first_attempt_due_at = Column(DateTime(timezone=True), nullable=False)
+    last_attempt_at = Column(DateTime(timezone=True), nullable=True)
+    stop_transaction_due_at = Column(DateTime(timezone=True), nullable=False)
+    physical_stop_confirmed = Column(Boolean, nullable=False, default=False)
+    command_id = Column(String(255), nullable=False)
+    last_error = Column(String(255), nullable=True)
+    idempotency_key = Column(String(255), nullable=False)
+    version = Column(Integer, nullable=False, default=1)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        UniqueConstraint("reservation_id", "reason_code", name="uq_risk_stop_reservation_reason"),
+        UniqueConstraint("command_id", name="uq_risk_stop_command"),
+        CheckConstraint("status IN ('queued', 'sending', 'accepted_pending_physical_stop', 'retry_scheduled', 'confirmed', 'physical_stop_failed', 'unresolved')", name="ck_risk_stop_status"),
+        CheckConstraint("attempts >= 0 AND max_automatic_attempts BETWEEN 1 AND 3", name="ck_risk_stop_attempts"),
+        CheckConstraint("version >= 1", name="ck_risk_stop_version"),
+        Index("idx_risk_stop_due", "status", "first_attempt_due_at", "stop_transaction_due_at"),
+    )
+
+
+class ProviderResolution(Base):
+    """One canonical Provider operation/query convergence record."""
+    __tablename__ = "provider_resolutions"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="RESTRICT"), nullable=False)
+    reservation_id = Column(UUID(as_uuid=True), ForeignKey("risk_reservations.id", ondelete="RESTRICT"), nullable=False)
+    session_id = Column(UUID(as_uuid=True), ForeignKey("charging_sessions.id", ondelete="RESTRICT"), nullable=False)
+    invoice_id = Column(UUID(as_uuid=True), ForeignKey("invoices.id", ondelete="RESTRICT"), nullable=True)
+    provider = Column(String(50), nullable=False)
+    provider_operation_key = Column(String(255), nullable=False)
+    provider_reference = Column(String(255), nullable=True)
+    status = Column(String(40), nullable=False, default="pending")
+    unknown_since = Column(DateTime(timezone=True), nullable=True)
+    final_due_at = Column(DateTime(timezone=True), nullable=False)
+    next_check_at = Column(DateTime(timezone=True), nullable=True)
+    duplicate_create_blocked = Column(Boolean, nullable=False, default=True)
+    last_error_code = Column(String(100), nullable=True)
+    version = Column(Integer, nullable=False, default=1)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        UniqueConstraint("provider", "provider_operation_key", name="uq_provider_resolution_operation"),
+        UniqueConstraint("reservation_id", name="uq_provider_resolution_reservation"),
+        CheckConstraint("status IN ('not_required', 'pending', 'checking', 'resolved_approved', 'resolved_rejected', 'terminal_unresolved')", name="ck_provider_resolution_status"),
+        CheckConstraint("version >= 1", name="ck_provider_resolution_version"),
+        Index("idx_provider_resolution_due", "status", "next_check_at", "final_due_at"),
+    )
+
+class RecoveryAttempt(Base):
+    """Immutable request identity and canonical state for one invoice recovery."""
+    __tablename__ = "recovery_attempts"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id = Column(UUID(as_uuid=True), nullable=False)
+    app_user_id = Column(UUID(as_uuid=True), ForeignKey("app_users.id", ondelete="RESTRICT"), nullable=False)
+    invoice_id = Column(UUID(as_uuid=True), nullable=False)
+    session_id = Column(UUID(as_uuid=True), nullable=False)
+    attempt_number = Column(Integer, nullable=False)
+    method = Column(String(20), nullable=False)
+    provider = Column(String(50), nullable=True)
+    provider_account_ref = Column(String(100), nullable=True)
+    provider_operation_key = Column(String(255), nullable=True)
+    provider_payment_ref = Column(String(255), nullable=True)
+    target_amount = Column(Numeric(18, 2), nullable=False)
+    allocated_amount = Column(Numeric(18, 2), nullable=False, default=0)
+    currency = Column(String(3), nullable=False, default="COP")
+    status = Column(String(30), nullable=False, default="created")
+    reason_code = Column(String(100), nullable=True)
+    idempotency_key = Column(String(255), nullable=False)
+    request_fingerprint = Column(String(128), nullable=False)
+    schema_version = Column(Integer, nullable=False, default=1)
+    version = Column(Integer, nullable=False, default=1)
+    audit_reference = Column(String(255), nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["invoice_id", "session_id", "tenant_id"],
+            ["invoices.id", "invoices.session_id", "invoices.tenant_id"],
+            name="fk_recovery_attempt_invoice_owner",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint("app_user_id", "idempotency_key", name="uq_recovery_attempt_user_idempotency"),
+        UniqueConstraint("invoice_id", "attempt_number", name="uq_recovery_attempt_invoice_number"),
+        UniqueConstraint("provider", "provider_operation_key", name="uq_recovery_attempt_provider_operation"),
+        UniqueConstraint("id", "invoice_id", "tenant_id", name="uq_recovery_attempt_id_invoice_tenant"),
+        CheckConstraint("attempt_number > 0", name="ck_recovery_attempt_number_positive"),
+        CheckConstraint("target_amount > 0", name="ck_recovery_attempt_target_positive"),
+        CheckConstraint("allocated_amount >= 0 AND allocated_amount <= target_amount", name="ck_recovery_attempt_allocated_range"),
+        CheckConstraint("currency = 'COP'", name="ck_recovery_attempt_currency"),
+        CheckConstraint("method IN ('wallet', 'new_card', 'saved_card')", name="ck_recovery_attempt_method"),
+        CheckConstraint(
+            "status IN ('created', 'processing', 'action_required', 'provider_approved', 'allocated', "
+            "'declined', 'failed', 'cancelled', 'expired', 'duplicate_approved', 'unknown')",
+            name="ck_recovery_attempt_status",
+        ),
+        CheckConstraint("schema_version >= 1 AND version >= 1", name="ck_recovery_attempt_versions"),
+        Index("idx_recovery_attempt_tenant_status", "tenant_id", "status", "updated_at"),
+        Index("idx_recovery_attempt_invoice_status", "invoice_id", "status"),
+        Index("idx_recovery_attempt_user_created", "app_user_id", "created_at"),
+        Index("idx_recovery_attempt_provider_ref", "provider", "provider_payment_ref"),
+    )
+
+
+class PaymentAllocation(Base):
+    """Single invoice settlement winner; append/reverse rather than overwrite."""
+    __tablename__ = "payment_allocations"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id = Column(UUID(as_uuid=True), nullable=False)
+    invoice_id = Column(UUID(as_uuid=True), nullable=False)
+    recovery_attempt_id = Column(UUID(as_uuid=True), nullable=False)
+    payment_order_id = Column(UUID(as_uuid=True), ForeignKey("payment_orders.id", ondelete="RESTRICT"), nullable=True)
+    wallet_transaction_id = Column(UUID(as_uuid=True), ForeignKey("app_wallet_transactions.id", ondelete="RESTRICT"), nullable=True)
+    method = Column(String(20), nullable=False)
+    provider = Column(String(50), nullable=True)
+    amount = Column(Numeric(18, 2), nullable=False)
+    currency = Column(String(3), nullable=False, default="COP")
+    status = Column(String(20), nullable=False, default="pending")
+    winner_version = Column(Integer, nullable=False, default=1)
+    reversal_reason = Column(String(100), nullable=True)
+    schema_version = Column(Integer, nullable=False, default=1)
+    audit_reference = Column(String(255), nullable=False)
+    committed_at = Column(DateTime(timezone=True), nullable=True)
+    reversed_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["recovery_attempt_id", "invoice_id", "tenant_id"],
+            ["recovery_attempts.id", "recovery_attempts.invoice_id", "recovery_attempts.tenant_id"],
+            name="fk_payment_allocation_attempt_owner",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint("recovery_attempt_id", name="uq_payment_allocation_recovery_attempt"),
+        UniqueConstraint("id", "tenant_id", name="uq_payment_allocation_id_tenant"),
+        UniqueConstraint("id", "invoice_id", "tenant_id", name="uq_payment_allocation_id_invoice_tenant"),
+        CheckConstraint("amount > 0", name="ck_payment_allocation_amount_positive"),
+        CheckConstraint("currency = 'COP'", name="ck_payment_allocation_currency"),
+        CheckConstraint("method IN ('wallet', 'new_card', 'saved_card')", name="ck_payment_allocation_method"),
+        CheckConstraint("status IN ('pending', 'committed', 'reversed', 'failed', 'needs_review')", name="ck_payment_allocation_status"),
+        CheckConstraint("winner_version >= 1 AND schema_version >= 1", name="ck_payment_allocation_versions"),
+        Index(
+            "uq_payment_allocation_committed_invoice",
+            "invoice_id",
+            unique=True,
+            postgresql_where=text("status = 'committed'"),
+            sqlite_where=text("status = 'committed'"),
+        ),
+        Index("idx_payment_allocation_tenant_status", "tenant_id", "status", "updated_at"),
+    )
+
+
+class FinancialEligibilityDecision(Base):
+    """Rebuildable platform-level D1 decision snapshot; not a risk ledger."""
+    __tablename__ = "financial_eligibility_decisions"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    app_user_id = Column(UUID(as_uuid=True), ForeignKey("app_users.id", ondelete="RESTRICT"), nullable=False)
+    operation = Column(String(50), nullable=False)
+    status = Column(String(20), nullable=False)
+    reason_codes = Column(PortableJSON, nullable=False, default=list)
+    blocking_resources = Column(PortableJSON, nullable=False, default=list)
+    version = Column(Integer, nullable=False)
+    schema_version = Column(Integer, nullable=False, default=1)
+    audit_reference = Column(String(255), nullable=False)
+    evaluated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        UniqueConstraint("app_user_id", "operation", name="uq_financial_eligibility_user_operation"),
+        CheckConstraint("operation = 'paid_charging_admission'", name="ck_financial_eligibility_operation"),
+        CheckConstraint("status IN ('eligible', 'blocked', 'recheck_required', 'unknown')", name="ck_financial_eligibility_status"),
+        CheckConstraint("version >= 1 AND schema_version >= 1", name="ck_financial_eligibility_versions"),
+        Index("idx_financial_eligibility_status_evaluated", "status", "evaluated_at"),
+    )
+
+
+class RefundCase(Base):
+    __tablename__ = "refund_cases"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    case_reference = Column(String(100), nullable=False, unique=True, default=lambda: _business_number("refund"))
+    tenant_id = Column(UUID(as_uuid=True), nullable=False)
+    app_user_id = Column(UUID(as_uuid=True), ForeignKey("app_users.id", ondelete="RESTRICT"), nullable=False)
+    invoice_id = Column(UUID(as_uuid=True), nullable=False)
+    payment_allocation_id = Column(UUID(as_uuid=True), nullable=False)
+    requested_amount = Column(Numeric(18, 2), nullable=False)
+    approved_amount = Column(Numeric(18, 2), nullable=False, default=0)
+    refunded_amount = Column(Numeric(18, 2), nullable=False, default=0)
+    currency = Column(String(3), nullable=False, default="COP")
+    reason_code = Column(String(100), nullable=False)
+    status = Column(String(30), nullable=False, default="submitted")
+    version = Column(Integer, nullable=False, default=1)
+    schema_version = Column(Integer, nullable=False, default=1)
+    audit_reference = Column(String(255), nullable=False)
+    resolved_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["payment_allocation_id", "invoice_id", "tenant_id"],
+            ["payment_allocations.id", "payment_allocations.invoice_id", "payment_allocations.tenant_id"],
+            name="fk_refund_case_allocation_owner",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint("id", "tenant_id", name="uq_refund_case_id_tenant"),
+        CheckConstraint("requested_amount > 0", name="ck_refund_case_requested_positive"),
+        CheckConstraint("approved_amount >= 0 AND approved_amount <= requested_amount", name="ck_refund_case_approved_range"),
+        CheckConstraint("refunded_amount >= 0 AND refunded_amount <= approved_amount", name="ck_refund_case_refunded_range"),
+        CheckConstraint("currency = 'COP'", name="ck_refund_case_currency"),
+        CheckConstraint(
+            "status IN ('submitted', 'under_review', 'approved', 'provider_processing', 'partially_refunded', "
+            "'refunded', 'rejected', 'manual_review', 'unknown')",
+            name="ck_refund_case_status",
+        ),
+        CheckConstraint("version >= 1 AND schema_version >= 1", name="ck_refund_case_versions"),
+        Index("idx_refund_case_tenant_status", "tenant_id", "status", "updated_at"),
+        Index("idx_refund_case_invoice_created", "invoice_id", "created_at"),
+    )
+
+
+class RefundApproval(Base):
+    __tablename__ = "refund_approvals"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id = Column(UUID(as_uuid=True), nullable=False)
+    refund_case_id = Column(UUID(as_uuid=True), nullable=False)
+    initiator_admin_id = Column(UUID(as_uuid=True), ForeignKey("admin_users.id", ondelete="RESTRICT"), nullable=False)
+    approver_admin_id = Column(UUID(as_uuid=True), ForeignKey("admin_users.id", ondelete="RESTRICT"), nullable=True)
+    status = Column(String(20), nullable=False, default="pending")
+    requested_amount = Column(Numeric(18, 2), nullable=False)
+    currency = Column(String(3), nullable=False, default="COP")
+    version = Column(Integer, nullable=False, default=1)
+    schema_version = Column(Integer, nullable=False, default=1)
+    audit_reference = Column(String(255), nullable=False)
+    requested_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    decided_at = Column(DateTime(timezone=True), nullable=True)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        ForeignKeyConstraint(["refund_case_id", "tenant_id"], ["refund_cases.id", "refund_cases.tenant_id"], name="fk_refund_approval_case_owner", ondelete="RESTRICT"),
+        CheckConstraint("requested_amount > 0", name="ck_refund_approval_amount_positive"),
+        CheckConstraint("currency = 'COP'", name="ck_refund_approval_currency"),
+        CheckConstraint("status IN ('not_required', 'pending', 'approved', 'rejected', 'expired', 'unknown')", name="ck_refund_approval_status"),
+        CheckConstraint("approver_admin_id IS NULL OR approver_admin_id <> initiator_admin_id", name="ck_refund_approval_distinct_actors"),
+        CheckConstraint("version >= 1 AND schema_version >= 1", name="ck_refund_approval_versions"),
+        Index("idx_refund_approval_case_status", "refund_case_id", "status"),
+    )
+
+
+class RefundAttempt(Base):
+    __tablename__ = "refund_attempts"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id = Column(UUID(as_uuid=True), nullable=False)
+    refund_case_id = Column(UUID(as_uuid=True), nullable=False)
+    attempt_number = Column(Integer, nullable=False)
+    provider = Column(String(50), nullable=False)
+    provider_account_ref = Column(String(100), nullable=False)
+    provider_operation_key = Column(String(255), nullable=False)
+    provider_refund_ref = Column(String(255), nullable=True)
+    amount = Column(Numeric(18, 2), nullable=False)
+    currency = Column(String(3), nullable=False, default="COP")
+    status = Column(String(30), nullable=False, default="processing")
+    reason_code = Column(String(100), nullable=True)
+    version = Column(Integer, nullable=False, default=1)
+    schema_version = Column(Integer, nullable=False, default=1)
+    audit_reference = Column(String(255), nullable=False)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        ForeignKeyConstraint(["refund_case_id", "tenant_id"], ["refund_cases.id", "refund_cases.tenant_id"], name="fk_refund_attempt_case_owner", ondelete="RESTRICT"),
+        UniqueConstraint("refund_case_id", "attempt_number", name="uq_refund_attempt_case_number"),
+        UniqueConstraint("provider", "provider_operation_key", name="uq_refund_attempt_provider_operation"),
+        CheckConstraint("attempt_number > 0 AND amount > 0", name="ck_refund_attempt_positive"),
+        CheckConstraint("currency = 'COP'", name="ck_refund_attempt_currency"),
+        CheckConstraint("status IN ('processing', 'partially_refunded', 'refunded', 'failed', 'manual_review', 'unknown')", name="ck_refund_attempt_status"),
+        CheckConstraint("version >= 1 AND schema_version >= 1", name="ck_refund_attempt_versions"),
+        Index("idx_refund_attempt_case_status", "refund_case_id", "status"),
+    )
+
+
+class ChargebackCase(Base):
+    __tablename__ = "chargeback_cases"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    case_reference = Column(String(100), nullable=False, unique=True, default=lambda: _business_number("chargeback"))
+    tenant_id = Column(UUID(as_uuid=True), nullable=False)
+    app_user_id = Column(UUID(as_uuid=True), ForeignKey("app_users.id", ondelete="RESTRICT"), nullable=False)
+    invoice_id = Column(UUID(as_uuid=True), nullable=False)
+    payment_allocation_id = Column(UUID(as_uuid=True), nullable=False)
+    provider = Column(String(50), nullable=False)
+    provider_account_ref = Column(String(100), nullable=False)
+    provider_dispute_ref = Column(String(255), nullable=False)
+    disputed_amount = Column(Numeric(18, 2), nullable=False)
+    currency = Column(String(3), nullable=False, default="COP")
+    status = Column(String(20), nullable=False, default="received")
+    reason_code = Column(String(100), nullable=True)
+    version = Column(Integer, nullable=False, default=1)
+    schema_version = Column(Integer, nullable=False, default=1)
+    audit_reference = Column(String(255), nullable=False)
+    received_at = Column(DateTime(timezone=True), nullable=False)
+    resolved_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["payment_allocation_id", "invoice_id", "tenant_id"],
+            ["payment_allocations.id", "payment_allocations.invoice_id", "payment_allocations.tenant_id"],
+            name="fk_chargeback_case_allocation_owner",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint("provider", "provider_dispute_ref", name="uq_chargeback_provider_dispute"),
+        UniqueConstraint("id", "tenant_id", name="uq_chargeback_case_id_tenant"),
+        CheckConstraint("disputed_amount > 0", name="ck_chargeback_amount_positive"),
+        CheckConstraint("currency = 'COP'", name="ck_chargeback_currency"),
+        CheckConstraint("status IN ('received', 'under_review', 'hold', 'representment', 'won', 'lost', 'reversed', 'unknown')", name="ck_chargeback_status"),
+        CheckConstraint("version >= 1 AND schema_version >= 1", name="ck_chargeback_versions"),
+        Index("idx_chargeback_tenant_status", "tenant_id", "status", "updated_at"),
+    )
+
+
+class ReconciliationRun(Base):
+    __tablename__ = "reconciliation_runs"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    scope_type = Column(String(20), nullable=False)
+    scope_ref = Column(String(100), nullable=False)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="RESTRICT"), nullable=True)
+    provider = Column(String(50), nullable=False)
+    provider_account_ref = Column(String(100), nullable=False)
+    business_date = Column(Date, nullable=False)
+    run_type = Column(String(20), nullable=False, default="continuous")
+    source_checksum = Column(String(128), nullable=False)
+    cutoff_at = Column(DateTime(timezone=True), nullable=True)
+    closed_at = Column(DateTime(timezone=True), nullable=True)
+    source_watermarks = Column(PortableJSON, nullable=False, default=dict)
+    status = Column(String(40), nullable=False, default="created")
+    item_count = Column(Integer, nullable=False, default=0)
+    matched_count = Column(Integer, nullable=False, default=0)
+    exception_count = Column(Integer, nullable=False, default=0)
+    version = Column(Integer, nullable=False, default=1)
+    schema_version = Column(Integer, nullable=False, default=1)
+    audit_reference = Column(String(255), nullable=False)
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        UniqueConstraint("provider", "provider_account_ref", "business_date", "source_checksum", name="uq_reconciliation_run_source"),
+        UniqueConstraint("id", "scope_type", "scope_ref", name="uq_reconciliation_run_scope"),
+        CheckConstraint(
+            "(scope_type = 'platform' AND tenant_id IS NULL AND scope_ref = 'platform:eslatin') OR "
+            "(scope_type = 'tenant' AND tenant_id IS NOT NULL AND length(scope_ref) = 43 "
+            "AND substr(scope_ref, 1, 7) = 'tenant:' "
+            "AND substr(scope_ref, 16, 1) = '-' AND substr(scope_ref, 21, 1) = '-' "
+            "AND substr(scope_ref, 26, 1) = '-' AND substr(scope_ref, 31, 1) = '-' "
+            "AND replace(substr(scope_ref, 8), '-', '') = replace(CAST(tenant_id AS VARCHAR), '-', ''))",
+            name="ck_reconciliation_run_scope",
+        ),
+        CheckConstraint("status IN ('created', 'running', 'completed', 'completed_with_exceptions', 'failed', 'unknown')", name="ck_reconciliation_run_status"),
+        CheckConstraint("run_type IN ('continuous', 'daily')", name="ck_reconciliation_run_type"),
+        CheckConstraint("item_count >= 0 AND matched_count >= 0 AND exception_count >= 0", name="ck_reconciliation_run_counts"),
+        CheckConstraint("version >= 1 AND schema_version >= 1", name="ck_reconciliation_run_versions"),
+        Index("idx_reconciliation_run_business_status", "business_date", "status", "provider"),
+    )
+
+
+class ReconciliationItem(Base):
+    __tablename__ = "reconciliation_items"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    reconciliation_run_id = Column(UUID(as_uuid=True), nullable=False)
+    scope_type = Column(String(20), nullable=False)
+    scope_ref = Column(String(100), nullable=False)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="RESTRICT"), nullable=True)
+    provider = Column(String(50), nullable=False)
+    source_reference = Column(String(255), nullable=False)
+    # Nullable keeps legacy BE-203 diagnostic rows insert-compatible; every
+    # BE-208-created item always supplies the canonical reference explicitly.
+    canonical_reference = Column(String(255), nullable=True)
+    source_type = Column(String(20), nullable=False, default="provider")
+    eslatin_reference = Column(String(255), nullable=True)
+    provider_reference = Column(String(255), nullable=True)
+    funds_reference = Column(String(255), nullable=True)
+    merchant_reference = Column(String(255), nullable=True)
+    payment_allocation_id = Column(UUID(as_uuid=True), ForeignKey("payment_allocations.id", ondelete="RESTRICT"), nullable=True)
+    expected_amount = Column(Numeric(18, 2), nullable=True)
+    observed_amount = Column(Numeric(18, 2), nullable=False)
+    currency = Column(String(3), nullable=False)
+    provider_amount = Column(Numeric(18, 2), nullable=True)
+    funds_amount = Column(Numeric(18, 2), nullable=True)
+    fee_amount = Column(Numeric(18, 2), nullable=True)
+    refund_amount = Column(Numeric(18, 2), nullable=True)
+    hold_amount = Column(Numeric(18, 2), nullable=True)
+    release_amount = Column(Numeric(18, 2), nullable=True)
+    funds_status = Column(String(30), nullable=True)
+    status = Column(String(30), nullable=False, default="pending")
+    mismatch_code = Column(String(100), nullable=True)
+    conflict_code = Column(String(100), nullable=True)
+    source_fingerprint = Column(String(128), nullable=False)
+    source_cursor = Column(String(255), nullable=True)
+    source_watermark = Column(String(255), nullable=True)
+    lease_owner = Column(String(100), nullable=True)
+    lease_expires_at = Column(DateTime(timezone=True), nullable=True)
+    retry_count = Column(Integer, nullable=False, default=0)
+    max_retries = Column(Integer, nullable=False, default=5)
+    dead_lettered_at = Column(DateTime(timezone=True), nullable=True)
+    replay_count = Column(Integer, nullable=False, default=0)
+    last_error_code = Column(String(100), nullable=True)
+    version = Column(Integer, nullable=False, default=1)
+    schema_version = Column(Integer, nullable=False, default=1)
+    audit_reference = Column(String(255), nullable=False)
+    occurred_at = Column(DateTime(timezone=True), nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["reconciliation_run_id", "scope_type", "scope_ref"],
+            ["reconciliation_runs.id", "reconciliation_runs.scope_type", "reconciliation_runs.scope_ref"],
+            name="fk_reconciliation_item_run_scope",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["payment_allocation_id", "tenant_id"],
+            ["payment_allocations.id", "payment_allocations.tenant_id"],
+            name="fk_reconciliation_item_allocation_owner",
+            ondelete="RESTRICT",
+            match="SIMPLE",
+        ),
+        UniqueConstraint("provider", "source_reference", "source_fingerprint", name="uq_reconciliation_item_source_fact"),
+        UniqueConstraint("reconciliation_run_id", "canonical_reference", name="uq_reconciliation_item_canonical_reference"),
+        UniqueConstraint("id", "reconciliation_run_id", name="uq_reconciliation_item_id_run"),
+        CheckConstraint("expected_amount IS NULL OR expected_amount >= 0", name="ck_reconciliation_item_expected_nonnegative"),
+        CheckConstraint("observed_amount >= 0", name="ck_reconciliation_item_observed_nonnegative"),
+        CheckConstraint("currency = 'COP'", name="ck_reconciliation_item_currency"),
+        CheckConstraint("source_type IN ('eslatin', 'provider', 'funds', 'canonical')", name="ck_reconciliation_item_source_type"),
+        CheckConstraint("fee_amount IS NULL OR fee_amount >= 0", name="ck_reconciliation_item_fee_nonnegative"),
+        CheckConstraint("refund_amount IS NULL OR refund_amount >= 0", name="ck_reconciliation_item_refund_nonnegative"),
+        CheckConstraint("hold_amount IS NULL OR hold_amount >= 0", name="ck_reconciliation_item_hold_nonnegative"),
+        CheckConstraint("release_amount IS NULL OR release_amount >= 0", name="ck_reconciliation_item_release_nonnegative"),
+        CheckConstraint("retry_count >= 0 AND max_retries >= 0 AND replay_count >= 0", name="ck_reconciliation_item_retry_counts"),
+        CheckConstraint("status IN ('matched', 'pending', 'mismatch', 'manual_review', 'temporarily_accepted', 'closed', 'unknown')", name="ck_reconciliation_item_status"),
+        CheckConstraint(
+            "(scope_type = 'platform' AND tenant_id IS NULL AND scope_ref = 'platform:eslatin') OR "
+            "(scope_type = 'tenant' AND tenant_id IS NOT NULL AND length(scope_ref) = 43 "
+            "AND substr(scope_ref, 1, 7) = 'tenant:' "
+            "AND substr(scope_ref, 16, 1) = '-' AND substr(scope_ref, 21, 1) = '-' "
+            "AND substr(scope_ref, 26, 1) = '-' AND substr(scope_ref, 31, 1) = '-' "
+            "AND replace(substr(scope_ref, 8), '-', '') = replace(CAST(tenant_id AS VARCHAR), '-', ''))",
+            name="ck_reconciliation_item_scope",
+        ),
+        CheckConstraint("version >= 1 AND schema_version >= 1", name="ck_reconciliation_item_versions"),
+        Index("idx_reconciliation_item_run_status", "reconciliation_run_id", "status"),
+        Index("idx_reconciliation_item_tenant_status", "tenant_id", "status"),
+    )
+
+
+class ReconciliationException(Base):
+    __tablename__ = "reconciliation_exceptions"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    reconciliation_run_id = Column(UUID(as_uuid=True), nullable=False)
+    reconciliation_item_id = Column(UUID(as_uuid=True), nullable=False)
+    scope_type = Column(String(20), nullable=False)
+    scope_ref = Column(String(100), nullable=False)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="RESTRICT"), nullable=True)
+    status = Column(String(30), nullable=False, default="manual_review")
+    reason_code = Column(String(100), nullable=False)
+    difference_type = Column(String(50), nullable=True)
+    difference_amount = Column(Numeric(18, 2), nullable=True)
+    owner_ref = Column(String(100), nullable=True)
+    severity = Column(String(20), nullable=False, default="blocking")
+    due_at = Column(DateTime(timezone=True), nullable=True)
+    escalation = Column(String(100), nullable=True)
+    resolution_code = Column(String(100), nullable=True)
+    resolution_reason = Column(String(1000), nullable=True)
+    request_idempotency_key = Column(String(255), nullable=True)
+    decision_idempotency_key = Column(String(255), nullable=True)
+    resolution_idempotency_key = Column(String(255), nullable=True)
+    initiator_admin_id = Column(UUID(as_uuid=True), ForeignKey("admin_users.id", ondelete="RESTRICT"), nullable=True)
+    approver_admin_id = Column(UUID(as_uuid=True), ForeignKey("admin_users.id", ondelete="RESTRICT"), nullable=True)
+    version = Column(Integer, nullable=False, default=1)
+    schema_version = Column(Integer, nullable=False, default=1)
+    audit_reference = Column(String(255), nullable=False)
+    temporarily_accepted_until = Column(DateTime(timezone=True), nullable=True)
+    closed_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        ForeignKeyConstraint(["reconciliation_item_id", "reconciliation_run_id"], ["reconciliation_items.id", "reconciliation_items.reconciliation_run_id"], name="fk_reconciliation_exception_item_run", ondelete="RESTRICT"),
+        ForeignKeyConstraint(["reconciliation_run_id", "scope_type", "scope_ref"], ["reconciliation_runs.id", "reconciliation_runs.scope_type", "reconciliation_runs.scope_ref"], name="fk_reconciliation_exception_run_scope", ondelete="RESTRICT"),
+        UniqueConstraint("reconciliation_item_id", name="uq_reconciliation_exception_item"),
+        CheckConstraint("status IN ('matched', 'pending', 'mismatch', 'manual_review', 'temporarily_accepted', 'closed', 'unknown')", name="ck_reconciliation_exception_status"),
+        CheckConstraint("severity IN ('blocking', 'warning')", name="ck_reconciliation_exception_severity"),
+        CheckConstraint("difference_amount IS NULL OR difference_amount >= 0", name="ck_reconciliation_exception_difference_nonnegative"),
+        CheckConstraint(
+            "(scope_type = 'platform' AND tenant_id IS NULL AND scope_ref = 'platform:eslatin') OR "
+            "(scope_type = 'tenant' AND tenant_id IS NOT NULL AND length(scope_ref) = 43 "
+            "AND substr(scope_ref, 1, 7) = 'tenant:' "
+            "AND substr(scope_ref, 16, 1) = '-' AND substr(scope_ref, 21, 1) = '-' "
+            "AND substr(scope_ref, 26, 1) = '-' AND substr(scope_ref, 31, 1) = '-' "
+            "AND replace(substr(scope_ref, 8), '-', '') = replace(CAST(tenant_id AS VARCHAR), '-', ''))",
+            name="ck_reconciliation_exception_scope",
+        ),
+        CheckConstraint("approver_admin_id IS NULL OR initiator_admin_id IS NULL OR approver_admin_id <> initiator_admin_id", name="ck_reconciliation_exception_distinct_actors"),
+        CheckConstraint("version >= 1 AND schema_version >= 1", name="ck_reconciliation_exception_versions"),
+        Index("idx_reconciliation_exception_status_expiry", "status", "temporarily_accepted_until"),
+    )
+
+
+class ReconciliationSourceFact(Base):
+    """Bounded canonical fact received from EsLatin, a Provider, or funds."""
+
+    __tablename__ = "reconciliation_source_facts"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    scope_type = Column(String(20), nullable=False)
+    scope_ref = Column(String(100), nullable=False)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="RESTRICT"), nullable=True, index=True)
+    provider = Column(String(50), nullable=False)
+    provider_account_ref = Column(String(100), nullable=False)
+    source_type = Column(String(20), nullable=False)
+    source_reference = Column(String(255), nullable=False)
+    canonical_reference = Column(String(255), nullable=False)
+    merchant_reference = Column(String(255), nullable=True)
+    amount = Column(Numeric(18, 2), nullable=False)
+    currency = Column(String(3), nullable=False, default="COP")
+    fee_amount = Column(Numeric(18, 2), nullable=False, default=0)
+    refund_amount = Column(Numeric(18, 2), nullable=False, default=0)
+    hold_amount = Column(Numeric(18, 2), nullable=False, default=0)
+    release_amount = Column(Numeric(18, 2), nullable=False, default=0)
+    funds_status = Column(String(30), nullable=True)
+    source_event_id = Column(String(255), nullable=True)
+    source_cursor = Column(String(255), nullable=True)
+    source_watermark = Column(String(255), nullable=True)
+    source_fingerprint = Column(String(128), nullable=False)
+    dedupe_key = Column(String(255), nullable=False)
+    conflict_code = Column(String(100), nullable=True)
+    status = Column(String(30), nullable=False, default="accepted")
+    occurred_at = Column(DateTime(timezone=True), nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), index=True)
+
+    __table_args__ = (
+        UniqueConstraint("provider", "source_type", "source_reference", "source_fingerprint", name="uq_recon_source_fact_fingerprint"),
+        UniqueConstraint("provider", "source_type", "dedupe_key", name="uq_recon_source_fact_dedupe"),
+        CheckConstraint("source_type IN ('eslatin', 'provider', 'funds')", name="ck_recon_source_fact_type"),
+        CheckConstraint("currency = 'COP'", name="ck_recon_source_fact_currency"),
+        CheckConstraint("amount >= 0 AND fee_amount >= 0 AND refund_amount >= 0 AND hold_amount >= 0 AND release_amount >= 0", name="ck_recon_source_fact_amounts"),
+        CheckConstraint("status IN ('accepted', 'duplicate', 'conflict', 'dead_letter', 'unknown')", name="ck_recon_source_fact_status"),
+        Index("idx_recon_source_fact_match", "scope_type", "scope_ref", "canonical_reference", "source_type"),
+        Index("idx_recon_source_fact_watermark", "source_type", "source_cursor", "created_at"),
+    )
+
+
+class ReconciliationSourceWatermark(Base):
+    """Per-scope/source checkpoint; never represents a financial outcome."""
+
+    __tablename__ = "reconciliation_source_watermarks"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    scope_type = Column(String(20), nullable=False)
+    scope_ref = Column(String(100), nullable=False)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="RESTRICT"), nullable=True)
+    provider = Column(String(50), nullable=False)
+    source_type = Column(String(20), nullable=False)
+    watermark = Column(String(255), nullable=False)
+    version = Column(Integer, nullable=False, default=1)
+    lease_owner = Column(String(100), nullable=True)
+    lease_expires_at = Column(DateTime(timezone=True), nullable=True)
+    retry_count = Column(Integer, nullable=False, default=0)
+    dead_lettered_at = Column(DateTime(timezone=True), nullable=True)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        UniqueConstraint("scope_type", "scope_ref", "provider", "source_type", name="uq_recon_source_watermark"),
+        CheckConstraint("source_type IN ('eslatin', 'provider', 'funds')", name="ck_recon_source_watermark_type"),
+        CheckConstraint("version >= 1 AND retry_count >= 0", name="ck_recon_source_watermark_versions"),
+        Index("idx_recon_source_watermark_lease", "lease_expires_at", "source_type"),
+    )
+
+
+class ReconciliationWorkItem(Base):
+    """Bounded reconciliation work with lease, retry and dead-letter state."""
+
+    __tablename__ = "reconciliation_work_items"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    scope_type = Column(String(20), nullable=False)
+    scope_ref = Column(String(100), nullable=False)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="RESTRICT"), nullable=True)
+    source_fact_id = Column(UUID(as_uuid=True), ForeignKey("reconciliation_source_facts.id", ondelete="RESTRICT"), nullable=False)
+    status = Column(String(30), nullable=False, default="queued")
+    lease_owner = Column(String(100), nullable=True)
+    lease_expires_at = Column(DateTime(timezone=True), nullable=True)
+    retry_count = Column(Integer, nullable=False, default=0)
+    max_retries = Column(Integer, nullable=False, default=5)
+    next_attempt_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), index=True)
+    last_error_code = Column(String(100), nullable=True)
+    dead_lettered_at = Column(DateTime(timezone=True), nullable=True)
+    replay_count = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        UniqueConstraint("source_fact_id", name="uq_recon_work_source_fact"),
+        CheckConstraint("status IN ('queued', 'leased', 'completed', 'retryable', 'dead_letter')", name="ck_recon_work_status"),
+        CheckConstraint("retry_count >= 0 AND max_retries >= 0 AND replay_count >= 0", name="ck_recon_work_counts"),
+        Index("idx_recon_work_claim", "status", "next_attempt_at", "lease_expires_at"),
+    )
+
+
+class ReconciliationExport(Base):
+    """Bounded, one-time Admin CSV export resource."""
+
+    __tablename__ = "reconciliation_exports"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    reconciliation_run_id = Column(UUID(as_uuid=True), ForeignKey("reconciliation_runs.id", ondelete="RESTRICT"), nullable=False)
+    scope_type = Column(String(20), nullable=False)
+    scope_ref = Column(String(100), nullable=False)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="RESTRICT"), nullable=True)
+    status = Column(String(20), nullable=False, default="queued")
+    format = Column(String(10), nullable=False, default="csv")
+    filters = Column(PortableJSON, nullable=False, default=dict)
+    content = Column(Text, nullable=True)
+    row_count = Column(Integer, nullable=False, default=0)
+    max_rows = Column(Integer, nullable=False, default=10000)
+    download_path = Column(String(255), nullable=True)
+    idempotency_key = Column(String(255), nullable=False)
+    audit_reference = Column(String(255), nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    version = Column(Integer, nullable=False, default=1)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        UniqueConstraint("scope_type", "scope_ref", "idempotency_key", name="uq_recon_export_scope_idempotency"),
+        CheckConstraint("format = 'csv'", name="ck_recon_export_format"),
+        CheckConstraint("status IN ('queued', 'generating', 'ready', 'downloaded', 'failed', 'expired')", name="ck_recon_export_status"),
+        CheckConstraint("row_count >= 0 AND max_rows > 0 AND row_count <= max_rows", name="ck_recon_export_rows"),
+        CheckConstraint("version >= 1", name="ck_recon_export_version"),
+        Index("idx_recon_export_scope_status", "scope_type", "scope_ref", "status", "created_at"),
+    )
+
+
+class RuntimeRailControl(Base):
+    """Dual-axis runtime availability control. This is not a risk threshold."""
+    __tablename__ = "runtime_rail_controls"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    axis = Column(String(30), nullable=False)
+    scope_type = Column(String(20), nullable=False)
+    scope_ref = Column(String(100), nullable=False)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="RESTRICT"), nullable=True)
+    site_id = Column(UUID(as_uuid=True), nullable=True)
+    provider = Column(String(50), nullable=True)
+    status = Column(String(20), nullable=False, default="open")
+    reason = Column(Text, nullable=True)
+    reason_code = Column(String(100), nullable=True)
+    incident_reference = Column(String(255), nullable=True)
+    closed_by_admin_id = Column(UUID(as_uuid=True), ForeignKey("admin_users.id", ondelete="RESTRICT"), nullable=True)
+    reopened_by_admin_id = Column(UUID(as_uuid=True), ForeignKey("admin_users.id", ondelete="RESTRICT"), nullable=True)
+    health_check_reference = Column(String(255), nullable=True)
+    health_check_status = Column(String(20), nullable=True)
+    effective_at = Column(DateTime(timezone=True), nullable=True)
+    close_idempotency_key = Column(String(255), nullable=True)
+    close_request_fingerprint = Column(String(64), nullable=True)
+    version = Column(Integer, nullable=False, default=1)
+    schema_version = Column(Integer, nullable=False, default=1)
+    audit_reference = Column(String(255), nullable=False)
+    closed_at = Column(DateTime(timezone=True), nullable=True)
+    reopened_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["site_id", "tenant_id"],
+            ["sites.id", "sites.tenant_id"],
+            name="fk_runtime_rail_site_owner",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint("id", "tenant_id", name="uq_runtime_rail_control_id_tenant"),
+        UniqueConstraint("axis", "scope_type", "scope_ref", name="uq_runtime_rail_axis_scope"),
+        CheckConstraint("axis IN ('paid_admission', 'payment_creation')", name="ck_runtime_rail_axis"),
+        CheckConstraint("status IN ('open', 'closed', 'unknown')", name="ck_runtime_rail_status"),
+        CheckConstraint(
+            "(scope_type = 'platform' AND scope_ref = 'platform:eslatin' AND tenant_id IS NULL AND site_id IS NULL AND provider IS NULL) OR "
+            "(scope_type = 'provider' AND scope_ref = 'provider:' || provider AND tenant_id IS NULL AND site_id IS NULL AND provider IS NOT NULL) OR "
+            "(scope_type = 'tenant' AND length(scope_ref) = 43 AND substr(scope_ref, 1, 7) = 'tenant:' "
+            "AND replace(substr(scope_ref, 8), '-', '') = replace(CAST(tenant_id AS VARCHAR), '-', '') "
+            "AND tenant_id IS NOT NULL AND site_id IS NULL AND provider IS NULL) OR "
+            "(scope_type = 'site' AND length(scope_ref) = 41 AND substr(scope_ref, 1, 5) = 'site:' "
+            "AND replace(substr(scope_ref, 6), '-', '') = replace(CAST(site_id AS VARCHAR), '-', '') "
+            "AND tenant_id IS NOT NULL AND site_id IS NOT NULL AND provider IS NULL)",
+            name="ck_runtime_rail_scope",
+        ),
+        CheckConstraint("version >= 1 AND schema_version >= 1", name="ck_runtime_rail_versions"),
+        Index("idx_runtime_rail_status_axis", "status", "axis", "scope_type"),
+    )
+
+
+class RailHealthCheck(Base):
+    """Provider-neutral, server-recorded health evidence for rail recovery."""
+    __tablename__ = "rail_health_checks"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    reference = Column(String(255), nullable=False, unique=True)
+    axis = Column(String(30), nullable=False)
+    scope_type = Column(String(20), nullable=False)
+    scope_ref = Column(String(100), nullable=False)
+    status = Column(String(20), nullable=False)
+    checked_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    safe_metadata = Column(PortableJSON, nullable=False, default=dict)
+
+    __table_args__ = (
+        CheckConstraint("axis IN ('paid_admission', 'payment_creation')", name="ck_rail_health_axis"),
+        CheckConstraint("scope_type IN ('platform', 'provider', 'tenant', 'site')", name="ck_rail_health_scope_type"),
+        CheckConstraint("status IN ('passed', 'failed', 'unknown')", name="ck_rail_health_status"),
+        Index("idx_rail_health_scope_status", "scope_type", "scope_ref", "status", "checked_at"),
+    )
+
+
+class RailReopenRequest(Base):
+    """Two-person reopen intent; the control remains closed until approval."""
+    __tablename__ = "rail_reopen_requests"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    control_id = Column(UUID(as_uuid=True), ForeignKey("runtime_rail_controls.id", ondelete="RESTRICT"), nullable=False)
+    axis = Column(String(30), nullable=False)
+    scope_type = Column(String(20), nullable=False)
+    scope_ref = Column(String(100), nullable=False)
+    status = Column(String(20), nullable=False, default="requested")
+    reason = Column(Text, nullable=False)
+    initiator_admin_id = Column(UUID(as_uuid=True), ForeignKey("admin_users.id", ondelete="RESTRICT"), nullable=False)
+    approver_admin_id = Column(UUID(as_uuid=True), ForeignKey("admin_users.id", ondelete="RESTRICT"), nullable=True)
+    health_check_reference = Column(String(255), nullable=False)
+    health_check_status = Column(String(20), nullable=False, default="unknown")
+    control_status = Column(String(20), nullable=False, default="closed")
+    expected_control_version = Column(Integer, nullable=False)
+    version = Column(Integer, nullable=False, default=1)
+    schema_version = Column(Integer, nullable=False, default=1)
+    idempotency_key = Column(String(255), nullable=False)
+    request_fingerprint = Column(String(64), nullable=False)
+    audit_reference = Column(String(255), nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=True)
+    decided_at = Column(DateTime(timezone=True), nullable=True)
+    decision_idempotency_key = Column(String(255), nullable=True)
+    decision_fingerprint = Column(String(64), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        UniqueConstraint("control_id", "idempotency_key", name="uq_rail_reopen_control_idempotency"),
+        CheckConstraint("axis IN ('paid_admission', 'payment_creation')", name="ck_rail_reopen_axis"),
+        CheckConstraint("scope_type IN ('platform', 'provider', 'tenant', 'site')", name="ck_rail_reopen_scope_type"),
+        CheckConstraint("status IN ('requested', 'approved', 'rejected', 'expired')", name="ck_rail_reopen_status"),
+        CheckConstraint("health_check_status IN ('passed', 'failed', 'unknown')", name="ck_rail_reopen_health_status"),
+        CheckConstraint("control_status IN ('open', 'closed', 'unknown')", name="ck_rail_reopen_control_status"),
+        CheckConstraint("version >= 1 AND schema_version >= 1 AND expected_control_version >= 1", name="ck_rail_reopen_versions"),
+        Index("idx_rail_reopen_status_scope", "status", "scope_type", "scope_ref", "created_at"),
+    )
+
+
+class SupportCase(Base):
+    __tablename__ = "support_cases"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    case_reference = Column(String(100), nullable=False, unique=True, default=lambda: _business_number("support"))
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="RESTRICT"), nullable=False)
+    app_user_id = Column(UUID(as_uuid=True), ForeignKey("app_users.id", ondelete="RESTRICT"), nullable=False)
+    invoice_id = Column(UUID(as_uuid=True), ForeignKey("invoices.id", ondelete="RESTRICT"), nullable=True)
+    session_id = Column(UUID(as_uuid=True), ForeignKey("charging_sessions.id", ondelete="RESTRICT"), nullable=True)
+    payment_order_id = Column(UUID(as_uuid=True), ForeignKey("payment_orders.id", ondelete="RESTRICT"), nullable=True)
+    refund_case_id = Column(UUID(as_uuid=True), ForeignKey("refund_cases.id", ondelete="RESTRICT"), nullable=True)
+    chargeback_case_id = Column(UUID(as_uuid=True), ForeignKey("chargeback_cases.id", ondelete="RESTRICT"), nullable=True)
+    rail_control_id = Column(UUID(as_uuid=True), ForeignKey("runtime_rail_controls.id", ondelete="RESTRICT"), nullable=True)
+    category = Column(String(30), nullable=False)
+    status = Column(String(20), nullable=False, default="open")
+    priority = Column(String(20), nullable=False, default="normal")
+    assigned_admin_id = Column(UUID(as_uuid=True), ForeignKey("admin_users.id", ondelete="SET NULL"), nullable=True)
+    first_response_target_at = Column(DateTime(timezone=True), nullable=True)
+    decision_target_at = Column(DateTime(timezone=True), nullable=True)
+    first_responded_at = Column(DateTime(timezone=True), nullable=True)
+    resolved_at = Column(DateTime(timezone=True), nullable=True)
+    version = Column(Integer, nullable=False, default=1)
+    schema_version = Column(Integer, nullable=False, default=1)
+    audit_reference = Column(String(255), nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["invoice_id", "tenant_id"],
+            ["invoices.id", "invoices.tenant_id"],
+            name="fk_support_case_invoice_owner",
+            ondelete="RESTRICT",
+            match="SIMPLE",
+        ),
+        ForeignKeyConstraint(
+            ["session_id", "tenant_id"],
+            ["charging_sessions.id", "charging_sessions.tenant_id"],
+            name="fk_support_case_session_owner",
+            ondelete="RESTRICT",
+            match="SIMPLE",
+        ),
+        ForeignKeyConstraint(
+            ["refund_case_id", "tenant_id"],
+            ["refund_cases.id", "refund_cases.tenant_id"],
+            name="fk_support_case_refund_owner",
+            ondelete="RESTRICT",
+            match="SIMPLE",
+        ),
+        ForeignKeyConstraint(
+            ["chargeback_case_id", "tenant_id"],
+            ["chargeback_cases.id", "chargeback_cases.tenant_id"],
+            name="fk_support_case_chargeback_owner",
+            ondelete="RESTRICT",
+            match="SIMPLE",
+        ),
+        ForeignKeyConstraint(
+            ["rail_control_id", "tenant_id"],
+            ["runtime_rail_controls.id", "runtime_rail_controls.tenant_id"],
+            name="fk_support_case_rail_owner",
+            ondelete="RESTRICT",
+            match="SIMPLE",
+        ),
+        UniqueConstraint("id", "tenant_id", name="uq_support_case_id_tenant"),
+        CheckConstraint("category IN ('unpaid', 'payment_failed', 'duplicate_charge', 'refund_delayed', 'chargeback', 'cannot_stop', 'amount_mismatch', 'other')", name="ck_support_case_category"),
+        CheckConstraint("status IN ('open', 'acknowledged', 'in_progress', 'waiting_user', 'resolved', 'closed', 'unknown')", name="ck_support_case_status"),
+        CheckConstraint("priority IN ('normal', 'urgent')", name="ck_support_case_priority"),
+        CheckConstraint("version >= 1 AND schema_version >= 1", name="ck_support_case_versions"),
+        Index("idx_support_case_tenant_status", "tenant_id", "status", "updated_at"),
+        Index("idx_support_case_user_created", "app_user_id", "created_at"),
+    )
+
+
+class SupportCaseEvent(Base):
+    """Append-only support timeline fact."""
+    __tablename__ = "support_case_events"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id = Column(UUID(as_uuid=True), nullable=False)
+    support_case_id = Column(UUID(as_uuid=True), nullable=False)
+    event_type = Column(String(50), nullable=False)
+    status = Column(String(20), nullable=True)
+    actor_type = Column(String(20), nullable=False)
+    actor_ref = Column(String(100), nullable=False)
+    visibility = Column(String(20), nullable=False)
+    reason_code = Column(String(100), nullable=True)
+    note = Column(Text, nullable=True)
+    schema_version = Column(Integer, nullable=False, default=1)
+    audit_reference = Column(String(255), nullable=False)
+    occurred_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        ForeignKeyConstraint(["support_case_id", "tenant_id"], ["support_cases.id", "support_cases.tenant_id"], name="fk_support_case_event_owner", ondelete="RESTRICT"),
+        CheckConstraint("actor_type IN ('app_user', 'admin', 'system')", name="ck_support_case_event_actor"),
+        CheckConstraint("visibility IN ('internal', 'user')", name="ck_support_case_event_visibility"),
+        CheckConstraint("schema_version >= 1", name="ck_support_case_event_schema_version"),
+        Index("idx_support_case_event_case_time", "support_case_id", "occurred_at"),
     )
 
 

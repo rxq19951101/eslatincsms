@@ -5,7 +5,7 @@ import useSWR from 'swr';
 import { useParams, useRouter } from 'next/navigation';
 import { apiGet, apiPost, apiPut } from '@/lib/api';
 import { API_ENDPOINTS } from '@/lib/constants';
-import type { BindChargePointsRequest, CreateChargePointInSiteRequest, SiteDetail, SiteDetailChargePoint } from '@/types';
+import type { BindChargePointsRequest, CreateChargePointInSiteRequest, PricingMode, SiteDetail, SiteDetailChargePoint } from '@/types';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
@@ -27,12 +27,12 @@ import { Badge } from '@/components/ui/badge';
 import { ArrowLeft, Copy, Link2, Pencil, Plus, Save, Trash2 } from 'lucide-react';
 import { useI18n } from '@/lib/i18n';
 import { formatDateTime } from '@/lib/localization';
+import PricingSummary from '@/components/pricing/PricingSummary';
 import {
   chargePointSchema,
   apiErrorMessageKey,
   apiFieldErrors,
   fieldErrors,
-  priceSchema,
   siteSchema,
   SITE_API_FIELD_MAPPING,
   type FieldErrors,
@@ -53,6 +53,50 @@ function getStatusColor(status: string) {
     default:
       return 'bg-slate-500/20 text-slate-400 border-slate-500/50';
   }
+}
+
+function toLocalDateTime(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
+  return local.toISOString().slice(0, 16);
+}
+
+function buildPricingPayload(
+  mode: PricingMode,
+  price: string,
+  freeReason: string,
+  freeValidUntil: string,
+  allowInherit: boolean
+): Record<string, string> | { error: string } {
+  if (mode === 'inherit') {
+    return allowInherit ? { pricing_mode: 'inherit' } : { error: '站点不能继承定价' };
+  }
+  if (mode === 'unavailable') return { pricing_mode: mode };
+  if (mode === 'paid') {
+    const amount = Number(price);
+    if (!Number.isFinite(amount) || amount <= 0 || !/^\d+(?:\.\d{1,2})?$/.test(price.trim())) {
+      return { error: '请填写正确的电价（>0，最多两位小数）' };
+    }
+    return {
+      pricing_mode: mode,
+      base_price_per_kwh: amount.toFixed(2),
+      service_fee: '0.00',
+    };
+  }
+  const reason = freeReason.trim();
+  if (reason.length < 3 || reason.length > 500) return { error: '免费原因须为3-500个字符' };
+  const deadline = new Date(freeValidUntil);
+  if (!freeValidUntil || Number.isNaN(deadline.getTime()) || deadline.getTime() <= Date.now()) {
+    return { error: '免费截止时间必须晚于当前时间' };
+  }
+  return {
+    pricing_mode: mode,
+    base_price_per_kwh: '0.00',
+    service_fee: '0.00',
+    free_reason: reason,
+    valid_until: deadline.toISOString(),
+  };
 }
 
 export default function SiteDetailPage() {
@@ -87,6 +131,9 @@ export default function SiteDetailPage() {
   const [editLng, setEditLng] = useState('');
   const [editHours, setEditHours] = useState('');
   const [editPrice, setEditPrice] = useState<string>('');
+  const [pricingMode, setPricingMode] = useState<PricingMode>('unavailable');
+  const [freeReason, setFreeReason] = useState('');
+  const [freeValidUntil, setFreeValidUntil] = useState('');
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [siteErrors, setSiteErrors] = useState<FieldErrors>({});
@@ -123,6 +170,9 @@ export default function SiteDetailPage() {
   const [overrideOpen, setOverrideOpen] = useState(false);
   const [overrideCpId, setOverrideCpId] = useState<string | null>(null);
   const [overridePrice, setOverridePrice] = useState<string>('');
+  const [overrideMode, setOverrideMode] = useState<PricingMode>('inherit');
+  const [overrideFreeReason, setOverrideFreeReason] = useState('');
+  const [overrideFreeValidUntil, setOverrideFreeValidUntil] = useState('');
   const [overrideSaving, setOverrideSaving] = useState(false);
   const [overrideError, setOverrideError] = useState<string | null>(null);
 
@@ -135,6 +185,11 @@ export default function SiteDetailPage() {
     setEditLng(String(site.longitude));
     setEditHours(site.operating_hours || '');
     setEditPrice(site.price_per_kwh != null ? String(site.price_per_kwh) : '');
+    setPricingMode(site.pricing?.pricing_mode === 'free' || site.pricing?.pricing_mode === 'paid'
+      ? site.pricing.pricing_mode
+      : 'unavailable');
+    setFreeReason(site.pricing?.free_reason || '');
+    setFreeValidUntil(site.pricing?.valid_until ? toLocalDateTime(site.pricing.valid_until) : '');
     setInitialized(true);
   }, [site, initialized]);
 
@@ -180,17 +235,11 @@ export default function SiteDetailPage() {
       return;
     }
     setPricingError(null);
-    const result = priceSchema.safeParse({ price: editPrice });
-    if (!result.success) {
-      setPricingError(t(result.error.issues[0].message));
-      return;
-    }
+    const payload = buildPricingPayload(pricingMode, editPrice, freeReason, freeValidUntil, false);
+    if ('error' in payload) return setPricingError(t(payload.error));
     setPricingSaving(true);
     try {
-      await apiPut(API_ENDPOINTS.SITE_PRICING(site.id), {
-        base_price_per_kwh: result.data.price,
-        service_fee: 0,
-      });
+      await apiPut(API_ENDPOINTS.SITE_PRICING(site.id), payload);
       mutate();
       alert(t('站点定价已保存'));
     } catch (e) {
@@ -487,13 +536,24 @@ export default function SiteDetailPage() {
               {siteErrors.longitude && <p className="text-sm text-red-400">{t(siteErrors.longitude)}</p>}
             </div>
             <div className="space-y-2 md:col-span-2">
-              <Label className="text-slate-300">{t('站点定价（每kWh）')}</Label>
-              <div className="flex gap-2">
+              <Label className="text-slate-300">{t('站点定价模式')}</Label>
+              <div className="grid gap-3 md:grid-cols-[220px_1fr_auto]">
+                <Select value={pricingMode} onValueChange={(value) => setPricingMode(value as PricingMode)} disabled={!isEditing || !canEditTariff}>
+                  <SelectTrigger className="bg-slate-700/50 border-slate-600 text-slate-200" aria-label={t('站点定价模式')}>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="paid">{t('付费')}</SelectItem>
+                    <SelectItem value="free">{t('免费')}</SelectItem>
+                    <SelectItem value="unavailable">{t('暂不可用')}</SelectItem>
+                  </SelectContent>
+                </Select>
                 <Input
                   value={editPrice}
                   onChange={(e) => setEditPrice(e.target.value)}
-                  placeholder={site.price_per_kwh != null ? String(site.price_per_kwh) : t('未设置')}
-                  disabled={!isEditing || !canEditTariff}
+                  placeholder={t('例如：2700.00')}
+                  aria-label={t('电价（COP/kWh）')}
+                  disabled={!isEditing || !canEditTariff || pricingMode !== 'paid'}
                   className="bg-slate-700/50 border-slate-600 text-slate-200"
                 />
                 <Button
@@ -504,10 +564,16 @@ export default function SiteDetailPage() {
                   {pricingSaving ? t('保存中...') : t('保存定价')}
                 </Button>
               </div>
+              {pricingMode === 'free' && (
+                <div className="grid gap-3 md:grid-cols-2">
+                  <Input value={freeReason} onChange={(e) => setFreeReason(e.target.value)} placeholder={t('免费原因（3-500字）')} aria-label={t('免费原因')} disabled={!isEditing || !canEditTariff} className="bg-slate-700/50 border-slate-600 text-slate-200" />
+                  <Input type="datetime-local" value={freeValidUntil} onChange={(e) => setFreeValidUntil(e.target.value)} aria-label={t('免费截止时间')} disabled={!isEditing || !canEditTariff} className="bg-slate-700/50 border-slate-600 text-slate-200" />
+                </div>
+              )}
               {!!pricingError && <div className="text-sm text-red-300">{pricingError}</div>}
             </div>
           </div>
-          <div className="text-sm text-slate-400">{t('当前生效电价：')}{site.price_per_kwh != null ? site.price_per_kwh : t('未设置')}</div>
+          <PricingSummary pricing={site.pricing} />
         </CardContent>
       </Card>
 
@@ -608,6 +674,9 @@ export default function SiteDetailPage() {
                               onClick={() => {
                                 setOverrideCpId(cp.id);
                                 setOverridePrice('');
+                                setOverrideMode('inherit');
+                                setOverrideFreeReason('');
+                                setOverrideFreeValidUntil('');
                                 setOverrideError(null);
                                 setOverrideOpen(true);
                               }}
@@ -644,15 +713,31 @@ export default function SiteDetailPage() {
             </div>
           )}
 
-          <div className="space-y-2">
-            <Label className="text-slate-300">{t('覆盖电价（每kWh）')}</Label>
+          <div className="space-y-3">
+            <Label className="text-slate-300">{t('充电桩定价模式')}</Label>
+            <Select value={overrideMode} onValueChange={(value) => setOverrideMode(value as PricingMode)} disabled={!canEditTariff || overrideSaving}>
+              <SelectTrigger className="bg-slate-800 border-slate-600 text-slate-200" aria-label={t('充电桩定价模式')}><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="inherit">{t('继承站点')}</SelectItem>
+                <SelectItem value="paid">{t('付费')}</SelectItem>
+                <SelectItem value="free">{t('免费')}</SelectItem>
+                <SelectItem value="unavailable">{t('暂不可用')}</SelectItem>
+              </SelectContent>
+            </Select>
             <Input
               value={overridePrice}
               onChange={(e) => setOverridePrice(e.target.value)}
-              placeholder={t('例如：1.50')}
-              disabled={!canEditTariff || overrideSaving}
+              placeholder={t('例如：2700.00')}
+              aria-label={t('电价（COP/kWh）')}
+              disabled={!canEditTariff || overrideSaving || overrideMode !== 'paid'}
               className="bg-slate-800 border-slate-600 text-slate-200"
             />
+            {overrideMode === 'free' && (
+              <>
+                <Input value={overrideFreeReason} onChange={(e) => setOverrideFreeReason(e.target.value)} placeholder={t('免费原因（3-500字）')} aria-label={t('免费原因')} disabled={!canEditTariff || overrideSaving} className="bg-slate-800 border-slate-600 text-slate-200" />
+                <Input type="datetime-local" value={overrideFreeValidUntil} onChange={(e) => setOverrideFreeValidUntil(e.target.value)} aria-label={t('免费截止时间')} disabled={!canEditTariff || overrideSaving} className="bg-slate-800 border-slate-600 text-slate-200" />
+              </>
+            )}
           </div>
 
           <DialogFooter>
@@ -673,19 +758,14 @@ export default function SiteDetailPage() {
                   setOverrideError(t('无权限编辑定价'));
                   return;
                 }
-                const price = Number(overridePrice);
-                if (!Number.isFinite(price) || price <= 0) {
-                  setOverrideError(t('请填写正确的电价（>0）'));
-                  return;
-                }
+                const payload = buildPricingPayload(overrideMode, overridePrice, overrideFreeReason, overrideFreeValidUntil, true);
+                if ('error' in payload) return setOverrideError(t(payload.error));
                 setOverrideError(null);
                 setOverrideSaving(true);
                 try {
-                  await apiPut(API_ENDPOINTS.CHARGER_PRICING(overrideCpId), {
-                    base_price_per_kwh: price,
-                    service_fee: 0,
-                  });
+                  await apiPut(API_ENDPOINTS.CHARGER_PRICING(overrideCpId), payload);
                   setOverrideOpen(false);
+                  mutate();
                   alert(t('覆盖定价已保存'));
                 } catch (e) {
                   setOverrideError(t(apiErrorMessageKey(e, '保存失败')));

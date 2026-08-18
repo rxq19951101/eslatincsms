@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 from app.database.base import SessionLocal
 from app.database.base import tenant_id_context
-from app.database.models import DeviceEvent, Device, ChargePoint
+from app.database.models import DeviceEvent, Device, ChargePoint, RiskReservation
 from app.core.asset_identifiers import get_charge_point_by_reference
 from app.services.charge_point_service import ChargePointService
 from app.services.meter_telemetry_service import (
@@ -611,6 +611,20 @@ class OCPPMessageHandler:
             )
             
             if session:
+                # D-204 physical-stop authority is confirmed only by the
+                # device's StopTransaction fact.  RemoteStop Accepted is not
+                # used as a substitute.  A session without a risk reservation
+                # is a legacy/P001 session and remains unchanged.
+                try:
+                    from app.services.risk_budget import RiskBudgetService, RiskBudgetError
+                    RiskBudgetService.confirm_stop_transaction(
+                        db,
+                        session_id=session.id,
+                        source_event_id=f"ocpp-stop:{charge_point_id}:{transaction_id}:{payload.get('timestamp') or session.end_time}",
+                        meter_stop=meter_stop,
+                    )
+                except RiskBudgetError:
+                    logger.warning("Risk stop confirmation did not converge for session=%s", session.id, exc_info=True)
                 logger.info(f"[{charge_point_id}] StopTransaction: transaction_id={transaction_id}, session_id={session.id}")
                 return {
                     "idTagInfo": {"status": "Accepted"},
@@ -739,6 +753,31 @@ class OCPPMessageHandler:
                         )
                     if values_to_persist:
                         db.commit()
+                    # Persist the risk checkpoint independently of Redis's
+                    # sampled telemetry gate.  RiskBudgetService is a no-op
+                    # for sessions without a pinned BE-205 reservation.
+                    try:
+                        from app.services.risk_budget import RiskBudgetService, RiskBudgetError
+                        risk_reservation = db.query(RiskReservation).filter(
+                            RiskReservation.session_id == session.id,
+                        ).order_by(RiskReservation.created_at.desc()).first()
+                        if risk_reservation is not None:
+                            meter_at = datetime.fromisoformat(
+                                str(latest["timestamp"]).replace("Z", "+00:00")
+                            )
+                            RiskBudgetService.observe_meter(
+                                db,
+                                session_id=session.id,
+                                expected_version=risk_reservation.version,
+                                source_event_id=f"ocpp-meter:{message_key}:{latest['timestamp']}",
+                                meter_wh=latest["value"],
+                                meter_at=meter_at,
+                            )
+                    except RiskBudgetError:
+                        # The device acknowledgement remains protocol-valid,
+                        # while the risk state stays fail-closed and is picked
+                        # up by the risk recovery worker.
+                        logger.warning("Risk MeterValues checkpoint did not converge for session=%s", session.id, exc_info=True)
                     return {
                         "_outcome": (
                             "meter_recorded" if values_to_persist else "meter_buffered"

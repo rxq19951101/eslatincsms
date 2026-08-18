@@ -11,7 +11,12 @@ from fastapi import FastAPI, Query
 from fastapi.testclient import TestClient
 
 from app.core.api_logging import log_api_request
-from app.core.log_sanitization import REDACTED, SensitiveDataFilter
+from app.core.log_sanitization import (
+    REDACTED,
+    SensitiveDataFilter,
+    redact_log_text,
+    redact_sensitive_data,
+)
 from app.core.middleware import LoggingMiddleware
 from app.core.observability import TraceMetricsMiddleware
 
@@ -138,7 +143,7 @@ def test_fake_payment_webhook_signature_and_secret_are_redacted(
     caplog.clear()
     with caplog.at_level(logging.INFO, logger="ocpp_csms"):
         response = client.post(
-            "/api/v1/app/wallet/payments/sim-webhook",
+            "/api/v1/app/payments/webhooks/sim",
             json={
                 "event_id": event_id,
                 "provider": "fake",
@@ -158,7 +163,7 @@ def test_fake_payment_webhook_signature_and_secret_are_redacted(
     _assert_secret_absent(serialized, webhook_secret)
     _assert_secret_absent(serialized, signature_value)
     assert REDACTED in serialized
-    assert "/api/v1/app/wallet/payments/sim-webhook" in serialized
+    assert "/api/v1/app/payments/webhooks/sim" in serialized
     assert '"status_code"' in serialized
     assert trace_id in serialized
 
@@ -186,3 +191,40 @@ def test_api_logging_recursively_redacts_nested_values_and_prefixes(
     _assert_secret_absent(serialized, password)
     assert REDACTED in serialized
     assert "/security/log-redaction" in serialized
+
+
+def test_payment_credentials_and_card_tokens_are_explicitly_redacted():
+    card_token = "CardTokenPrefix_9vQ4mX7kL2pR"
+    credential_handle = "env:mercadopago:platform-secret-handle"
+    client_secret = "ClientSecretPrefix_6wN3cT8yH5sK"
+
+    structured = redact_sensitive_data(
+        {
+            "card_token": card_token,
+            "credential_handle": credential_handle,
+            "client_secret": client_secret,
+        }
+    )
+    assert structured == {
+        "card_token": REDACTED,
+        "credential_handle": REDACTED,
+        "client_secret": REDACTED,
+    }
+
+    free_text = redact_log_text(
+        f"card_token={card_token} credential_handle={credential_handle} "
+        f"client_secret={client_secret}"
+    )
+    _assert_secret_absent(free_text, card_token)
+    _assert_secret_absent(free_text, credential_handle)
+    _assert_secret_absent(free_text, client_secret)
+
+
+def test_checkout_signed_url_path_is_redacted():
+    signed_token = "v1.checkoutPayloadPrefix_8mQ4vT2pL7xN.signaturePrefix_6wN3cT8y"
+    path = f"/api/v1/app/payments/checkout/{signed_token}"
+
+    safe = redact_log_text(f"GET {path}")
+
+    _assert_secret_absent(safe, signed_token)
+    assert f"/api/v1/app/payments/checkout/{REDACTED}" in safe

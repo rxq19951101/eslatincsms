@@ -1,0 +1,4 @@
+interface:
+  display_name: "Product Agent"
+  short_description: "Own current product architecture and product requirements"
+  default_prompt: "Use $product-agent to update the current product architecture and prepare approved product requirements without making implementation architecture decisions."

@@ -306,11 +306,14 @@ function apiFieldErrors(details: unknown): Record<string, string> {
 /** Parse the canonical backend error envelope, retaining legacy FastAPI detail support. */
 export function parseApiErrorPayload(data: unknown, status: number): ApiError {
   const body = data && typeof data === 'object' ? data as Record<string, any> : {};
-  const envelope = body.error && typeof body.error === 'object' ? body.error : {};
+  const detailEnvelope = body.detail && typeof body.detail === 'object' && !Array.isArray(body.detail)
+    ? body.detail
+    : {};
+  const envelope = body.error && typeof body.error === 'object' ? body.error : detailEnvelope;
   const details = envelope.details
     ?? body.details
     ?? (Array.isArray(body.detail) ? body.detail : undefined)
-    ?? body.detail;
+    ?? detailEnvelope.details;
   let message = typeof envelope.message === 'string'
     ? envelope.message
     : typeof body.message === 'string'

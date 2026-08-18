@@ -1,5 +1,13 @@
 import apiClient from '../client';
-import { getActiveChargingSession, getMeterValues, settleCharging, startChargingByScan, stopCharging } from '../charging';
+import {
+  buildChargingDirectCheckoutRequest,
+  chargingPreflight,
+  getActiveChargingSession,
+  getMeterValues,
+  settleCharging,
+  startChargingByScan,
+  stopCharging,
+} from '../charging';
 import { getChargingRecordDetail } from '../transactions';
 
 jest.mock('../client', () => ({
@@ -15,6 +23,30 @@ const mockedClient = apiClient as jest.Mocked<typeof apiClient>;
 
 describe('App charging UUID contract', () => {
   beforeEach(() => jest.clearAllMocks());
+
+  it('runs the server-owned charging preflight before RemoteStart', async () => {
+    mockedClient.post.mockResolvedValueOnce({
+      data: {
+        resource: { charge_point_id: 'cp-1', site_id: 'site-1', connector_id: 1, pricing_mode: 'paid' },
+        financial_eligibility: {
+          operation: 'paid_charging_admission', status: 'eligible', reason_codes: [],
+          blocking_resources: [], allowed_actions: ['start_charging'],
+          evaluated_at: '2026-08-15T10:00:00Z', version: 1,
+        },
+        rail_eligibility: {
+          axis: 'paid_admission', status: 'open', matched_scope_refs: [],
+          evaluated_at: '2026-08-15T10:00:00Z', version: 1,
+        },
+        decision: 'allowed', allowed_actions: ['start_charging'],
+      },
+    });
+
+    await expect(chargingPreflight({ qrToken: 'opaque-qr', settlementMethod: 'wallet' }))
+      .resolves.toMatchObject({ decision: 'allowed' });
+    expect(mockedClient.post).toHaveBeenCalledWith('/api/v1/app/charging/preflight', {
+      qr_token: 'opaque-qr', settlement_method: 'wallet',
+    });
+  });
 
   it('keeps session/EVSE/meter IDs as UUID strings and OCPP IDs as numbers', async () => {
     mockedClient.get.mockResolvedValueOnce({
@@ -119,6 +151,78 @@ describe('App charging UUID contract', () => {
       ocpp_identity: 'SIM-E2E-CP-001',
     });
     expect(result.session).not.toHaveProperty('qr_token');
+  });
+
+  it('sends direct-card settlement and payment intent without accepting client pricing', async () => {
+    mockedClient.post.mockResolvedValueOnce({ data: { success: true, status: 'accepted' } });
+
+    await startChargingByScan({
+      qrToken: 'public-qr-token',
+      settlementMethod: 'direct_card',
+      paymentIntentId: 'intent-opaque-1',
+    });
+
+    expect(mockedClient.post).toHaveBeenCalledWith(expect.any(String), {
+      qr_token: 'public-qr-token',
+      settlement_method: 'direct_card',
+      payment_intent_id: 'intent-opaque-1',
+    });
+    expect(mockedClient.post.mock.calls[0][1]).not.toHaveProperty('amount');
+    expect(mockedClient.post.mock.calls[0][1]).not.toHaveProperty('tenant_id');
+  });
+
+  it.each([
+    [null, 'new_card'],
+    ['saved-card-1', 'saved_card'],
+  ] as const)('forces save_card=false for charging %s', (savedPaymentMethodId, mode) => {
+    expect(buildChargingDirectCheckoutRequest({
+      chargePointId: 'charge-point-1',
+      connectorId: 1,
+      savedPaymentMethodId,
+    })).toMatchObject({
+      purpose: 'charging_direct',
+      payment_method_mode: mode,
+      saved_payment_method_id: savedPaymentMethodId,
+      save_card: false,
+    });
+  });
+
+  it('sends wallet settlement without a payment intent', async () => {
+    mockedClient.post.mockResolvedValueOnce({ data: { success: true, status: 'accepted' } });
+
+    await startChargingByScan({ qrToken: 'public-qr-token', settlementMethod: 'wallet' });
+
+    expect(mockedClient.post).toHaveBeenCalledWith(expect.any(String), {
+      qr_token: 'public-qr-token',
+      settlement_method: 'wallet',
+    });
+    expect(mockedClient.post.mock.calls[0][1]).not.toHaveProperty('payment_intent_id');
+  });
+
+  it('keeps settlement amounts as decimal strings and rejects untrusted action URLs', async () => {
+    mockedClient.post.mockResolvedValueOnce({
+      data: {
+        already_settled: false,
+        balance: '100000.00',
+        currency: 'COP',
+        charged_amount: '18760.00',
+        energy_kwh: '6.800',
+        price_per_kwh: '2760.00',
+        settlement_method: 'direct_card',
+        payment_status: 'action_required',
+        next_action: { type: 'open_url', url: 'https://evil.example/collect' },
+      },
+    });
+
+    const result = await settleCharging('11111111-1111-4111-8111-111111111111');
+
+    expect(result).toMatchObject({
+      charged_amount: '18760.00',
+      energy_kwh: '6.800',
+      price_per_kwh: '2760.00',
+      payment_status: 'action_required',
+      next_action: null,
+    });
   });
 
   it('stops a recovered session by session ID without a QR token', async () => {

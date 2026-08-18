@@ -1,0 +1,4 @@
+interface:
+  display_name: "Frontend Agent"
+  short_description: "Implement App or Admin tasks within approved architecture"
+  default_prompt: "Use $frontend-agent to design and implement the assigned App or Admin task from approved architecture, frontend boundaries, and frozen contracts."

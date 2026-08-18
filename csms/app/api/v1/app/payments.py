@@ -1,6 +1,9 @@
 #
-# APP用户 - 支付API（Wompi）
-# 提供创建支付订单、查询状态、Webhook 回调等功能
+# App Provider Webhook adapters
+#
+# App 业务支付统一由 payment_checkout.py 的 Checkout Session 契约承载。
+# 本模块只向公共路由注册 Provider-specific Webhook；文件前半段的历史
+# create/status handlers 保留为未注册代码，避免把旧接口继续暴露给 App。
 #
 
 import hashlib
@@ -23,12 +26,29 @@ from app.core.auth import get_current_user
 from app.database.base import get_db, SuperSessionLocal
 from app.database.models import (
     AppUser, PaymentOrder, PaymentWebhookEvent, 
-    ChargingSession, AppWalletTransaction, Tenant
+    ChargingSession, ChargePoint, AppWalletTransaction, Tenant
 )
 from app.services.wompi_service import get_wompi_service
 from app.services.mercadopago_service import get_mercadopago_service
-from app.services.payment_providers.base import CreatePaymentCommand
+from app.services.payment_providers.base import (
+    CreatePaymentCommand,
+    PaymentCapabilityResult,
+    PaymentProviderError,
+    ProviderCapabilityError,
+    ProviderPaymentStatus,
+)
 from app.services.payment_providers.registry import get_payment_provider_registry
+from app.services.payment_reconciliation import (
+    PaymentReconciliationError,
+    PaymentReconciliationService,
+)
+from app.services.refund_cases import RefundCaseService
+from app.services.payment_providers.merchant_context import (
+    MerchantContextError,
+    PaymentPurpose,
+    PlatformMerchantAccountResolver,
+)
+from app.services.runtime_rail_control import RailError, RuntimeRailControlService
 from app.domain.payment import transition_status
 from app.core.id_generator import generate_order_id
 from app.core.config import get_settings
@@ -71,7 +91,7 @@ async def get_current_app_user(
 class CreatePaymentRequest(BaseModel):
     """Wompi 支付请求（保留兼容）"""
     type: str = Field(..., description="订单类型：top_up 或 charging")
-    amount: Decimal = Field(..., gt=0, description="支付金额")
+    amount: Decimal = Field(..., gt=0, max_digits=12, decimal_places=2, description="支付金额")
     currency: str = Field("COP", description="货币（默认 COP）")
     idempotency_key: Optional[str] = Field(None, description="支付创建幂等键")
     metadata: Optional[Dict[str, Any]] = Field(None, description="元数据（充电支付时需要 session_id）")
@@ -80,7 +100,7 @@ class CreatePaymentRequest(BaseModel):
 class CreateMercadoPagoPaymentRequest(BaseModel):
     """Mercado Pago 支付请求"""
     type: str = Field(..., description="订单类型：top_up 或 charging")
-    amount: Decimal = Field(..., gt=0, description="支付金额")
+    amount: Decimal = Field(..., gt=0, max_digits=12, decimal_places=2, description="支付金额")
     currency: str = Field("COP", description="货币（默认 COP）")
     token: str = Field(..., description="前端获取的 card token")
     email: str = Field(..., description="用户邮箱（MP 强制要求）")
@@ -119,11 +139,16 @@ class MercadoPagoPaymentResponse(BaseModel):
 
 class PaymentStatusResponse(BaseModel):
     order_id: str
+    purpose: str = ""
     status: str
+    status_detail: Optional[str] = None
     wompi_transaction_id: Optional[str] = None
     mercadopago_payment_id: Optional[str] = None
     amount: Decimal
     currency: str
+    invoice_id: Optional[str] = None
+    session_id: Optional[str] = None
+    next_action: Optional[Dict[str, str]] = None
     paid_at: Optional[str] = None
     expires_at: str
     is_expired: bool
@@ -200,17 +225,20 @@ def _apply_approved_business_logic(
 
 
 def _apply_refund_ledger(db: Session, order: PaymentOrder, amount: Decimal) -> None:
-    """把退款作为反向账本分录落库，订单状态只是账务状态的投影。"""
+    """Legacy helper kept safe for callers outside the BE-7 service."""
     amount = Decimal(str(amount))
     if amount <= 0 or amount > Decimal(str(order.amount)):
         raise ValueError("Invalid refund amount")
     user = db.query(AppUser).filter(AppUser.id == order.app_user_id).with_for_update().one()
+    balance = Decimal(str(user.balance or 0))
+    if balance < amount:
+        raise ValueError("Wallet balance is insufficient for refund")
     ledger_id = f"payment_refund_{order.id}"
     if db.query(AppWalletTransaction).filter(
         AppWalletTransaction.transaction_number == ledger_id
     ).first():
         return
-    user.balance = Decimal(str(user.balance or 0)) - amount
+    user.balance = balance - amount
     tenant = db.query(Tenant).order_by(Tenant.created_at.asc()).first()
     if tenant:
         db.add(AppWalletTransaction(
@@ -219,7 +247,7 @@ def _apply_refund_ledger(db: Session, order: PaymentOrder, amount: Decimal) -> N
             payment_order_id=order.id,
             operator_tenant_id=tenant.id,
             charge_point_id=None,
-            type="refund",
+            type="charge",
             amount=-amount,
             description="Payment refund",
         ))
@@ -295,9 +323,54 @@ def _create_order_from_command(
             return existing, checkout
 
     _validate_common_request(command.order_type, command.metadata)
+    merchant_context = None
+    if command.provider == "mercadopago":
+        purpose = (
+            PaymentPurpose.WALLET_TOP_UP
+            if command.order_type == "top_up"
+            else PaymentPurpose.CHARGING_DIRECT
+        )
+        tenant_id = None
+        if command.metadata and command.metadata.get("operator_tenant_id"):
+            tenant_id = UUID(str(command.metadata["operator_tenant_id"]))
+        elif command.order_type == "charging" and command.metadata:
+            session = db.query(ChargingSession).filter(
+                ChargingSession.id == command.metadata.get("session_id")
+            ).first()
+            tenant_id = session.tenant_id if session is not None else None
+        try:
+            merchant_context = PlatformMerchantAccountResolver().resolve(
+                operator_tenant_id=tenant_id,
+                payment_purpose=purpose,
+            )
+        except (MerchantContextError, ValueError) as exc:
+            raise ValueError("Unable to resolve payment merchant") from exc
+        command.metadata = dict(command.metadata or {})
+        command.metadata.setdefault("payment_purpose", purpose.value)
+        command.metadata.setdefault(
+            "operator_tenant_id", str(tenant_id) if tenant_id is not None else None
+        )
+        command.metadata.setdefault("merchant", merchant_context.safe_snapshot())
+        site_id = None
+        if command.metadata.get("session_id"):
+            session = db.query(ChargingSession).filter(
+                ChargingSession.id == command.metadata.get("session_id"),
+                ChargingSession.tenant_id == tenant_id,
+            ).first()
+            if session is not None:
+                site_id = db.query(ChargePoint.site_id).filter(
+                    ChargePoint.id == session.charge_point_id,
+                    ChargePoint.tenant_id == tenant_id,
+                ).scalar()
+        RuntimeRailControlService.require_payment_creation_open(
+            db, provider=command.provider, tenant_id=tenant_id, site_id=site_id
+        )
     registry = get_payment_provider_registry()
     provider = registry.get(command.provider)
-    result = provider.create_payment(command)
+    if merchant_context is None:
+        result = provider.create_payment(command)
+    else:
+        result = provider.create_payment(command, merchant_context=merchant_context)
 
     expires_at = datetime.now(timezone.utc) + timedelta(minutes=30)
     payment_deadline_at = None
@@ -382,13 +455,18 @@ def create_mercadopago_payment_order(
                 payment_id=order.mercadopago_payment_id or "",
                 status=order.status,
                 external_reference=order.external_reference or "",
-                amount=float(order.amount),
+                amount=Decimal(str(order.amount)),
                 currency=order.currency,
             )
         finally:
             db.close()
     except HTTPException:
         raise
+    except RailError as e:
+        raise HTTPException(
+            status_code=e.status_code,
+            detail={"code": e.code, "message": str(e), "retryable": e.retryable},
+        ) from e
     except ValueError as e:
         # MP 侧或入参问题；message 由 _extract_mp_api_error 等拼出
         raise HTTPException(status_code=400, detail=str(e))
@@ -477,18 +555,42 @@ def get_payment_status(
                 )
                 raise HTTPException(status_code=404, detail="Payment order not found")
             
-            # 检查是否过期
+            # Status reads are also the user-facing reconciliation path after
+            # the App has been closed. Webhooks and admin reconciliation call
+            # the same service.
             now = datetime.now(timezone.utc)
             is_expired = False
-            
-            # 如果超过 expires_at 且仍非终态，标记为过期
-            terminal_states = ["approved", "declined", "voided", "error", "refunded"]
+
+            if (
+                order.payment_provider == "mercadopago"
+                and order.mercadopago_payment_id
+                and order.status in {"created", "processing"}
+            ):
+                try:
+                    PaymentReconciliationService().query_and_reconcile(
+                        db,
+                        payment_order_id=order.id,
+                    )
+                    order = db.query(PaymentOrder).filter(PaymentOrder.id == order.id).one()
+                except (PaymentReconciliationError, PaymentProviderError, ProviderCapabilityError):
+                    db.rollback()
+
+            terminal_states = ["approved", "declined", "voided", "error", "expired", "refunded"]
             if order.expires_at and order.expires_at < now and order.status not in terminal_states:
                 is_expired = True
-                if order.status != "expired":
-                    order.status = "expired"
-                    db.commit()
-                    logger.info(f"Order {order_id} marked as expired")
+                try:
+                    PaymentReconciliationService().reconcile(
+                        db,
+                        payment_order_id=order.id,
+                        status="expired",
+                        provider_payment_id=order.mercadopago_payment_id,
+                        external_reference=order.external_reference,
+                        amount=Decimal(str(order.amount)),
+                        currency=order.currency,
+                    )
+                    order = db.query(PaymentOrder).filter(PaymentOrder.id == order.id).one()
+                except PaymentReconciliationError:
+                    db.rollback()
             
             log_api_response(
                 method="GET",
@@ -499,13 +601,23 @@ def get_payment_status(
                 details={"order_id": order_id, "status": order.status, "is_expired": is_expired}
             )
             
+            projected_status = (
+                "action_required"
+                if isinstance((order.order_metadata or {}).get("next_action"), dict)
+                else order.status
+            )
             return PaymentStatusResponse(
                 order_id=str(order.id),
-                status=order.status,
+                purpose=str((order.order_metadata or {}).get("payment_purpose") or order.type),
+                status=projected_status,
+                status_detail=(order.order_metadata or {}).get("provider_status"),
                 wompi_transaction_id=order.wompi_transaction_id,
                 mercadopago_payment_id=order.mercadopago_payment_id,
-                amount=float(order.amount),
+                amount=Decimal(str(order.amount)),
                 currency=order.currency,
+                invoice_id=(order.order_metadata or {}).get("invoice_id"),
+                session_id=(order.order_metadata or {}).get("session_id"),
+                next_action=(order.order_metadata or {}).get("next_action"),
                 paid_at=order.paid_at.isoformat() if order.paid_at else None,
                 expires_at=order.expires_at.isoformat(),
                 is_expired=is_expired,
@@ -538,7 +650,14 @@ def get_payment_status(
         raise
 
 
-@router.post("/sim-webhook", summary="本地场景支付 Webhook（仅 development/test）")
+# The legacy create/status router above is deliberately not included by
+# api/v1/__init__.py.  From this point on, `router` is the canonical webhook
+# adapter router exposed under /api/v1/app/payments.
+legacy_router = router
+router = APIRouter()
+
+
+@router.post("/webhooks/sim", summary="本地场景支付 Webhook（仅 development/test）")
 async def handle_sim_payment_webhook(
     request_data: SimPaymentWebhookRequest,
     x_sim_signature: Optional[str] = Header(None, alias="X-Sim-Signature"),
@@ -668,201 +787,216 @@ async def handle_sim_payment_webhook(
         db.close()
 
 
-@router.post("/webhook-mp", summary="Mercado Pago Webhook 回调")
+@router.post("/webhooks/mercadopago", summary="Mercado Pago Webhook 回调")
 async def handle_mercadopago_webhook(
     request: Request,
     x_signature: Optional[str] = Header(None, alias="X-Signature"),
     x_request_id: Optional[str] = Header(None, alias="X-Request-Id"),
 ):
-    """
-    Mercado Pago Webhook 回调处理：
-    1. 验证 Webhook 签名
-    2. 提取 payment_id 和 event_id
-    3. 使用 external_reference 或 payment_id 查找订单
-    4. 主动反查支付状态（重要：MP 推送不可信）
-    5. 金额/币种校验
-    6. 幂等性检查
-    7. 更新订单状态和业务逻辑
-
-    扩展（待办）：收到 card/customer 类通知或 Checkout 绑卡回调时，写入 app_user_payment_methods，
-    与 APP 端「已保存卡」列表对齐。
-    """
+    """Verify, actively query and reconcile a Mercado Pago payment event."""
     db = SuperSessionLocal()
     try:
-        mp_service = get_mercadopago_service()
-        
-        # 获取请求体
         payload = await request.json()
-        
-        action = payload.get("action")
-        data_id = payload.get("data", {}).get("id")
-        
+        data = payload.get("data") if isinstance(payload, dict) else None
+        data_id = data.get("id") if isinstance(data, dict) else None
         if not data_id:
-            logger.error("Payment ID not found in webhook payload")
             raise HTTPException(status_code=400, detail="Payment ID not found")
-        
-        if not x_request_id:
-            logger.warning("X-Request-Id not found in headers")
-            x_request_id = data_id  # 使用 payment_id 作为 fallback
-        
-        # 签名是强制要求；不能把未签名回调当作开发环境例外放行。
-        if not x_signature or not x_request_id or not mp_service.verify_webhook_signature(x_signature, x_request_id, data_id):
-            logger.error("Webhook signature verification failed")
+        if not x_signature or not x_request_id:
             raise HTTPException(status_code=401, detail="Invalid signature")
-        
-        # 主动反查支付状态（重要：MP 推送不可信，必须反查）
-        payment_info = mp_service.get_payment_status(data_id)
-        if not payment_info.get("success"):
-            logger.error(f"Failed to get payment status from MercadoPago: {data_id}")
-            raise HTTPException(status_code=500, detail="Failed to verify payment status")
-        
-        mp_payment = payment_info.get("payment", {})
-        external_ref = mp_payment.get("external_reference")
-        mp_status = mp_payment.get("status")
-        mp_amount = Decimal(str(mp_payment.get("transaction_amount", 0)))
-        mp_currency = mp_payment.get("currency_id", "").upper()
-        
-        # 查找订单（优先使用 external_reference，否则使用 payment_id）
-        order = None
-        if external_ref:
-            order = db.query(PaymentOrder).filter(PaymentOrder.external_reference == external_ref).first()
-        
+
+        # The payment id is the only trusted lookup key available before the
+        # provider query. Merchant context is then derived from the persisted,
+        # server-created order snapshot.
+        webhook_external_reference = (
+            payload.get("external_reference")
+            or (data.get("external_reference") if isinstance(data, dict) else None)
+        )
+        order_query = db.query(PaymentOrder).filter(
+            PaymentOrder.payment_provider == "mercadopago",
+        )
+        if webhook_external_reference:
+            order_query = order_query.filter(
+                (PaymentOrder.mercadopago_payment_id == str(data_id))
+                | (PaymentOrder.external_reference == str(webhook_external_reference))
+            )
+        else:
+            order_query = order_query.filter(
+                PaymentOrder.mercadopago_payment_id == str(data_id)
+            )
+        order = order_query.first()
         if not order:
-            order = db.query(PaymentOrder).filter(PaymentOrder.mercadopago_payment_id == data_id).first()
-        
-        if not order:
-            logger.error(f"Order not found for payment_id: {data_id}, external_reference: {external_ref}")
             raise HTTPException(status_code=404, detail="Order not found")
 
-        if order.mercadopago_payment_id and order.mercadopago_payment_id != data_id:
-            raise HTTPException(status_code=400, detail="Payment/order ownership mismatch")
-        order = db.query(PaymentOrder).filter(PaymentOrder.id == order.id).with_for_update().one()
-        
-        # 金额/币种校验（防串单/篡改）
-        if mp_amount != order.amount or mp_currency != order.currency:
-            logger.error(
-                f"Amount/currency mismatch: order={order.id}, "
-                f"order_amount={order.amount}, mp_amount={mp_amount}, "
-                f"order_currency={order.currency}, mp_currency={mp_currency}"
+        reconciliation = PaymentReconciliationService()
+        try:
+            context = reconciliation.merchant_context_for_order(
+                payment_order=order,
+                purpose=(
+                    PaymentPurpose.RECONCILIATION
+                    if order.type == "charging"
+                    else PaymentPurpose.WALLET_TOP_UP
+                ),
             )
-            order.status = "error"
-            order.updated_at = datetime.now(timezone.utc)
-            db.commit()
-            raise HTTPException(status_code=400, detail="Amount or currency mismatch")
-        
-        # 幂等性检查
-        event_id = payload.get("id") or data_id  # 使用 notification id 或 payment id
-        
+            provider = get_payment_provider_registry().get(order.payment_provider)
+            if not hasattr(provider, "verify_webhook_signature"):
+                raise PaymentReconciliationError("Provider does not support webhook verification")
+            if not provider.verify_webhook_signature(
+                x_signature=x_signature,
+                x_request_id=x_request_id,
+                data_id=str(data_id),
+                merchant_context=context,
+            ):
+                raise HTTPException(status_code=401, detail="Invalid signature")
+            query_capability = getattr(provider, "query_payment", None)
+            if callable(query_capability):
+                canonical: PaymentCapabilityResult = query_capability(
+                    str(data_id),
+                    merchant_context=context,
+                )
+                facts = ProviderPaymentStatus(
+                    status=PaymentReconciliationService._legacy_status(canonical.status),
+                    provider_payment_id=canonical.provider_ref,
+                    external_reference=canonical.merchant_ref,
+                    amount=canonical.amount or Decimal(str(order.amount)),
+                    currency=canonical.currency or order.currency,
+                    next_action_url=(
+                        canonical.next_action.url
+                        if canonical.next_action and canonical.next_action.type == "open_url"
+                        else None
+                    ),
+                )
+            else:
+                facts = provider.get_payment_status(
+                    str(data_id),
+                    merchant_context=context,
+                )
+        except HTTPException:
+            raise
+        except (PaymentReconciliationError, PaymentProviderError, ProviderCapabilityError):
+            raise HTTPException(status_code=500, detail="Unable to verify payment")
+
+        # Store only a minimal event envelope. The raw provider payload can
+        # contain payer data and must never become a database/log artifact.
+        event_id = str(payload.get("id") or data_id)[:255]
+        safe_payload = {
+            "id": event_id,
+            "action": str(payload.get("action") or "")[:100],
+            "data": {"id": str(data_id)},
+        }
         existing_event = db.query(PaymentWebhookEvent).filter(
             PaymentWebhookEvent.payment_provider == "mercadopago",
-            PaymentWebhookEvent.payment_provider_id == data_id,
-            PaymentWebhookEvent.event_id == event_id
+            PaymentWebhookEvent.payment_provider_id == str(data_id),
+            PaymentWebhookEvent.event_id == event_id,
         ).first()
-        
         if existing_event and existing_event.processed:
-            logger.info(f"Webhook event already processed: payment_id={data_id}, event_id={event_id}")
-            return {"status": "ok", "message": "Already processed"}
-        
-        # 如果没有记录，创建事件记录
+            return {"status": "ok"}
+        if existing_event and existing_event.payload != safe_payload:
+            raise HTTPException(status_code=409, detail="Webhook event payload conflict")
         if not existing_event:
             webhook_event = PaymentWebhookEvent(
                 payment_order_id=order.id,
                 payment_provider="mercadopago",
-                payment_provider_id=data_id,
+                payment_provider_id=str(data_id),
                 event_id=event_id,
-                event_type=action,
-                payload=payload,
+                event_type=str(payload.get("action") or "payment.updated")[:100],
+                payload=safe_payload,
                 processed=False,
             )
             db.add(webhook_event)
             db.flush()
         else:
             webhook_event = existing_event
-        
-        # 映射 MP 状态到内部状态
-        internal_status = mp_service.map_status(mp_status)
-        
-        # 状态推进规则：只能向终态推进，不允许回退
-        terminal_states = ["approved", "declined", "voided", "error", "refunded"]
-        old_status = order.status
-        
-        # 如果已经是终态，不允许回退
-        try:
-            internal_status = transition_status(old_status, internal_status)
-        except ValueError:
-            logger.warning("Payment status transition rejected: order=%s %s -> %s", order.id, old_status, internal_status)
-            internal_status = old_status
-        order.status = internal_status
-        
-        # 更新订单信息
-        order.mercadopago_payment_id = data_id
-        if internal_status == "approved":
-            order.paid_at = datetime.now(timezone.utc)
-        
-        order.updated_at = datetime.now(timezone.utc)
-        
-        # 业务逻辑处理（与 Wompi 相同）
-        if internal_status == "approved":
-            if order.type == "top_up":
-                app_user = db.query(AppUser).filter(AppUser.id == order.app_user_id).with_for_update().one_or_none()
-                if app_user:
-                    _apply_approved_business_logic(db, order, app_user, "MercadoPago", external_ref or data_id)
-            
-            elif order.type == "charging":
-                # 充电支付：标记充电会话为已支付
-                session_id = order.order_metadata.get("session_id") if order.order_metadata else None
-                if session_id:
-                    session = db.query(ChargingSession).filter(ChargingSession.id == session_id).first()
-                    if session:
-                        session.payment_status = "paid"
-                        session.payment_order_id = order.id
-                        logger.info(
-                            f"[APP API] MercadoPago charging payment completed: session={session_id}, "
-                            f"order={order.id}"
+
+        reconciliation.reconcile(
+            db,
+            payment_order_id=order.id,
+            status=facts.status,
+            provider_payment_id=facts.provider_payment_id,
+            external_reference=facts.external_reference,
+            amount=facts.amount,
+            currency=facts.currency,
+            next_action_url=facts.next_action_url,
+        )
+
+        # A Mercado Pago dispute is still resolved through the same verified,
+        # actively queried payment fact.  Only the provider-neutral dispute
+        # fields cross into ChargebackCase authority; the webhook payload is
+        # never passed to the projection or persisted as an evidence blob.
+        if facts.status == "disputed":
+            dispute_ingest = getattr(provider, "ingest_dispute_fact", None)
+            if not callable(dispute_ingest):
+                raise PaymentReconciliationError("Provider dispute capability is unavailable")
+            dispute_ref = (
+                (data.get("dispute_ref") if isinstance(data, dict) else None)
+                or (data.get("dispute_id") if isinstance(data, dict) else None)
+                or payload.get("dispute_ref")
+                or payload.get("dispute_id")
+                or payload.get("id")
+                or data_id
+            )
+            dispute_fact = dispute_ingest(
+                {
+                    "payment_ref": str(facts.provider_payment_id or data_id),
+                    "status": "disputed",
+                    "amount": facts.amount,
+                    "currency": facts.currency,
+                    "dispute_ref": str(dispute_ref)[:255] if dispute_ref else None,
+                    "reason_code": (
+                        str(
+                            (data.get("reason_code") if isinstance(data, dict) else None)
+                            or payload.get("reason_code")
+                        )[:100]
+                        if (
+                            (data.get("reason_code") if isinstance(data, dict) else None)
+                            or payload.get("reason_code")
                         )
-        
-        elif internal_status in ["declined", "error", "voided"]:
-            # 支付失败：如果是充电支付，标记为欠费
-            if order.type == "charging":
-                session_id = order.order_metadata.get("session_id") if order.order_metadata else None
-                if session_id:
-                    session = db.query(ChargingSession).filter(ChargingSession.id == session_id).first()
-                    if session:
-                        session.payment_status = "unpaid"
-                        session.payment_order_id = order.id
-                        
-                        # 标记用户为有欠费
-                        app_user = db.query(AppUser).filter(AppUser.id == order.app_user_id).first()
-                        if app_user:
-                            app_user.has_unpaid_charges = True
-                        
-                        logger.warning(
-                            f"[APP API] MercadoPago charging payment failed: session={session_id}, "
-                            f"order={order.id}, status={internal_status}"
-                        )
-        
-        # 标记事件为已处理
+                        else None
+                    ),
+                },
+                merchant_context=context,
+            )
+            dispute_amount = (
+                dispute_fact.amount
+                if dispute_fact.amount is not None
+                else facts.amount
+            )
+            dispute_currency = dispute_fact.currency or facts.currency
+            if (
+                dispute_fact.status in {"disputed", "reversed"}
+                and dispute_fact.dispute_ref
+                and dispute_amount is not None
+                and dispute_currency
+            ):
+                RefundCaseService().ingest_chargeback_fact(
+                    db,
+                    provider="mercadopago",
+                    payment_ref=dispute_fact.payment_ref,
+                    disputed_amount=dispute_amount,
+                    currency=dispute_currency,
+                    status=dispute_fact.status,
+                    dispute_ref=dispute_fact.dispute_ref,
+                    reason_code=dispute_fact.reason_code,
+                    source_reference=event_id,
+                )
+
         webhook_event.processed = True
         webhook_event.processed_at = datetime.now(timezone.utc)
-        
         db.commit()
-        
-        logger.info(
-            f"[APP API] MercadoPago webhook processed: order={order.id}, "
-            f"payment_id={data_id}, status={internal_status}"
-        )
-        
-        return {"status": "ok", "order_id": str(order.id), "status": internal_status}
+        return {"status": "ok"}
     except HTTPException:
         raise
-    except Exception as e:
-        logger.error(f"Error processing MercadoPago webhook: {str(e)}", exc_info=True)
+    except (PaymentReconciliationError, PaymentProviderError, ProviderCapabilityError):
+        db.rollback()
+        raise HTTPException(status_code=400, detail="Payment reconciliation failed")
+    except Exception:
+        db.rollback()
+        logger.error("Error processing MercadoPago webhook", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
     finally:
         db.close()
 
 
-@router.post("/webhook", summary="Wompi Webhook 回调（保留兼容）")
+@legacy_router.post("/webhook", summary="Wompi Webhook（未注册的历史实现）")
 async def handle_wompi_webhook(
     request: Request,
     x_signature: Optional[str] = Header(None, alias="X-Signature"),

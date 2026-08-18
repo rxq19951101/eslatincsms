@@ -104,6 +104,91 @@ export interface SavedPaymentMethodsResponse {
   hint: string;
 }
 
+/** PAY-MP-001 canonical payment-method projection. */
+export type CanonicalPaymentMethodType = 'credit_card' | 'debit_card' | 'prepaid_card';
+
+export interface CanonicalPaymentMethod {
+  id: string;
+  provider: string;
+  brand?: string | null;
+  payment_type?: CanonicalPaymentMethodType | null;
+  last_four?: string | null;
+  is_default: boolean;
+}
+
+export interface CanonicalPaymentMethodsResponse {
+  items: CanonicalPaymentMethod[];
+}
+
+export interface SaveCardCheckoutSessionRequest {
+  purpose: 'save_card';
+  payment_method_mode: 'new_card';
+  save_card: true;
+  currency: 'COP';
+  return_url: string;
+  idempotency_key: string;
+}
+
+export interface SaveCardCheckoutSessionResponse {
+  checkout_session_id: string;
+  checkout_url: string;
+  expires_at: string;
+  purpose: 'save_card';
+}
+
+export type PaymentCheckoutPurpose =
+  | 'save_card'
+  | 'wallet_top_up'
+  | 'charging_direct'
+  | 'unpaid_charge';
+
+export type PaymentCheckoutStatus =
+  | 'created'
+  | 'ready'
+  | 'processing'
+  | 'action_required'
+  | 'approved'
+  | 'declined'
+  | 'expired'
+  | 'error';
+
+export interface CheckoutSessionNextAction {
+  type: 'open_url';
+  url: string;
+}
+
+export interface CheckoutSessionResponse {
+  id: string;
+  purpose: PaymentCheckoutPurpose;
+  status: PaymentCheckoutStatus;
+  payment_intent_id?: string | null;
+  payment_order_id?: string | null;
+  saved_payment_method_id?: string | null;
+  next_action?: CheckoutSessionNextAction | null;
+  expires_at: string;
+}
+
+export interface CreateCheckoutSessionRequest {
+  purpose: PaymentCheckoutPurpose;
+  payment_method_mode: 'new_card' | 'saved_card';
+  saved_payment_method_id?: string | null;
+  save_card: boolean;
+  amount?: string;
+  currency?: 'COP';
+  charge_point_id?: string | null;
+  connector_id?: number | null;
+  session_id?: string | null;
+  return_url: string;
+  idempotency_key: string;
+}
+
+export interface CreateCheckoutSessionResponse {
+  checkout_session_id: string;
+  checkout_url: string;
+  expires_at: string;
+  purpose: PaymentCheckoutPurpose;
+}
+
 export interface WalletTransaction {
   id: string;
   type: 'charge' | 'top_up' | 'refund' | 'adjustment' | string;
@@ -163,47 +248,6 @@ export interface PaymentProviderOption {
   supportedTypes: Array<'top_up' | 'charging'>;
 }
 
-// Mercado Pago 相关
-export interface CardData {
-  number: string;
-  expMonth: string;
-  expYear: string;
-  cvc: string;
-  holderName: string;
-}
-
-/** MP card_tokens 解析结果（优先用接口返回的 payment_method_id，避免仅凭卡号首位误判） */
-export interface MercadoPagoCardTokenResult {
-  tokenId: string;
-  payment_method_id: string;
-}
-
-export interface CreateMercadoPagoPaymentRequest {
-  type: 'top_up' | 'charging';
-  amount: number;
-  currency?: string;
-  token: string;  // 前端获取的 card token
-  email: string;  // MP 强制要求
-  payment_method_id: string;  // 'visa', 'master' 等
-  idempotency_key: string;  // UUID v4
-  device_id?: string;  // 设备指纹（可选）
-  description?: string;  // 支付描述（可选）
-  metadata?: {
-    session_id?: string;
-    charge_point_id?: string;
-    site_id?: string;
-  };
-}
-
-export interface MercadoPagoPaymentResponse {
-  order_id: string;
-  payment_id: string;
-  status: string;
-  external_reference: string;
-  amount: number;
-  currency: string;
-}
-
 export interface PaymentStatusResponse {
   order_id: string;
   status: 'created' | 'processing' | 'approved' | 'declined' | 'voided' | 'error' | 'expired' | 'refunded';
@@ -234,6 +278,18 @@ export type PaymentRail = 'card' | 'wallet' | 'pse' | 'nequi' | 'daviplata' | 'o
 
 import type { NavigatorScreenParams } from '@react-navigation/native';
 
+export type PaymentReturnStatus =
+  | 'created'
+  | 'ready'
+  | 'processing'
+  | 'action_required'
+  | 'approved'
+  | 'declined'
+  | 'expired'
+  | 'error';
+
+export type PaymentResultStatus = PaymentReturnStatus | 'voided' | 'refunded';
+
 export type RootStackParamList = {
   // Auth
   Welcome: undefined;
@@ -263,8 +319,15 @@ export type RootStackParamList = {
   AddPayment: undefined;
   WompiPayment: { orderId?: string; checkoutUrl?: string; amount?: number };
   MercadoPagoPayment: { amount: number; type: 'top_up' | 'charging'; metadata?: { session_id?: string; charge_point_id?: string; site_id?: string } };
-  PaymentResult: { orderId?: string; status?: string };
+  PaymentResult: {
+    orderId?: string;
+    status?: PaymentResultStatus;
+    checkout_session_id?: string;
+  };
   UnpaidBills: undefined;
+  UnpaidBillDetail: { invoiceId: string };
+  SupportCases: undefined;
+  SupportCaseDetail: { caseId: string };
   PersonalInfo: undefined;
   Security: undefined;
   Language: undefined;
