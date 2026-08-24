@@ -3,14 +3,25 @@
 # 使用pydantic-settings进行配置验证和管理
 #
 
-from pydantic_settings import BaseSettings
+from pydantic import SecretStr, field_validator, model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import List, Optional
 from functools import lru_cache
+from decimal import Decimal
+from urllib.parse import urlparse
+from cryptography.fernet import Fernet
+import os
 
 
 class Settings(BaseSettings):
     """应用配置"""
-    
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+    )    
     # 应用基础配置
     app_name: str = "OCPP 1.6J CSMS"
     app_version: str = "1.0.0"
@@ -22,7 +33,7 @@ class Settings(BaseSettings):
     port: int = 9000
     
     # 数据库配置
-    database_url: str = "postgresql://local:local@localhost:5432/ocpp"
+    database_url: str = "postgresql://ocpp_user:ocpp_password@localhost:5432/ocpp"
     db_pool_size: int = 10
     db_max_overflow: int = 20
     db_pool_recycle: int = 3600
@@ -56,22 +67,16 @@ class Settings(BaseSettings):
     ws_ping_interval: int = 20
     ws_ping_timeout: int = 10
     ws_max_connections: int = 1000
-    enable_websocket_transport: bool = False  # 是否启用 WebSocket 传输（默认关闭，可通过环境变量启用）
+    enable_websocket_transport: bool = True
     
-    # HTTP传输配置
-    enable_http_transport: bool = False  # 是否启用 HTTP 传输（默认关闭，可通过环境变量启用）
-    http_ocpp_endpoint: str = "/ocpp"  # HTTP OCPP 端点前缀
     
-    # MQTT传输配置（默认通信模式）
-    enable_mqtt_transport: bool = True  # 是否启用 MQTT 传输（默认启用）
-    mqtt_broker_host: str = "localhost"  # MQTT broker 地址
-    mqtt_broker_port: int = 1883  # MQTT broker 端口
-    mqtt_username: Optional[str] = None  # MQTT 用户名（可选）
-    mqtt_password: Optional[str] = None  # MQTT 密码（可选）
-    mqtt_topic_prefix: str = "ocpp"  # MQTT 主题前缀
     
     # OCPP配置
     ocpp_heartbeat_interval: int = 30
+    heartbeat_persist_interval_seconds: int = 60
+    meter_persist_interval_seconds: int = 60
+    meter_realtime_ttl_seconds: int = 86400
+    meter_dedupe_ttl_seconds: int = 86400
     ocpp_message_timeout: int = 5
     ocpp_max_retries: int = 3
     
@@ -86,8 +91,16 @@ class Settings(BaseSettings):
     
     # API配置
     api_v1_prefix: str = "/api/v1"
+    public_api_base_url: str = "http://localhost:9000"
     docs_url: Optional[str] = "/docs"
     redoc_url: Optional[str] = "/redoc"
+
+    @field_validator("docs_url", "redoc_url", mode="before")
+    @classmethod
+    def normalize_optional_documentation_url(cls, value):
+        if isinstance(value, str) and value.strip().lower() in {"", "none", "null", "false", "off"}:
+            return None
+        return value
     
     # 速率限制
     rate_limit_enabled: bool = True
@@ -96,15 +109,136 @@ class Settings(BaseSettings):
     # 充电桩配置
     default_charging_rate: float = 7.0  # kW
     default_price_per_kwh: float = 2700.0  # COP/kWh
-    
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
-        case_sensitive = False
+
+    # 支付轨：默认关闭；打开后才允许创建 Provider/Checkout 支付。
+    payment_rails_enabled: bool = False
+    mercadopago_environment: str = "sandbox"
+    mercadopago_access_token: SecretStr = SecretStr("")
+    mercadopago_public_key: SecretStr = SecretStr("")
+    mercadopago_webhook_secret: SecretStr = SecretStr("")
+    # Mercado Pago's direct-card sandbox rejects test-account nickname emails.
+    # This value is used only when MERCADOPAGO_ENVIRONMENT=sandbox; production
+    # payments always use the authenticated app user's email.
+    mercadopago_sandbox_payer_email: str = "test_payer@example.com"
+    checkout_session_ttl_seconds: int = 900
+    payment_token_encryption_key: SecretStr = SecretStr("")
+    checkout_signing_key: SecretStr = SecretStr("")
+    checkout_return_url_allowlist: str = "eslatin://payment-return"
+    checkout_next_action_host_allowlist: str = "mercadopago.com,mercadopago.com.co"
+    wallet_top_up_min_amount: Decimal = Decimal("0.01")
+    wallet_top_up_max_amount: Decimal = Decimal("99999999.99")
+    # 启动充电所需最低钱包余额（COP）
+    min_wallet_balance_to_start: float = 5000.0
+
+    @model_validator(mode="after")
+    def validate_checkout_limits(self) -> "Settings":
+        if not 60 <= self.checkout_session_ttl_seconds <= 3600:
+            raise ValueError("CHECKOUT_SESSION_TTL_SECONDS must be between 60 and 3600")
+        if (
+            self.wallet_top_up_min_amount <= 0
+            or self.wallet_top_up_max_amount > Decimal("99999999.99")
+            or self.wallet_top_up_min_amount > self.wallet_top_up_max_amount
+        ):
+            raise ValueError("Wallet top-up amount limits are invalid")
+        return_urls = [
+            item.strip()
+            for item in self.checkout_return_url_allowlist.split(",")
+            if item.strip()
+        ]
+        if not return_urls:
+            raise ValueError("CHECKOUT_RETURN_URL_ALLOWLIST must not be empty")
+        for return_url in return_urls:
+            parsed = urlparse(return_url)
+            if (
+                parsed.scheme not in {"eslatin", "http", "https"}
+                or not parsed.netloc
+                or parsed.query
+                or parsed.fragment
+            ):
+                raise ValueError(
+                    "CHECKOUT_RETURN_URL_ALLOWLIST must contain valid deep links or HTTP(S) URLs"
+                )
+            if self.environment.lower() == "production" and parsed.scheme not in {"https", "eslatin"}:
+                raise ValueError(
+                    "Production CHECKOUT_RETURN_URL_ALLOWLIST must use HTTPS or an EsLatin deep link"
+                )
+        next_action_hosts = [
+            item.strip().lower().lstrip(".")
+            for item in self.checkout_next_action_host_allowlist.split(",")
+            if item.strip()
+        ]
+        if not next_action_hosts or any(
+            "://" in host or "/" in host for host in next_action_hosts
+        ):
+            raise ValueError("CHECKOUT_NEXT_ACTION_HOST_ALLOWLIST is invalid")
+        return self
+
+    @model_validator(mode="after")
+    def validate_production_security(self) -> "Settings":
+        """生产环境拒绝使用占位密钥或未认证的设备传输配置。"""
+        if self.environment.lower() != "production":
+            return self
+
+        if self.secret_key in {"", "your-secret-key-change-in-production"} or len(self.secret_key) < 32:
+            raise ValueError("Production SECRET_KEY must be configured and at least 32 characters")
+
+        encryption_key = os.getenv("ENCRYPTION_KEY", "").strip()
+        if not encryption_key:
+            raise ValueError("Production ENCRYPTION_KEY must be configured")
+
+        encryption_salt = os.getenv("ENCRYPTION_SALT", "").strip()
+        if not encryption_salt or encryption_salt == "ocpp_csms_salt":
+            raise ValueError("Production ENCRYPTION_SALT must be configured")
+
+        if os.getenv("OCPP_WS_REQUIRE_PRE_REGISTERED", "true").lower() not in {"true", "1", "yes"}:
+            raise ValueError("Production OCPP_WS_REQUIRE_PRE_REGISTERED must remain enabled")
+
+        if self.payment_rails_enabled:
+            if not all(
+                secret.get_secret_value().strip()
+                for secret in (
+                    self.mercadopago_access_token,
+                    self.mercadopago_public_key,
+                    self.mercadopago_webhook_secret,
+                )
+            ):
+                raise ValueError(
+                    "Production Mercado Pago credentials are required when payment rails are enabled"
+                )
+            payment_token_key = (
+                self.payment_token_encryption_key.get_secret_value().strip()
+            )
+            if not payment_token_key:
+                raise ValueError(
+                    "Production PAYMENT_TOKEN_ENCRYPTION_KEY is required when payment rails are enabled"
+                )
+            try:
+                Fernet(payment_token_key.encode("ascii"))
+            except (TypeError, ValueError, UnicodeEncodeError) as exc:
+                raise ValueError(
+                    "Production PAYMENT_TOKEN_ENCRYPTION_KEY must be a valid Fernet key"
+                ) from exc
+            if len(self.checkout_signing_key.get_secret_value().strip()) < 32:
+                raise ValueError(
+                    "Production CHECKOUT_SIGNING_KEY must contain at least 32 characters"
+                )
+            public_url = urlparse(self.public_api_base_url)
+            if (
+                public_url.scheme != "https"
+                or not public_url.netloc
+                or public_url.username is not None
+                or public_url.password is not None
+                or public_url.query
+                or public_url.fragment
+            ):
+                raise ValueError(
+                    "Production PUBLIC_API_BASE_URL must use HTTPS when payment rails are enabled"
+                )
+
+        return self
 
 
 @lru_cache()
 def get_settings() -> Settings:
     """获取配置实例（单例）"""
     return Settings()
-

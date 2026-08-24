@@ -27,13 +27,38 @@ def register_routes():
     
     routes_config = [
         ("chargers", "/chargers", "充电桩管理"),
+        ("sites", "/sites", "站点管理"),
+        ("geocoding", "/geocoding", "地理编码"),
         ("transactions", "/transactions", "事务管理"),
         ("orders", "/orders", "订单管理"),
         ("ocpp_control", "/ocpp", "OCPP控制"),
-        ("admin", "/admin", "管理功能"),
+        ("admin_main", "/admin", "管理功能"),  # admin.py 已重命名为 admin_main.py
         ("charger_management", "/charger-management", "新充电桩管理"),
         ("statistics", "/statistics", "统计数据"),
         ("devices", "/devices", "设备管理"),
+        ("dashboard", "/dashboard", "仪表板"),  # 添加 dashboard 路由
+        ("asset_archive", "/asset-archive", "资产归档"),
+        ("app.auth", "/app/auth", "APP用户认证"),
+    ("app.chargers", "/app/chargers", "APP充电站查询"),  # 添加 APP 认证路由
+    ("app.sites", "/app/sites", "APP公开站点查询"),
+    ("app.favorites", "/app/favorites", "APP收藏站点"),
+    ("app.charging", "/app/charging", "APP扫码充电"),
+    ("app.financial_eligibility", "/app", "APP财务资格与充电预检"),
+    ("app.wallet", "/app/wallet", "APP钱包"),
+        ("app.payments", "/app/payments", "Provider支付Webhook适配"),
+    ("app.payment_checkout", "/app/payments", "APP安全支付结账"),
+    ("app.recovery", "/app", "APP欠费恢复"),
+    ("app.support", "/app", "APP支持案件"),
+    ("app.payment_methods", "/app/payment-methods", "APP保存支付方式"),
+    ("app.risk", "/app", "PAY-MP-002 v2风险投影"),
+    ("app.transactions", "/app/transactions", "APP充电记录"),
+    ("admin.payments", "/admin/payments", "管理员支付管理"),
+    ("admin.refunds", "/admin", "PAY-MP-002 退款与拒付"),
+    ("admin.reconciliation", "/admin/reconciliation", "PAY-MP-002 三方对账"),
+    ("admin.runtime_rails", "/admin", "PAY-MP-002 Runtime Rail"),
+    ("admin.support", "/admin", "PAY-MP-002 支持案件"),
+    ("admin.audit_events", "/admin", "PAY-MP-002 审计事件"),
+    ("admin.risk", "/admin", "PAY-MP-002 v2风险投影"),
     ]
     
     for module_name, prefix, tag in routes_config:
@@ -56,4 +81,3 @@ try:
 except Exception as e:
     logger.error(f"✗ 路由注册过程出错: {e}", exc_info=True)
     # 即使出错也继续，至少 api_router 对象已创建
-

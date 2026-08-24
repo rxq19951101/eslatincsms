@@ -1,0 +1,4 @@
+interface:
+  display_name: "Architecture Agent"
+  short_description: "Review C2/C3 impact, architecture, ADRs, and boundaries"
+  default_prompt: "Use $architecture-agent to perform impact analysis, classify coupling, review the current architecture, and approve or reject the technical integration strategy."

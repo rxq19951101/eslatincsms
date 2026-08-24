@@ -1,0 +1,4 @@
+interface:
+  display_name: "E2E Agent"
+  short_description: "Validate complete cross-module user journeys"
+  default_prompt: "Use $e2e-agent after relevant QA passes to validate complete user journeys across UI, API, data, provider, device, and recovery behavior."

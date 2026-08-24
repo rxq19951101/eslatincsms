@@ -1,9 +1,8 @@
 #
-# 只运行 CSMS 后台服务的配置
-# 用于测试 OCPP 协议和充电桩模拟器
+# 仅 CSMS + 依赖（DB / Redis / MQTT），无 Admin、无 charger-sim
+# 启动: docker compose -f docker-compose.csms-only.yml up -d --build
+# 数据库账号与主栈一致: ocpp_user / ocpp_password（独立数据卷，避免与 docker-compose.yml 冲突）
 #
-
-version: "3.9"
 
 services:
   db:
@@ -12,13 +11,15 @@ services:
     ports:
       - "5432:5432"
     environment:
-      - POSTGRES_USER=local
-      - POSTGRES_PASSWORD=local
+      - POSTGRES_USER=ocpp_user
+      - POSTGRES_PASSWORD=ocpp_password
       - POSTGRES_DB=ocpp
+    volumes:
+      - postgres_data_csms_only:/var/lib/postgresql/data
     networks:
       - ocppnet
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U local -d ocpp"]
+      test: ["CMD-SHELL", "pg_isready -U ocpp_user -d ocpp"]
       interval: 5s
       timeout: 3s
       retries: 3
@@ -28,7 +29,6 @@ services:
     container_name: ocpp-redis
     ports:
       - "6379:6379"
-    # 开发环境：禁用RDB持久化
     command: redis-server --appendonly no --save "" --stop-writes-on-bgsave-error no
     networks:
       - ocppnet
@@ -39,7 +39,7 @@ services:
       retries: 3
 
   mqtt-broker:
-    image: eclipse-mosquitto:latest
+    image: eclipse-mosquitto:2.0
     container_name: mqtt-broker
     ports:
       - "1883:1883"
@@ -60,14 +60,18 @@ services:
     ports:
       - "9000:9000"
     environment:
+      - ENVIRONMENT=production
+      - DEBUG=false
+      - DATABASE_URL=postgresql://ocpp_user:ocpp_password@db:5432/ocpp
       - REDIS_URL=redis://redis:6379/0
-      - PORT=9000
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY:-ocpp-local-encryption-key-change-in-production}
+      - SECRET_KEY=${SECRET_KEY:-ocpp-local-secret-key-change-in-production-please}
+      - ENCRYPTION_SALT=ocpp_csms_salt
       - MQTT_BROKER_HOST=mqtt-broker
       - MQTT_BROKER_PORT=1883
-      # 可选：启用 WebSocket 传输（默认关闭，取消注释以启用）
-      # - ENABLE_WEBSOCKET_TRANSPORT=true
-      # 可选：启用 HTTP 传输（默认关闭，取消注释以启用）
-      # - ENABLE_HTTP_TRANSPORT=true
+      - ENABLE_WEBSOCKET_TRANSPORT=true
+      - DOCS_URL=None
+      - REDOC_URL=None
     depends_on:
       redis:
         condition: service_healthy
@@ -83,7 +87,10 @@ services:
       timeout: 5s
       retries: 3
 
+volumes:
+  postgres_data_csms_only:
+    driver: local
+
 networks:
   ocppnet:
     driver: bridge
-

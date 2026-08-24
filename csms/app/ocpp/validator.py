@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from typing import Dict, List, Set, Any, Optional
 import websockets
 from websockets.client import WebSocketClientProtocol
+from app.core.log_sanitization import redact_sensitive_data
 
 logging.basicConfig(
     level=logging.INFO,
@@ -273,7 +274,7 @@ class OCPPValidator:
             try:
                 response = await asyncio.wait_for(self.ws.recv(), timeout=3.0)
                 response_data = json.loads(response)
-                logger.info(f"  ← 收到响应: {json.dumps(response_data)[:100]}")
+                logger.info("  ← 收到响应: %s", redact_sensitive_data(response_data))
                 return True
             except asyncio.TimeoutError:
                 logger.warning(f"  ⚠ 未收到响应（超时）")
@@ -481,4 +482,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-

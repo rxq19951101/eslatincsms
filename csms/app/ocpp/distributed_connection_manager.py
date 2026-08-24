@@ -36,6 +36,7 @@ class DistributedConnectionManager:
         self.CONNECTION_KEY_PREFIX = "ocpp:connection:"
         self.SERVER_KEY_PREFIX = "ocpp:server:"
         self.MESSAGE_QUEUE_PREFIX = "ocpp:message:"
+        self.ROUTE_STREAM = "ocpp:route:stream"
         
         logger.info(f"分布式连接管理器初始化，服务器ID: {self.server_id}")
     
@@ -173,4 +174,3 @@ class DistributedConnectionManager:
 
 # 全局分布式连接管理器实例
 distributed_connection_manager = DistributedConnectionManager()
-

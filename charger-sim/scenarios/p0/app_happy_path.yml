@@ -1,0 +1,102 @@
+schema_version: "1.0"
+scenario:
+  id: p0-app-happy-path
+  name: App QR charging, metering, stop, and idempotent settlement
+  dependencies: [sim-e2e-seed, funded-wallet, formal-qr-token]
+environment:
+  api_base: ${SIM_API_BASE}
+  ws_url: ${SIM_OCPP_WS}
+  app_password: ${SIM_E2E_APP_PASSWORD}
+actors:
+  charger:
+    type: charger
+    ws: ${ws_url}
+    ocpp_identity: ${seed.charge_point.ocpp_identity}
+    serial_number: SIM-E2E-APP-001
+  app:
+    type: app
+    base_url: ${api_base}
+    email: ${seed.app_user.email}
+    password: ${app_password}
+steps:
+  - {id: connect, actor: charger, action: connect, expect: {status: connected}}
+  - {id: boot, actor: charger, action: boot, expect: {body.accepted: true}}
+  - id: available
+    actor: charger
+    action: status
+    with: {status: Available, connector_id: 1}
+    expect: {status: Available}
+  - {id: app-login, actor: app, action: login, expect: {status: 200}}
+  - id: check
+    actor: app
+    action: check_qr
+    with: {qr_token: "${seed.qr.token}"}
+    expect: {status: 200}
+  - id: start
+    actor: app
+    action: start_charging
+    with: {qr_token: "${seed.qr.token}"}
+    expect: {status: 200}
+  - {id: start-propagation, actor: system, action: await, with: {seconds: 1}}
+  - id: device-received-start
+    actor: charger
+    action: received_commands
+    with: {ocpp_action: RemoteStartTransaction}
+    expect: {body.count: 1, body.latest.status: Accepted}
+  - id: active
+    actor: app
+    action: get_active
+    with: {qr_token: "${seed.qr.token}"}
+    timeout: 20
+    retry: 5
+    expect: {status: 200, body.status: ongoing}
+    save: {session_id: body.id}
+  - id: meter
+    actor: charger
+    action: meter_values
+    with: {connector_id: 1}
+    expect: {status: Accepted}
+  - id: app-meter
+    actor: app
+    action: get_meter_values
+    with: {session_id: "${session_id}", limit: 20}
+    retry: 3
+    expect:
+      status: 200
+      body: {min_count: 1, unique_by: id}
+  - id: stop
+    actor: app
+    action: stop_charging
+    with: {qr_token: "${seed.qr.token}"}
+    expect: {status: 200}
+  - {id: stop-propagation, actor: system, action: await, with: {seconds: 1}}
+  - id: device-received-stop
+    actor: charger
+    action: received_commands
+    with: {ocpp_action: RemoteStopTransaction}
+    expect: {body.count: 1, body.latest.status: Accepted}
+  - id: completed-session
+    actor: app
+    action: query
+    with: {path: "/api/v1/app/transactions/${session_id}"}
+    retry: 5
+    expect: {status: 200, body.status: completed, body.end_time: {exists: true}}
+  - id: settle
+    actor: app
+    action: settle
+    with: {session_id: "${session_id}"}
+    retry: 2
+    expect: {status: 200, body.already_settled: false}
+  - id: settle-replay
+    actor: app
+    action: settle
+    with: {session_id: "${session_id}"}
+    expect: {status: 200, body.already_settled: true}
+  - id: ledger-invariant
+    actor: app
+    action: query
+    with: {path: /api/v1/app/wallet/transactions, query: {limit: 200}}
+    expect:
+      status: 200
+      body: {unique_by: id, any_match: {type: charge}}
+reports: {formats: [json, junit, timeline]}

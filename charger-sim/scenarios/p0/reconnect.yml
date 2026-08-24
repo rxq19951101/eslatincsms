@@ -1,0 +1,60 @@
+schema_version: "1.0"
+scenario:
+  id: p0-reconnect
+  name: Charger disconnect and reconnect visibility
+  dependencies: [sim-e2e-seed]
+environment:
+  api_base: ${SIM_API_BASE}
+  ws_url: ${SIM_OCPP_WS}
+  admin_password: ${SIM_E2E_ADMIN_PASSWORD}
+actors:
+  charger:
+    type: charger
+    ws: ${ws_url}
+    ocpp_identity: ${seed.charge_point.ocpp_identity}
+    serial_number: SIM-E2E-RECON-001
+  admin:
+    type: admin
+    base_url: ${api_base}
+    username: ${seed.admin.username}
+    password: ${admin_password}
+    tenant_id: ${seed.tenant_id}
+steps:
+  - {id: admin-login, actor: admin, action: login, expect: {status: 200}}
+  - {id: connect, actor: charger, action: connect, expect: {status: connected}}
+  - {id: boot, actor: charger, action: boot, expect: {body.accepted: true}}
+  - id: connected-visible
+    actor: admin
+    action: query
+    with: {path: /api/v1/ocpp/connected}
+    retry: 3
+    expect:
+      status: 200
+      body.connected_chargers: {contains: "${seed.charge_point.ocpp_identity}"}
+  - {id: disconnect, actor: charger, action: disconnect, expect: {status: disconnected}}
+  - id: disconnected-invisible
+    actor: admin
+    action: query
+    with: {path: /api/v1/ocpp/connected}
+    retry: 5
+    expect:
+      status: 200
+      body.connected_chargers: {none_match: {"$": "${seed.charge_point.ocpp_identity}"}}
+  - id: reconnect
+    actor: charger
+    action: reconnect
+    with: {delay: 0.2}
+    expect: {status: connected}
+  - {id: boot-again, actor: charger, action: boot, expect: {body.accepted: true}}
+  - id: reconnected-visible-once
+    actor: admin
+    action: query
+    with: {path: /api/v1/ocpp/connected}
+    retry: 5
+    expect:
+      status: 200
+      body.connected_chargers:
+        contains: ${seed.charge_point.ocpp_identity}
+        unique_by: "$"
+  - {id: heartbeat, actor: charger, action: heartbeat, expect: {status: Accepted}}
+reports: {formats: [json, junit, timeline]}

@@ -1,0 +1,64 @@
+schema_version: "1.0"
+scenario:
+  id: p0-fault-alert
+  name: Fault alert discovery, deduplication, and automatic recovery
+  dependencies: [sim-e2e-seed, admin-alert-permission]
+environment:
+  api_base: ${SIM_API_BASE}
+  ws_url: ${SIM_OCPP_WS}
+  admin_password: ${SIM_E2E_ADMIN_PASSWORD}
+actors:
+  charger:
+    type: charger
+    ws: ${ws_url}
+    ocpp_identity: ${seed.charge_point.ocpp_identity}
+  admin:
+    type: admin
+    base_url: ${api_base}
+    username: ${seed.admin.username}
+    password: ${admin_password}
+    tenant_id: ${seed.tenant_id}
+steps:
+  - {id: admin-login, actor: admin, action: login, expect: {status: 200}}
+  - id: no-pending-fault
+    actor: admin
+    action: query
+    with:
+      path: /api/v1/admin/alerts
+      query: {charge_point_id: "${seed.charge_point.ocpp_identity}", alert_type: faulted, status: pending}
+    expect: {status: 200, body: {count: 0}}
+  - {id: connect, actor: charger, action: connect, expect: {status: connected}}
+  - {id: boot, actor: charger, action: boot, expect: {body.accepted: true}}
+  - {id: faulted-first, actor: charger, action: faulted, with: {connector_id: 1}, expect: {status: Faulted}}
+  - {id: faulted-duplicate, actor: charger, action: faulted, with: {connector_id: 1}, expect: {status: Faulted}}
+  - {id: fault-propagation, actor: system, action: await, with: {seconds: 1}}
+  - id: discover-deduplicated-alert
+    actor: admin
+    action: query
+    with:
+      path: /api/v1/admin/alerts
+      query: {charge_point_id: "${seed.charge_point.ocpp_identity}", alert_type: faulted, status: pending}
+    retry: 5
+    expect:
+      status: 200
+      body: {count: 1, unique_by: id, each: {status: pending, alert_type: faulted}}
+    save: {alert_id: body.0.id}
+  - id: recover
+    actor: charger
+    action: status
+    with: {connector_id: 1, status: Available}
+    expect: {status: Available}
+  - id: recovered-alert
+    actor: admin
+    action: query
+    with: {path: "/api/v1/admin/alerts/${alert_id}"}
+    retry: 5
+    expect: {status: 200, body.status: resolved, body.resolved_at: {exists: true}}
+  - id: one-alert-after-recovery
+    actor: admin
+    action: query
+    with:
+      path: /api/v1/admin/alerts
+      query: {charge_point_id: "${seed.charge_point.ocpp_identity}", alert_type: faulted}
+    expect: {status: 200, body: {count: 1, unique_by: id}}
+reports: {formats: [json, junit, timeline]}

@@ -3,33 +3,21 @@
 #
 
 from datetime import datetime, timedelta, timezone
+import os
 from typing import Optional, Dict, Any
 from jose import JWTError, jwt
-from passlib.context import CryptContext
 from fastapi import Security, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, APIKeyHeader
+from app.core.auth import get_password_hash, verify_password
 from app.core.config import get_settings
 
 settings = get_settings()
-
-# 密码加密上下文
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # HTTP Bearer认证
 security = HTTPBearer()
 
 # API Key认证（用于充电桩认证）
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
-
-
-def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """验证密码"""
-    return pwd_context.verify(plain_password, hashed_password)
-
-
-def get_password_hash(password: str) -> str:
-    """生成密码哈希"""
-    return pwd_context.hash(password)
 
 
 def create_access_token(data: Dict[str, Any], expires_delta: Optional[timedelta] = None) -> str:
@@ -74,10 +62,14 @@ async def verify_api_key(api_key: Optional[str] = Security(api_key_header)) -> b
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="缺少API密钥",
         )
-    
-    # TODO: 从数据库验证API密钥
-    # 这里简化处理，实际应该从数据库查询
-    valid_keys = {"charger-api-key-1", "charger-api-key-2"}  # 生产环境应从配置或数据库读取
+
+    keys_env = os.getenv("OCPP_API_KEYS", "").strip()
+    if keys_env:
+        valid_keys = {k.strip() for k in keys_env.split(",") if k.strip()}
+    else:
+        # 开发环境允许默认 key；生产应配置 OCPP_API_KEYS
+        valid_keys = {"charger-api-key-1", "charger-api-key-2"} if settings.environment != "production" else set()
+
     if api_key not in valid_keys:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -88,15 +80,27 @@ async def verify_api_key(api_key: Optional[str] = Security(api_key_header)) -> b
 
 def verify_charger_id(charger_id: str, api_key: Optional[str] = None) -> bool:
     """验证充电桩ID和API密钥的关联"""
-    # TODO: 实现充电桩ID和API密钥的关联验证
-    # 生产环境应该从数据库验证充电桩和API密钥的关联关系
+    from app.core.ocpp_auth import verify_charge_point_pre_registered
+
+    if not verify_charge_point_pre_registered(charger_id):
+        return False
+    if api_key:
+        keys_env = os.getenv("OCPP_API_KEYS", "").strip()
+        if keys_env:
+            valid_keys = {k.strip() for k in keys_env.split(",") if k.strip()}
+            return api_key in valid_keys
     return True
 
 
 # OCPP WebSocket认证
 def verify_ocpp_charger_id(charger_id: str, headers: Dict[str, str]) -> bool:
     """验证OCPP WebSocket连接的充电桩ID"""
-    # 可以基于IP白名单、API密钥等进行验证
-    # TODO: 实现更严格的认证机制
-    return True
+    from app.core.ocpp_auth import (
+        verify_charge_point_pre_registered,
+        verify_ocpp_api_key,
+        is_pre_registration_required,
+    )
 
+    if is_pre_registration_required() and not verify_charge_point_pre_registered(charger_id):
+        return False
+    return verify_ocpp_api_key(headers)

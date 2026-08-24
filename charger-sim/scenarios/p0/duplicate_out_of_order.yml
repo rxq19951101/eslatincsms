@@ -1,0 +1,82 @@
+schema_version: "1.0"
+scenario:
+  id: p0-duplicate-out-of-order
+  name: UniqueId replay and out-of-order persistence invariants
+  dependencies: [sim-e2e-seed, csms-unique-id-idempotency]
+environment:
+  api_base: ${SIM_API_BASE}
+  ws_url: ${SIM_OCPP_WS}
+  admin_password: ${SIM_E2E_ADMIN_PASSWORD}
+  app_password: ${SIM_E2E_APP_PASSWORD}
+actors:
+  charger:
+    type: charger
+    ws: ${ws_url}
+    ocpp_identity: ${seed.charge_point.ocpp_identity}
+  admin:
+    type: admin
+    base_url: ${api_base}
+    username: ${seed.admin.username}
+    password: ${admin_password}
+    tenant_id: ${seed.tenant_id}
+  app:
+    type: app
+    base_url: ${api_base}
+    email: ${seed.app_user.email}
+    password: ${app_password}
+steps:
+  - {id: admin-login, actor: admin, action: login, expect: {status: 200}}
+  - {id: app-login, actor: app, action: login, expect: {status: 200}}
+  - id: sessions-before
+    actor: admin
+    action: query
+    with: {path: /api/v1/transactions, query: {charge_point_id: "${seed.charge_point.ocpp_identity}"}}
+    expect: {status: 200, body.items: {unique_by: id}}
+    save: {before_sessions: body.items}
+  - id: ledger-before
+    actor: app
+    action: query
+    with: {path: /api/v1/app/wallet/transactions, query: {limit: 200}}
+    expect: {status: 200, body: {unique_by: id}}
+    save: {before_ledger: body}
+  - {id: connect, actor: charger, action: connect, expect: {status: connected}}
+  - {id: boot, actor: charger, action: boot, expect: {body.accepted: true}}
+  - id: duplicate-status
+    actor: charger
+    action: duplicate
+    with:
+      unique_id: duplicate-status-001
+      ocpp_action: StatusNotification
+      payload: {connectorId: 1, errorCode: NoError, status: Available}
+    expect: {body.copies: 2}
+  - id: meter-before-start
+    actor: charger
+    action: meter_before_start
+    with: {connector_id: 1, unique_id: meter-before-start-001}
+    expect: {status: sent}
+  - id: stop-before-start
+    actor: charger
+    action: stop_before_start
+    with: {unique_id: stop-before-start-001}
+    expect: {status: sent}
+  - id: raw-heartbeat
+    actor: charger
+    action: send_raw
+    with: {frame: [2, raw-heartbeat-001, Heartbeat, {}]}
+    expect: {status: sent}
+  - {id: persistence-propagation, actor: system, action: await, with: {seconds: 1}}
+  - id: no-orphan-or-duplicate-session
+    actor: admin
+    action: query
+    with: {path: /api/v1/transactions, query: {charge_point_id: "${seed.charge_point.ocpp_identity}"}}
+    expect:
+      status: 200
+      body.items: {equals: "${before_sessions}", unique_by: id}
+  - id: no-metering-or-settlement-ledger
+    actor: app
+    action: query
+    with: {path: /api/v1/app/wallet/transactions, query: {limit: 200}}
+    expect:
+      status: 200
+      body: {equals: "${before_ledger}", unique_by: id}
+reports: {formats: [json, junit, timeline]}

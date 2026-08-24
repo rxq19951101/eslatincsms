@@ -1,0 +1,128 @@
+schema_version: "1.0"
+scenario:
+  id: p0-admin-happy-path
+  name: Admin registration, durable command, and session lifecycle
+  dependencies: [sim-e2e-seed, admin-control-permission]
+environment:
+  api_base: ${SIM_API_BASE}
+  ws_url: ${SIM_OCPP_WS}
+  admin_password: ${SIM_E2E_ADMIN_PASSWORD}
+actors:
+  admin:
+    type: admin
+    base_url: ${api_base}
+    username: ${seed.admin.username}
+    password: ${admin_password}
+    tenant_id: ${seed.tenant_id}
+  charger:
+    type: charger
+    ws: ${ws_url}
+    ocpp_identity: ${seed.charge_point.ocpp_identity}
+    serial_number: SIM-E2E-ADMIN-001
+    connector_ids: [1]
+steps:
+  - {id: admin-login, actor: admin, action: login, expect: {status: 200}}
+  - id: registered-charger-visible
+    actor: admin
+    action: query
+    with: {path: "/api/v1/chargers/${seed.charge_point.id}"}
+    expect:
+      status: 200
+      body.ocpp_identity: ${seed.charge_point.ocpp_identity}
+  - id: connect
+    actor: charger
+    action: connect
+    expect: {status: connected}
+  - {id: boot, actor: charger, action: boot, expect: {body.accepted: true}}
+  - id: available
+    actor: charger
+    action: status
+    with: {connector_id: 1, status: Available}
+    expect: {status: Available}
+  - id: admin-remote-start
+    actor: admin
+    action: remote_start
+    with:
+      charge_point_id: ${seed.charge_point.ocpp_identity}
+      connector_id: 1
+      operation_reason: SIM E2E admin remote start
+      idempotency_key: "${run_id}:admin-start"
+    expect:
+      status: 200
+      body.success: true
+      body.details.device_status: Accepted
+      body.details.workflow_status: pending
+  - {id: start-propagation, actor: system, action: await, with: {seconds: 1}}
+  - id: device-received-start
+    actor: charger
+    action: received_commands
+    with: {ocpp_action: RemoteStartTransaction}
+    expect:
+      body.count: 1
+      body.latest.status: Accepted
+  - id: ongoing-session
+    actor: admin
+    action: query
+    with:
+      path: /api/v1/transactions
+      query: {charge_point_id: "${seed.charge_point.ocpp_identity}", status: ongoing}
+    retry: 5
+    expect:
+      status: 200
+      body.items: {min_count: 1, unique_by: id, each: {status: ongoing}}
+    save:
+      session_id: body.items.0.id
+  - id: meter-sampling-window
+    actor: system
+    action: await
+    with: {seconds: 12}
+  - id: command-audit-replay
+    actor: admin
+    action: remote_start
+    with:
+      charge_point_id: ${seed.charge_point.ocpp_identity}
+      connector_id: 1
+      operation_reason: SIM E2E admin remote start
+      idempotency_key: "${run_id}:admin-start"
+    expect:
+      status: 200
+      body.success: true
+      body.details.idempotent_replay: true
+      body.details.command_id: {matches: "^[0-9a-f-]{36}$"}
+  - id: replay-did-not-redeliver
+    actor: charger
+    action: received_commands
+    with: {ocpp_action: RemoteStartTransaction}
+    expect: {body.count: 1}
+  - id: admin-remote-stop
+    actor: admin
+    action: remote_stop
+    with:
+      session_id: ${session_id}
+      operation_reason: SIM E2E admin remote stop
+      idempotency_key: "${run_id}:admin-stop"
+    expect:
+      status: 200
+      body.success: true
+      body.details.device_status: Accepted
+  - {id: stop-propagation, actor: system, action: await, with: {seconds: 1}}
+  - id: device-received-stop
+    actor: charger
+    action: received_commands
+    with: {ocpp_action: RemoteStopTransaction}
+    expect: {body.count: 1, body.latest.status: Accepted}
+  - id: completed-session
+    actor: admin
+    action: query
+    with:
+      path: /api/v1/transactions
+      query: {charge_point_id: "${seed.charge_point.ocpp_identity}", status: completed}
+    retry: 5
+    expect:
+      status: 200
+      body.items:
+        min_count: 1
+        unique_by: id
+        each: {status: completed}
+        any_match: {id: "${session_id}"}
+reports: {formats: [json, junit, timeline]}

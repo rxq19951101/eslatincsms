@@ -1,0 +1,2 @@
+# Installed only by the Dockerfile test target; runtime images exclude pytest.
+pytest==8.3.3

@@ -1,218 +1,71 @@
-/**
- * 本文件为 Expo 应用入口：配置导航栈与底部标签导航。
- * 页面：Login / Register / Map / Scan / History / Account / Support / Session
- * 仅用于本地测试与演示。
- */
+import React, { useEffect } from 'react';
+import { Provider } from 'react-redux';
+import { ActivityIndicator, StatusBar, StyleSheet, View } from 'react-native';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
+import { store } from './src/store';
+import { RootNavigator } from './src/navigation/RootNavigator';
+import { useAppDispatch, useAppSelector } from './src/hooks/useRedux';
+import { initializeAuth } from './src/store/slices/authSlice';
+import { I18nProvider, useI18n } from './src/i18n';
+import ActiveSessionRecovery from './src/components/charging/ActiveSessionRecovery';
+import BrandLogo from './src/components/brand/BrandLogo';
+import { palette, spacing } from './src/theme';
 
-import { StatusBar } from 'expo-status-bar';
-import React, { useState, useEffect } from 'react';
-import { View, Text } from 'react-native';
-import { NavigationContainer } from '@react-navigation/native';
-import { createStackNavigator } from '@react-navigation/stack';
-import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
-import AsyncStorage from '@react-native-async-storage/async-storage';
-import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
-import LoginScreen from './screens/LoginScreen';
-import RegisterScreen from './screens/RegisterScreen';
-import MapScreen from './screens/MapScreen';
-import ScanScreen from './screens/ScanScreen';
-import HistoryScreen from './screens/HistoryScreen';
-import AccountScreen from './screens/AccountScreen';
-import SupportScreen from './screens/SupportScreen';
-import SessionScreen from './screens/SessionScreen';
-import OrderDetailScreen from './screens/OrderDetailScreen';
-
-const Stack = createStackNavigator();
-const Tab = createBottomTabNavigator();
-
-// 主标签导航（已登录）
-function MainTabs({
-  user,
-  onLogout,
-  navigation: rootNavigation,
-}: {
-  user: { username: string; idTag: string; role?: string };
-  onLogout: () => void;
-  navigation: any;
-}) {
-  const insets = useSafeAreaInsets();
-  return (
-    <Tab.Navigator
-      initialRouteName="Map"
-      screenOptions={{
-        headerShown: false,
-        tabBarStyle: {
-          backgroundColor: '#007AFF',
-          borderTopWidth: 0,
-          elevation: 8,
-          shadowColor: '#000',
-          shadowOffset: { width: 0, height: -2 },
-          shadowOpacity: 0.1,
-          shadowRadius: 4,
-          height: 60 + insets.bottom,
-          paddingBottom: Math.max(insets.bottom, 8),
-        },
-        tabBarActiveTintColor: '#fff',
-        tabBarInactiveTintColor: 'rgba(255, 255, 255, 0.6)',
-        tabBarLabelStyle: {
-          fontSize: 12,
-          fontWeight: '600',
-        },
-        tabBarItemStyle: {
-          paddingTop: 6,
-        },
-      }}
-    >
-      <Tab.Screen
-        name="Support"
-        options={{
-          tabBarLabel: 'Soporte',
-          tabBarIcon: ({ color }) => <Text style={{ fontSize: 24 }}>🎧</Text>,
-        }}
-      >
-        {(props) => <SupportScreen {...props} user={user} />}
-      </Tab.Screen>
-      <Tab.Screen
-        name="Map"
-        options={{
-          tabBarLabel: 'Cargadores',
-          tabBarIcon: ({ color }) => <Text style={{ fontSize: 24 }}>🗺️</Text>,
-        }}
-      >
-        {(props) => <MapScreen {...props} />}
-      </Tab.Screen>
-      <Tab.Screen
-        name="Scan"
-        options={{
-          tabBarLabel: 'chargeway',
-          tabBarIcon: ({ color }) => (
-            <View style={{
-              width: 56,
-              height: 56,
-              borderRadius: 28,
-              backgroundColor: '#34c759',
-              justifyContent: 'center',
-              alignItems: 'center',
-              marginTop: -20,
-              borderWidth: 4,
-              borderColor: '#fff',
-            }}>
-              <Text style={{ fontSize: 24 }}>📱</Text>
-            </View>
-          ),
-          tabBarIconStyle: { marginTop: -10 - insets.bottom / 2 },
-        }}
-      >
-        {(props) => <ScanScreen {...props} rootNavigation={rootNavigation} />}
-      </Tab.Screen>
-      <Tab.Screen
-        name="History"
-        options={{
-          tabBarLabel: 'Historial',
-          tabBarIcon: ({ color }) => <Text style={{ fontSize: 24 }}>📜</Text>,
-        }}
-      >
-        {(props) => <HistoryScreen {...props} />}
-      </Tab.Screen>
-      <Tab.Screen
-        name="Account"
-        options={{
-          tabBarLabel: 'Cuenta',
-          tabBarIcon: ({ color }) => <Text style={{ fontSize: 24 }}>👤</Text>,
-        }}
-      >
-        {(props) => <AccountScreen {...props} user={user} onLogout={onLogout} />}
-      </Tab.Screen>
-    </Tab.Navigator>
-  );
-}
-
-export default function App() {
-  const [user, setUser] = useState<{ username: string; idTag: string; role?: string } | null>(null);
-  const [loading, setLoading] = useState(true);
+const AppContent = () => {
+  const dispatch = useAppDispatch();
+  const { isInitialized } = useAppSelector((state) => state.auth);
+  const { t } = useI18n();
 
   useEffect(() => {
-    // 检查是否已登录
-    AsyncStorage.getItem('current_user').then((data) => {
-      if (data) {
-        const userData = JSON.parse(data);
-        // 确保有role字段，默认为'user'
-        setUser({
-          ...userData,
-          role: userData.role || 'user',
-        });
-      }
-      setLoading(false);
-    });
+    // 初始化认证状态
+    dispatch(initializeAuth());
   }, []);
 
-  const handleLogin = (userData: { username: string; idTag: string; role?: string }) => {
-    setUser(userData);
-  };
-
-  const handleLogout = async () => {
-    await AsyncStorage.removeItem('current_user');
-    setUser(null);
-  };
-
-  if (loading) {
-    return null;
+  if (!isInitialized) {
+    return (
+      <View testID="app-initializing" style={styles.loadingContainer}>
+        <StatusBar barStyle="dark-content" backgroundColor={palette.surface} />
+        <BrandLogo style={styles.loadingLogo} />
+        <ActivityIndicator
+          color={palette.brand}
+          accessibilityLabel={t.common.loading}
+          accessibilityRole="progressbar"
+        />
+      </View>
+    );
   }
 
   return (
+    <>
+      <StatusBar barStyle="dark-content" />
+      <RootNavigator />
+      <ActiveSessionRecovery />
+    </>
+  );
+};
+
+export default function App() {
+  return (
     <SafeAreaProvider>
-      <NavigationContainer>
-        <StatusBar style="auto" />
-        <Stack.Navigator
-        initialRouteName={user ? 'Main' : 'Login'}
-        screenOptions={{
-          headerShown: false,
-        }}
-      >
-        {!user ? (
-          // 未登录时的导航栈
-          <>
-            <Stack.Screen name="Login">
-              {(props) => <LoginScreen {...props} onLogin={handleLogin} />}
-            </Stack.Screen>
-            <Stack.Screen name="Register" options={{ title: '注册' }}>
-              {(props) => <RegisterScreen {...props} onLogin={handleLogin} />}
-            </Stack.Screen>
-          </>
-        ) : (
-          // 已登录时的导航栈
-          <>
-            <Stack.Screen name="Main">
-              {(props) => <MainTabs {...props} user={user} onLogout={handleLogout} />}
-            </Stack.Screen>
-            <Stack.Screen
-              name="Session"
-              options={{
-                headerShown: true,
-                headerStyle: { backgroundColor: '#007AFF' },
-                headerTintColor: '#fff',
-                headerTitleStyle: { fontWeight: '600' },
-                title: '充电会话',
-              }}
-            >
-              {(props) => <SessionScreen {...props} user={user} />}
-            </Stack.Screen>
-            <Stack.Screen
-              name="OrderDetail"
-              options={{
-                headerShown: true,
-                headerStyle: { backgroundColor: '#007AFF' },
-                headerTintColor: '#fff',
-                headerTitleStyle: { fontWeight: '600' },
-                title: '订单详情',
-              }}
-            >
-              {(props) => <OrderDetailScreen {...props} />}
-            </Stack.Screen>
-          </>
-        )}
-        </Stack.Navigator>
-      </NavigationContainer>
+      <Provider store={store}>
+        <I18nProvider>
+          <AppContent />
+        </I18nProvider>
+      </Provider>
     </SafeAreaProvider>
   );
 }
+
+const styles = StyleSheet.create({
+  loadingContainer: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: palette.surface,
+    gap: spacing.md,
+  },
+  loadingLogo: {
+    width: 224,
+    height: 224,
+  },
+});

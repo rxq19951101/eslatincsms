@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>清除浏览器存储</title>
+    <style>
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            max-width: 600px;
+            margin: 50px auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 12px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #10B981;
+            margin-top: 0;
+        }
+        button {
+            background: #10B981;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 8px;
+            font-size: 16px;
+            cursor: pointer;
+            margin: 10px 5px;
+        }
+        button:hover {
+            background: #059669;
+        }
+        button.secondary {
+            background: #6B7280;
+        }
+        button.secondary:hover {
+            background: #4B5563;
+        }
+        .result {
+            margin-top: 20px;
+            padding: 15px;
+            border-radius: 8px;
+            font-family: monospace;
+            white-space: pre-wrap;
+        }
+        .success {
+            background: #D1FAE5;
+            color: #065F46;
+        }
+        .info {
+            background: #DBEAFE;
+            color: #1E40AF;
+        }
+        code {
+            background: #f3f4f6;
+            padding: 2px 6px;
+            border-radius: 4px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔧 清除EsLatin应用存储</h1>
+        <p>如果遇到登录问题，可能是浏览器存储了旧的token或配置。</p>
+        
+        <h3>当前存储的数据：</h3>
+        <div id="current-storage" class="result info"></div>
+        
+        <h3>操作：</h3>
+        <button onclick="clearStorage()">清除所有存储数据</button>
+        <button onclick="checkStorage()" class="secondary">重新检查</button>
+        <button onclick="goToApp()" class="secondary">前往应用</button>
+        
+        <div id="result"></div>
+        
+        <hr style="margin: 30px 0;">
+        
+        <h3>手动清除步骤：</h3>
+        <ol>
+            <li>在浏览器中打开 <code>http://localhost:8081</code></li>
+            <li>按 <code>F12</code> 打开开发者工具</li>
+            <li>切换到 <code>Application</code> 标签（Chrome）或 <code>Storage</code>标签（Firefox）</li>
+            <li>在左侧找到 <code>Local Storage</code> → <code>http://localhost:8081</code></li>
+            <li>删除所有以 <code>@eslatin/</code> 开头的项</li>
+            <li>刷新页面</li>
+        </ol>
+    </div>
+
+    <script>
+        const STORAGE_KEYS = [
+            '@eslatin/access_token',
+            '@eslatin/refresh_token',
+            '@eslatin/user_info',
+            '@eslatin/remember_me'
+        ];
+
+        function checkStorage() {
+            const current = {};
+            STORAGE_KEYS.forEach(key => {
+                const value = localStorage.getItem(key);
+                if (value) {
+                    current[key] = value.substring(0, 50) + (value.length > 50 ? '...' : '');
+                }
+            });
+            
+            const display = document.getElementById('current-storage');
+            if (Object.keys(current).length === 0) {
+                display.textContent = '✓ 没有存储数据';
+                display.className = 'result success';
+            } else {
+                display.textContent = JSON.stringify(current, null, 2);
+                display.className = 'result info';
+            }
+        }
+
+        function clearStorage() {
+            let count = 0;
+            STORAGE_KEYS.forEach(key => {
+                if (localStorage.getItem(key)) {
+                    localStorage.removeItem(key);
+                    count++;
+                }
+            });
+            
+            const result = document.getElementById('result');
+            result.className = 'result success';
+            result.textContent = `✅ 成功清除 ${count} 个存储项\n\n现在可以刷新应用页面重新登录了。`;
+            
+            checkStorage();
+        }
+
+        function goToApp() {
+            window.location.href = 'http://localhost:8081';
+        }
+
+        // 页面加载时检查存储
+        checkStorage();
+    </script>
+</body>
+</html>

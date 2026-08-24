@@ -1,27 +1,36 @@
 #
 # 生产环境 Docker Compose 配置
-# 使用: docker compose -f docker-compose.prod.yml up -d
-# 注意：密码已硬编码，便于测试和调试
+# 使用: ./scripts/validate_prod_env.sh --first-boot
+#       docker compose --env-file .env.production -f docker-compose.prod.yml up -d --build
+# DNS 必须先将 ADMIN_DOMAIN 与 API_DOMAIN 的 A 记录指向本机。
+# 生产部署必须通过环境变量或 secret provider 注入凭据。
 #
+
+x-logging: &default-logging
+  driver: "json-file"
+  options:
+    max-size: "10m"
+    max-file: "5"
 
 services:
   db:
     image: postgres:15-alpine
     container_name: ocpp-db-prod
     environment:
-      - POSTGRES_USER=ocpp_user
-      - POSTGRES_PASSWORD=ocpp_password
-      - POSTGRES_DB=ocpp
+      - POSTGRES_USER=${DB_USER:?DB_USER must be set}
+      - POSTGRES_PASSWORD=${DB_PASSWORD:?DB_PASSWORD must be set}
+      - POSTGRES_DB=${DB_NAME:?DB_NAME must be set}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     networks:
       - ocppnet
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ocpp_user -d ocpp"]
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
       interval: 10s
       timeout: 5s
       retries: 5
     restart: unless-stopped
+    logging: *default-logging
     deploy:
       resources:
         limits:
@@ -31,23 +40,47 @@ services:
           cpus: '1'
           memory: 1G
 
+  db-role-init:
+    image: postgres:15-alpine
+    environment:
+      DB_USER: ${DB_USER:?DB_USER must be set}
+      DB_NAME: ${DB_NAME:?DB_NAME must be set}
+      PGPASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set}
+    volumes:
+      - ./csms/scripts/ensure_app_super_role.sql:/opt/csms/ensure_app_super_role.sql:ro
+      - ./csms/scripts/check_app_super_role.sql:/opt/csms/check_app_super_role.sql:ro
+    command:
+      - sh
+      - -ec
+      - |
+        psql -h db -U "$${DB_USER}" -d "$${DB_NAME}" --set=ON_ERROR_STOP=1 --file=/opt/csms/ensure_app_super_role.sql
+        psql -h db -U "$${DB_USER}" -d "$${DB_NAME}" --set=ON_ERROR_STOP=1 --file=/opt/csms/check_app_super_role.sql
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - ocppnet
+    restart: "no"
+    logging: *default-logging
+
   redis:
     image: redis:7-alpine
     container_name: ocpp-redis-prod
-    command: redis-server --appendonly yes --protected-mode no
+    command: ["sh", "-c", "exec redis-server --appendonly yes --requirepass \"$${REDIS_PASSWORD}\""]
     environment:
-      - REDIS_PASSWORD=
+      - REDIS_PASSWORD=${REDIS_PASSWORD:?REDIS_PASSWORD must be set}
     volumes:
       - redis_data:/data
       # 不挂载配置文件，避免冲突
     networks:
       - ocppnet
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "redis-cli -a \"$${REDIS_PASSWORD}\" ping"]
       interval: 10s
       timeout: 5s
       retries: 5
     restart: unless-stopped
+    logging: *default-logging
     deploy:
       resources:
         limits:
@@ -60,40 +93,88 @@ services:
   csms:
     build: ./csms
     container_name: ocpp-csms-prod
-    ports:
-      - "${CSMS_PORT:-9000}:9000"
+    volumes:
+      - qr_data:/data/qr
     environment:
       - ENVIRONMENT=production
       - DEBUG=false
-      - DATABASE_URL=postgresql://ocpp_user:ocpp_password@db:5432/ocpp
-      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
-      - ENCRYPTION_KEY=${ENCRYPTION_KEY:-}
-      - SECRET_KEY=${SECRET_KEY:-}
-      - ENCRYPTION_SALT=${ENCRYPTION_SALT:-ocpp_csms_salt}
-      - MQTT_BROKER_HOST=${MQTT_BROKER_HOST:-mqtt-broker}
-      - MQTT_BROKER_PORT=${MQTT_BROKER_PORT:-1883}
-      - MQTT_USERNAME=${MQTT_USERNAME:-}
-      - MQTT_PASSWORD=${MQTT_PASSWORD:-}
-      - CORS_ORIGINS=${CORS_ORIGINS}
+      - POSTGRES_USER=${DB_USER:?DB_USER must be set}
+      - POSTGRES_DB=${DB_NAME:?DB_NAME must be set}
+      - DATABASE_URL=${DATABASE_URL:?DATABASE_URL must be set}
+      - SUPER_DATABASE_URL=${DATABASE_URL:?DATABASE_URL must be set}
+      - DB_POOL_SIZE=${DB_POOL_SIZE:-10}
+      - DB_MAX_OVERFLOW=${DB_MAX_OVERFLOW:-20}
+      - DB_POOL_RECYCLE=${DB_POOL_RECYCLE:-3600}
+      - REDIS_URL=${REDIS_URL:?REDIS_URL must be set}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY:?ENCRYPTION_KEY must be set}
+      - SECRET_KEY=${SECRET_KEY:?SECRET_KEY must be set}
+      - ENCRYPTION_SALT=${ENCRYPTION_SALT:?ENCRYPTION_SALT must be set}
+      - CSMS_BOOTSTRAP_SUPER_ADMIN_EMAIL=${CSMS_BOOTSTRAP_SUPER_ADMIN_EMAIL:-}
+      - CSMS_BOOTSTRAP_SUPER_ADMIN_PASSWORD=${CSMS_BOOTSTRAP_SUPER_ADMIN_PASSWORD:-}
+      - CSMS_BOOTSTRAP_TENANT_ADMIN_EMAIL=${CSMS_BOOTSTRAP_TENANT_ADMIN_EMAIL:-}
+      - CSMS_BOOTSTRAP_TENANT_ADMIN_PASSWORD=${CSMS_BOOTSTRAP_TENANT_ADMIN_PASSWORD:-}
+      - OCPP_WS_REQUIRE_PRE_REGISTERED=true
+      - ENABLE_WEBSOCKET_TRANSPORT=${ENABLE_WEBSOCKET_TRANSPORT:-true}
+      - ENABLE_MQTT_TRANSPORT=${ENABLE_MQTT_TRANSPORT:-false}
+      - ENABLE_HTTP_TRANSPORT=${ENABLE_HTTP_TRANSPORT:-false}
+      - ENABLE_DISTRIBUTED=${ENABLE_DISTRIBUTED:-false}
+      - SERVER_ID=${SERVER_ID:-}
+      - WS_PING_INTERVAL=${WS_PING_INTERVAL:-20}
+      - WS_PING_TIMEOUT=${WS_PING_TIMEOUT:-10}
+      - WS_MAX_CONNECTIONS=${WS_MAX_CONNECTIONS:-1000}
+      - HEARTBEAT_PERSIST_INTERVAL_SECONDS=${HEARTBEAT_PERSIST_INTERVAL_SECONDS:-60}
+      - METER_PERSIST_INTERVAL_SECONDS=${METER_PERSIST_INTERVAL_SECONDS:-60}
+      - METER_REALTIME_TTL_SECONDS=${METER_REALTIME_TTL_SECONDS:-86400}
+      - METER_DEDUPE_TTL_SECONDS=${METER_DEDUPE_TTL_SECONDS:-86400}
+      - CORS_ALLOW_ORIGINS=${CORS_ALLOW_ORIGINS:?CORS_ALLOW_ORIGINS must be set}
+      - PUBLIC_API_BASE_URL=${PUBLIC_API_BASE_URL:?PUBLIC_API_BASE_URL must be set}
+      - RATE_LIMIT_ENABLED=${RATE_LIMIT_ENABLED:-true}
+      - RATE_LIMIT_PER_MINUTE=${RATE_LIMIT_PER_MINUTE:-60}
+      - ENABLE_METRICS=${ENABLE_METRICS:-false}
+      - MONITORING_INTERVAL_SECONDS=${MONITORING_INTERVAL_SECONDS:-60}
+      - PAYMENT_RAILS_ENABLED=${PAYMENT_RAILS_ENABLED:-false}
+      - MERCADOPAGO_ENVIRONMENT=${MERCADOPAGO_ENVIRONMENT:-production}
+      - MERCADOPAGO_ACCESS_TOKEN=${MERCADOPAGO_ACCESS_TOKEN:-}
+      - MERCADOPAGO_PUBLIC_KEY=${MERCADOPAGO_PUBLIC_KEY:-}
+      - MERCADOPAGO_WEBHOOK_SECRET=${MERCADOPAGO_WEBHOOK_SECRET:-}
+      - MERCADOPAGO_SANDBOX_PAYER_EMAIL=${MERCADOPAGO_SANDBOX_PAYER_EMAIL:-test_payer@example.com}
+      - CHECKOUT_SESSION_TTL_SECONDS=${CHECKOUT_SESSION_TTL_SECONDS:-900}
+      - PAYMENT_TOKEN_ENCRYPTION_KEY=${PAYMENT_TOKEN_ENCRYPTION_KEY:-}
+      - CHECKOUT_SIGNING_KEY=${CHECKOUT_SIGNING_KEY:-}
+      - CHECKOUT_RETURN_URL_ALLOWLIST=${CHECKOUT_RETURN_URL_ALLOWLIST:-eslatin://payment-return}
+      - CHECKOUT_NEXT_ACTION_HOST_ALLOWLIST=${CHECKOUT_NEXT_ACTION_HOST_ALLOWLIST:-mercadopago.com,mercadopago.com.co}
+      - WALLET_TOP_UP_MIN_AMOUNT=${WALLET_TOP_UP_MIN_AMOUNT:-0.01}
+      - WALLET_TOP_UP_MAX_AMOUNT=${WALLET_TOP_UP_MAX_AMOUNT:-99999999.99}
+      - ALLOW_MOCK_WALLET_TOP_UP=false
+      - QR_STORAGE_DIR=/data/qr
+      - SMTP_HOST=${SMTP_HOST:-}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USER=${SMTP_USER:-}
+      - SMTP_PASSWORD=${SMTP_PASSWORD:-}
+      - SMTP_FROM=${SMTP_FROM:-}
+      - SMTP_TLS=${SMTP_TLS:-true}
+      - SMTP_SSL=${SMTP_SSL:-false}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - LOG_FORMAT=${LOG_FORMAT:-json}
       - DOCS_URL=${DOCS_URL:-None}
       - REDOC_URL=${REDOC_URL:-None}
+      - FORWARDED_ALLOW_IPS=*
     depends_on:
-      db:
-        condition: service_healthy
+      db-role-init:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
-      mqtt-broker:
-        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://localhost:9000/readyz"]
+      interval: 30s
+      timeout: 20s
+      retries: 5
+      start_period: 60s
     networks:
       - ocppnet
     restart: unless-stopped
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
+    stop_grace_period: 30s
+    logging: *default-logging
     deploy:
       resources:
         limits:
@@ -103,68 +184,90 @@ services:
           cpus: '1'
           memory: 1G
 
-  # MQTT Broker
-  mqtt-broker:
-    image: eclipse-mosquitto:2.0
-    container_name: ocpp-mqtt-prod
-    ports:
-      - "${MQTT_BROKER_PORT:-1883}:1883"
-      - "${MQTT_BROKER_WS_PORT:-9001}:9001"
-    volumes:
-      - mqtt_data:/mosquitto/data
-      - mqtt_log:/mosquitto/log
-      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
-    # 允许匿名连接（生产环境应配置认证）
-    # 使用默认配置，允许所有连接
-    networks:
-      - ocppnet
-    restart: unless-stopped
+  # Admin管理界面
+  admin:
+    build:
+      context: ./admin
+      args:
+        NEXT_PUBLIC_GOOGLE_MAPS_API_KEY: ${NEXT_PUBLIC_GOOGLE_MAPS_API_KEY:-}
+        NEXT_PUBLIC_GOOGLE_MAP_ID: ${NEXT_PUBLIC_GOOGLE_MAP_ID:-}
+        NEXT_PUBLIC_CSMS_HTTP: ${NEXT_PUBLIC_CSMS_HTTP:?NEXT_PUBLIC_CSMS_HTTP must be set}
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:?NEXT_PUBLIC_API_BASE_URL must be set}
+    container_name: ocpp-admin-prod
+    environment:
+      - NEXT_PUBLIC_CSMS_HTTP=${NEXT_PUBLIC_CSMS_HTTP:?NEXT_PUBLIC_CSMS_HTTP must be set}
+      - NEXT_PUBLIC_API_BASE_URL=${NEXT_PUBLIC_API_BASE_URL:?NEXT_PUBLIC_API_BASE_URL must be set}
+      - NEXT_TELEMETRY_DISABLED=1
+    depends_on:
+      csms:
+        condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "mosquitto_pub -h localhost -t test -m 'healthcheck' && mosquitto_sub -h localhost -t test -C 1 -W 2 || exit 0"]
+      test: ["CMD", "wget", "--quiet", "--spider", "http://127.0.0.1:3000/login"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 10s
-    deploy:
-      resources:
-        limits:
-          cpus: '0.5'
-          memory: 256M
-
-  # Admin管理界面
-  admin:
-    build: ./admin
-    container_name: ocpp-admin-prod
-    ports:
-      - "${ADMIN_PORT:-3000}:3000"
-    environment:
-      # 前端API地址配置（必须设置！）
-      # 方式1：通过环境变量手动指定（推荐）
-      # 设置方式：export NEXT_PUBLIC_CSMS_HTTP=http://47.236.134.99:9000
-      # 或者在 .env 文件中设置：NEXT_PUBLIC_CSMS_HTTP=http://47.236.134.99:9000
-      # 方式2：如果不设置，前端会自动检测当前页面的 hostname 并使用相同 hostname + 端口 9000
-      # 例如：访问 http://47.236.134.99:3000 时，会自动使用 http://47.236.134.99:9000
-      # 注意：如果访问URL包含占位符（如 your-server-ip），会导致连接失败
-      - NEXT_PUBLIC_CSMS_HTTP=${NEXT_PUBLIC_CSMS_HTTP:-}
-    depends_on:
-      - csms
+      start_period: 20s
     networks:
       - ocppnet
     restart: unless-stopped
+    logging: *default-logging
     deploy:
       resources:
         limits:
           cpus: '1'
           memory: 1G
 
+  proxy:
+    image: caddy:2.11-alpine
+    container_name: ocpp-proxy-prod
+    environment:
+      - ADMIN_DOMAIN=${ADMIN_DOMAIN:?ADMIN_DOMAIN must be set}
+      - API_DOMAIN=${API_DOMAIN:?API_DOMAIN must be set}
+      - ACME_EMAIL=${ACME_EMAIL:?ACME_EMAIL must be set}
+    ports:
+      - "${PROXY_BIND_ADDRESS:-0.0.0.0}:${PUBLIC_HTTP_PORT:-80}:80/tcp"
+      - "${PROXY_BIND_ADDRESS:-0.0.0.0}:${PUBLIC_HTTPS_PORT:-443}:443/tcp"
+      - "${PROXY_BIND_ADDRESS:-0.0.0.0}:${PUBLIC_HTTPS_PORT:-443}:443/udp"
+    volumes:
+      - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      admin:
+        condition: service_healthy
+      csms:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "caddy", "validate", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    networks:
+      - ocppnet
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+
 volumes:
   postgres_data:
     driver: local
   redis_data:
     driver: local
-  mqtt_data:
+  qr_data:
     driver: local
-  mqtt_log:
+  caddy_data:
+    driver: local
+  caddy_config:
     driver: local
 
 networks:

@@ -8,12 +8,17 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from datetime import datetime, timezone
+from decimal import Decimal
 
-from app.database import get_db, ChargePoint, Site, Tariff, EVSE, EVSEStatus
+from app.database.base import get_db, tenant_id_context
+from app.database.models import ChargePoint, Site, Tariff, EVSE, EVSEStatus
+from app.core.permissions import get_current_admin_user
 from app.services.charge_point_service import ChargePointService
 from app.core.logging_config import get_logger
 from app.core.config import get_settings
 from app.core.id_generator import generate_site_id
+from app.api.validation import StrictRequestModel
+from app.core.asset_identifiers import get_charge_point_by_reference
 
 settings = get_settings()
 logger = get_logger("ocpp_csms")
@@ -23,33 +28,33 @@ router = APIRouter()
 
 # ==================== 请求模型 ====================
 
-class CreateChargerRequest(BaseModel):
+class CreateChargerRequest(StrictRequestModel):
     """创建充电桩请求"""
-    charger_id: str = Field(..., description="充电桩ID")
-    vendor: Optional[str] = Field(None, description="厂商")
-    model: Optional[str] = Field(None, description="型号")
-    serial_number: Optional[str] = Field(None, description="序列号")
-    firmware_version: Optional[str] = Field(None, description="固件版本")
-    connector_type: str = Field("Type2", description="连接器类型")
-    charging_rate: float = Field(7.0, description="充电速率 (kW)")
-    latitude: Optional[float] = Field(None, description="纬度")
-    longitude: Optional[float] = Field(None, description="经度")
-    address: Optional[str] = Field(None, description="地址")
-    price_per_kwh: float = Field(2700.0, description="每度电价格 (COP/kWh)")
+    charger_id: str = Field(..., min_length=1, max_length=64, pattern=r"^[A-Za-z0-9._:-]+$", description="OCPP identity")
+    vendor: Optional[str] = Field(None, max_length=100, description="厂商")
+    model: Optional[str] = Field(None, max_length=100, description="型号")
+    serial_number: Optional[str] = Field(None, max_length=100, description="序列号")
+    firmware_version: Optional[str] = Field(None, max_length=50, description="固件版本")
+    connector_type: str = Field("Type2", min_length=1, max_length=50, description="连接器类型")
+    charging_rate: float = Field(7.0, gt=0, le=1000, description="充电速率 (kW)")
+    latitude: float = Field(..., ge=-90, le=90, allow_inf_nan=False, description="纬度")
+    longitude: float = Field(..., ge=-180, le=180, allow_inf_nan=False, description="经度")
+    address: str = Field(..., min_length=5, max_length=300, description="地址")
+    price_per_kwh: Decimal = Field(Decimal("2700.0"), gt=0, max_digits=10, decimal_places=2, description="每度电价格 (COP/kWh)")
 
 
-class UpdateChargerLocationRequest(BaseModel):
+class UpdateChargerLocationRequest(StrictRequestModel):
     """更新充电桩位置请求"""
-    charger_id: str = Field(..., description="充电桩ID")
-    latitude: float = Field(..., description="纬度")
-    longitude: float = Field(..., description="经度")
-    address: str = Field("", description="地址")
+    charger_id: str = Field(..., min_length=1, max_length=64)
+    latitude: float = Field(..., ge=-90, le=90, allow_inf_nan=False)
+    longitude: float = Field(..., ge=-180, le=180, allow_inf_nan=False)
+    address: str = Field(..., min_length=5, max_length=300)
 
 
 class UpdateChargerPricingRequest(BaseModel):
     """更新充电桩定价请求"""
     charger_id: str = Field(..., description="充电桩ID")
-    price_per_kwh: float = Field(..., gt=0, description="每度电价格 (COP/kWh)")
+    price_per_kwh: Decimal = Field(..., gt=0, description="每度电价格 (COP/kWh)")
     charging_rate: Optional[float] = Field(None, description="充电速率 (kW)")
 
 
@@ -121,7 +126,10 @@ def get_charger_from_redis(charger_id: str) -> Optional[dict]:
 # ==================== API端点 ====================
 
 @router.get("/pending", summary="获取待配置的充电桩列表")
-def get_pending_chargers(db: Session = Depends(get_db)) -> List[ChargerStatus]:
+def get_pending_chargers(
+    current_user_obj = Depends(get_current_admin_user),
+    db: Session = Depends(get_db)
+) -> List[ChargerStatus]:
     """
     获取已连接但未完整配置的充电桩列表
     
@@ -130,6 +138,9 @@ def get_pending_chargers(db: Session = Depends(get_db)) -> List[ChargerStatus]:
     2. 但数据库中不存在或配置不完整（缺少位置、价格等）
     """
     logger.info("[API] GET /api/v1/charger-management/pending | 获取待配置充电桩列表")
+    tenant_id = tenant_id_context.get()
+    if not tenant_id:
+        raise HTTPException(status_code=403, detail="Tenant ID required")
     
     pending_chargers = []
     
@@ -154,11 +165,16 @@ def get_pending_chargers(db: Session = Depends(get_db)) -> List[ChargerStatus]:
     
     # 检查每个已连接的充电桩
     for charger_id in connected_ids:
-        # 从Redis获取实时状态
+        # Connection managers expose OCPP identities, never internal UUIDs.
+        charge_point = db.query(ChargePoint).filter(
+            ChargePoint.ocpp_identity == charger_id,
+            ChargePoint.tenant_id == tenant_id,
+        ).first()
+        if not charge_point:
+            # An unowned transport identity must not leak into another tenant's list.
+            continue
+
         redis_charger = get_charger_from_redis(charger_id)
-        
-        # 从数据库获取配置信息
-        charge_point = db.query(ChargePoint).filter(ChargePoint.id == charger_id).first()
         
         # 判断是否需要配置
         is_configured = False
@@ -169,13 +185,14 @@ def get_pending_chargers(db: Session = Depends(get_db)) -> List[ChargerStatus]:
             is_configured = True
             # 检查站点位置
             site = charge_point.site if charge_point.site_id else None
-            has_location = site and site.latitude is not None and site.longitude is not None
+            has_location = bool(site and site.latitude is not None and site.longitude is not None)
             # 检查定价
             tariff = db.query(Tariff).filter(
+                Tariff.tenant_id == tenant_id,
                 Tariff.site_id == charge_point.site_id,
                 Tariff.is_active == True
             ).first() if charge_point.site_id else None
-            has_pricing = tariff and tariff.base_price_per_kwh > 0
+            has_pricing = bool(tariff and tariff.base_price_per_kwh > 0)
         elif redis_charger:
             # 检查Redis中的数据是否完整
             location = redis_charger.get("location", {})
@@ -202,7 +219,11 @@ def get_pending_chargers(db: Session = Depends(get_db)) -> List[ChargerStatus]:
 
 
 @router.post("/create", summary="创建/录入充电桩")
-def create_charger(req: CreateChargerRequest, db: Session = Depends(get_db)) -> dict:
+def create_charger(
+    req: CreateChargerRequest,
+    current_user_obj = Depends(get_current_admin_user),
+    db: Session = Depends(get_db)
+) -> dict:
     """
     创建新的充电桩记录
     
@@ -214,8 +235,16 @@ def create_charger(req: CreateChargerRequest, db: Session = Depends(get_db)) -> 
         f"厂商: {req.vendor} | 型号: {req.model}"
     )
     
-    # 检查充电桩是否已存在
-    charge_point = db.query(ChargePoint).filter(ChargePoint.id == req.charger_id).first()
+    tenant_id = tenant_id_context.get()
+    if not tenant_id:
+        raise HTTPException(status_code=403, detail="Tenant ID required")
+    if req.latitude == 0 and req.longitude == 0:
+        raise HTTPException(status_code=422, detail="latitude and longitude must not both be zero")
+    
+    # 检查充电桩是否已存在（按租户）
+    charge_point = db.query(ChargePoint).filter(ChargePoint.ocpp_identity == req.charger_id).first()
+    if charge_point and charge_point.tenant_id != tenant_id:
+        raise HTTPException(status_code=403, detail="Charge point belongs to another tenant")
     
     if charge_point:
         logger.info(f"[API] 充电桩 {req.charger_id} 已存在，执行更新操作")
@@ -232,15 +261,20 @@ def create_charger(req: CreateChargerRequest, db: Session = Depends(get_db)) -> 
         # 更新EVSE的connector_type（如果提供）
         if req.connector_type:
             evse = db.query(EVSE).filter(
-                EVSE.charge_point_id == req.charger_id,
+                EVSE.charge_point_id == charge_point.id,
                 EVSE.evse_id == 1
             ).first()
             if evse:
                 evse.connector_type = req.connector_type
             else:
                 # 如果EVSE不存在，创建它
+                tenant_id = tenant_id_context.get()
+                if not tenant_id:
+                    raise HTTPException(status_code=403, detail="Tenant ID required")
+                
                 evse = EVSE(
-                    charge_point_id=req.charger_id,
+                    tenant_id=tenant_id,
+                    charge_point_id=charge_point.id,
                     evse_id=1,
                     connector_type=req.connector_type
                 )
@@ -248,9 +282,14 @@ def create_charger(req: CreateChargerRequest, db: Session = Depends(get_db)) -> 
                 db.flush()
                 
                 # 创建EVSE状态
+                tenant_id = tenant_id_context.get()
+                if not tenant_id:
+                    raise HTTPException(status_code=403, detail="Tenant ID required")
+                
                 evse_status = EVSEStatus(
+                    tenant_id=tenant_id,
                     evse_id=evse.id,
-                    charge_point_id=req.charger_id,
+                    charge_point_id=charge_point.id,
                     status="Unknown",
                     last_seen=datetime.now(timezone.utc)
                 )
@@ -259,15 +298,20 @@ def create_charger(req: CreateChargerRequest, db: Session = Depends(get_db)) -> 
         # 更新EVSE的connector_type（如果提供）
         if req.connector_type:
             evse = db.query(EVSE).filter(
-                EVSE.charge_point_id == req.charger_id,
+                EVSE.charge_point_id == charge_point.id,
                 EVSE.evse_id == 1
             ).first()
             if evse:
                 evse.connector_type = req.connector_type
             else:
                 # 如果EVSE不存在，创建它
+                tenant_id = tenant_id_context.get()
+                if not tenant_id:
+                    raise HTTPException(status_code=403, detail="Tenant ID required")
+                
                 evse = EVSE(
-                    charge_point_id=req.charger_id,
+                    tenant_id=tenant_id,
+                    charge_point_id=charge_point.id,
                     evse_id=1,
                     connector_type=req.connector_type
                 )
@@ -275,9 +319,14 @@ def create_charger(req: CreateChargerRequest, db: Session = Depends(get_db)) -> 
                 db.flush()
                 
                 # 创建EVSE状态
+                tenant_id = tenant_id_context.get()
+                if not tenant_id:
+                    raise HTTPException(status_code=403, detail="Tenant ID required")
+                
                 evse_status = EVSEStatus(
+                    tenant_id=tenant_id,
                     evse_id=evse.id,
-                    charge_point_id=req.charger_id,
+                    charge_point_id=charge_point.id,
                     status="Unknown",
                     last_seen=datetime.now(timezone.utc)
                 )
@@ -288,10 +337,15 @@ def create_charger(req: CreateChargerRequest, db: Session = Depends(get_db)) -> 
             site = charge_point.site if charge_point.site_id else None
             if not site:
                 # 创建新站点
+                tenant_id = tenant_id_context.get()
+                if not tenant_id:
+                    raise HTTPException(status_code=403, detail="Tenant ID required")
+                
                 site = Site(
-                    id=generate_site_id(f"站点-{req.charger_id}"),
+                    site_code=generate_site_id(f"站点-{req.charger_id}"),
+                    tenant_id=tenant_id,
                     name=f"站点-{req.charger_id}",
-                    address=req.address or "",
+                    address=req.address,
                     latitude=req.latitude,
                     longitude=req.longitude
                 )
@@ -331,10 +385,15 @@ def create_charger(req: CreateChargerRequest, db: Session = Depends(get_db)) -> 
         # 创建或获取站点
         site = None
         if req.latitude is not None and req.longitude is not None:
+            tenant_id = tenant_id_context.get()
+            if not tenant_id:
+                raise HTTPException(status_code=403, detail="Tenant ID required")
+            
             site = Site(
-                id=generate_site_id(f"站点-{req.charger_id}"),
+                site_code=generate_site_id(f"站点-{req.charger_id}"),
+                tenant_id=tenant_id,
                 name=f"站点-{req.charger_id}",
-                address=req.address or "",
+                address=req.address,
                 latitude=req.latitude,
                 longitude=req.longitude
             )
@@ -342,8 +401,13 @@ def create_charger(req: CreateChargerRequest, db: Session = Depends(get_db)) -> 
             db.flush()
         
         # 创建充电桩
+        tenant_id = tenant_id_context.get()
+        if not tenant_id:
+            raise HTTPException(status_code=403, detail="Tenant ID required")
+        
         charge_point = ChargePoint(
-            id=req.charger_id,
+            ocpp_identity=req.charger_id,
+            tenant_id=tenant_id,
             site_id=site.id if site else None,
             vendor=req.vendor,
             model=req.model,
@@ -357,6 +421,7 @@ def create_charger(req: CreateChargerRequest, db: Session = Depends(get_db)) -> 
         # 创建定价规则
         if req.price_per_kwh and site:
             tariff = Tariff(
+                tenant_id=tenant_id,
                 site_id=site.id,
                 name="默认定价",
                 base_price_per_kwh=req.price_per_kwh,
@@ -368,13 +433,14 @@ def create_charger(req: CreateChargerRequest, db: Session = Depends(get_db)) -> 
         
         # 创建或更新默认EVSE（evse_id=1）
         evse = db.query(EVSE).filter(
-            EVSE.charge_point_id == req.charger_id,
+            EVSE.charge_point_id == charge_point.id,
             EVSE.evse_id == 1
         ).first()
         
         if not evse:
             evse = EVSE(
-                charge_point_id=req.charger_id,
+                tenant_id=tenant_id,
+                charge_point_id=charge_point.id,
                 evse_id=1,
                 connector_type=req.connector_type or "Type2"
             )
@@ -383,8 +449,9 @@ def create_charger(req: CreateChargerRequest, db: Session = Depends(get_db)) -> 
             
             # 创建EVSE状态
             evse_status = EVSEStatus(
+                tenant_id=tenant_id,
                 evse_id=evse.id,
-                charge_point_id=req.charger_id,
+                charge_point_id=charge_point.id,
                 status="Unknown",
                 last_seen=datetime.now(timezone.utc)
             )
@@ -400,7 +467,7 @@ def create_charger(req: CreateChargerRequest, db: Session = Depends(get_db)) -> 
         
         # 获取默认 EVSE 的 connector_type（用于 Redis 同步）
         default_evse = db.query(EVSE).filter(
-            EVSE.charge_point_id == req.charger_id,
+            EVSE.charge_point_id == charge_point.id,
             EVSE.evse_id == 1
         ).first()
         connector_type_for_redis = default_evse.connector_type if default_evse else (req.connector_type or "Type2")
@@ -464,7 +531,8 @@ def create_charger(req: CreateChargerRequest, db: Session = Depends(get_db)) -> 
             "success": True,
             "message": "充电桩已创建/更新",
             "charger": {
-                "id": charge_point.id,
+                "id": str(charge_point.id),
+                "ocpp_identity": charge_point.ocpp_identity,
                 "vendor": charge_point.vendor,
                 "model": charge_point.model,
                 "connector_type": connector_type,  # 从 EVSE 获取
@@ -484,7 +552,11 @@ def create_charger(req: CreateChargerRequest, db: Session = Depends(get_db)) -> 
 
 
 @router.post("/location", summary="设置充电桩位置")
-def update_charger_location(req: UpdateChargerLocationRequest, db: Session = Depends(get_db)) -> dict:
+def update_charger_location(
+    req: UpdateChargerLocationRequest,
+    current_user_obj = Depends(get_current_admin_user),
+    db: Session = Depends(get_db)
+) -> dict:
     """设置或更新充电桩的地理位置"""
     logger.info(
         f"[API] POST /api/v1/charger-management/location | "
@@ -493,20 +565,31 @@ def update_charger_location(req: UpdateChargerLocationRequest, db: Session = Dep
         f"地址: {req.address or '无'}"
     )
     
-    charge_point = db.query(ChargePoint).filter(ChargePoint.id == req.charger_id).first()
+    tenant_id = tenant_id_context.get()
+    if not tenant_id:
+        raise HTTPException(status_code=403, detail="Tenant ID required")
+    
+    charge_point = db.query(ChargePoint).filter(ChargePoint.ocpp_identity == req.charger_id).first()
+    if charge_point and charge_point.tenant_id != tenant_id:
+        raise HTTPException(status_code=403, detail="Charge point belongs to another tenant")
     
     if not charge_point:
         logger.warning(f"[API] POST /api/v1/charger-management/location | 充电桩 {req.charger_id} 未找到")
         raise HTTPException(status_code=404, detail=f"充电桩 {req.charger_id} 未找到，请先创建充电桩")
+    
+    tenant_id = tenant_id_context.get()
+    if not tenant_id:
+        raise HTTPException(status_code=403, detail="Tenant ID required")
     
     # 更新或创建站点位置信息
     site = charge_point.site if charge_point.site_id else None
     if not site:
         # 创建新站点
         site = Site(
-            id=generate_site_id(f"站点-{req.charger_id}"),
+            site_code=generate_site_id(f"站点-{req.charger_id}"),
+            tenant_id=tenant_id,
             name=f"站点-{req.charger_id}",
-            address=req.address or "",
+            address=req.address,
             latitude=req.latitude,
             longitude=req.longitude
         )
@@ -564,7 +647,11 @@ def update_charger_location(req: UpdateChargerLocationRequest, db: Session = Dep
 
 
 @router.post("/pricing", summary="设置充电桩定价")
-def update_charger_pricing(req: UpdateChargerPricingRequest, db: Session = Depends(get_db)) -> dict:
+def update_charger_pricing(
+    req: UpdateChargerPricingRequest,
+    current_user_obj=Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+) -> dict:
     """设置或更新充电桩的价格和充电速率"""
     logger.info(
         f"[API] POST /api/v1/charger-management/pricing | "
@@ -573,11 +660,16 @@ def update_charger_pricing(req: UpdateChargerPricingRequest, db: Session = Depen
         f"充电速率: {req.charging_rate or '未设置'} kW"
     )
     
-    charge_point = db.query(ChargePoint).filter(ChargePoint.id == req.charger_id).first()
+    tenant_id = tenant_id_context.get()
+    if not tenant_id:
+        raise HTTPException(status_code=403, detail="Tenant ID required")
+    charge_point = db.query(ChargePoint).filter(ChargePoint.ocpp_identity == req.charger_id).first()
     
     if not charge_point:
         logger.warning(f"[API] POST /api/v1/charger-management/pricing | 充电桩 {req.charger_id} 未找到")
         raise HTTPException(status_code=404, detail=f"充电桩 {req.charger_id} 未找到，请先创建充电桩")
+    if charge_point.tenant_id != tenant_id:
+        raise HTTPException(status_code=403, detail="Charge point belongs to another tenant")
     
     # 确保有站点
     if not charge_point.site_id:
@@ -590,7 +682,12 @@ def update_charger_pricing(req: UpdateChargerPricingRequest, db: Session = Depen
     ).first()
     
     if not tariff:
+        tenant_id = tenant_id_context.get()
+        if not tenant_id:
+            raise HTTPException(status_code=403, detail="Tenant ID required")
+        
         tariff = Tariff(
+            tenant_id=tenant_id,
             site_id=charge_point.site_id,
             name="默认定价",
             base_price_per_kwh=req.price_per_kwh,
@@ -644,7 +741,11 @@ def update_charger_pricing(req: UpdateChargerPricingRequest, db: Session = Depen
 
 
 @router.get("/{charger_id}/status", summary="获取充电桩状态和配置信息")
-def get_charger_status(charger_id: str, db: Session = Depends(get_db)) -> dict:
+def get_charger_status(
+    charger_id: str,
+    current_user_obj = Depends(get_current_admin_user),
+    db: Session = Depends(get_db)
+) -> dict:
     """获取充电桩的连接状态和配置完整性"""
     logger.info(f"[API] GET /api/v1/charger-management/{charger_id}/status | 查询充电桩状态")
     
@@ -654,8 +755,10 @@ def get_charger_status(charger_id: str, db: Session = Depends(get_db)) -> dict:
     # 从Redis获取实时信息
     redis_charger = get_charger_from_redis(charger_id)
     
-    # 从数据库获取配置信息
-    charge_point = db.query(ChargePoint).filter(ChargePoint.id == charger_id).first()
+    tenant_id = tenant_id_context.get()
+    charge_point = db.query(ChargePoint).filter(ChargePoint.ocpp_identity == charger_id).first()
+    if charge_point and tenant_id and charge_point.tenant_id != tenant_id:
+        raise HTTPException(status_code=403, detail="Charge point belongs to another tenant")
     
     # 判断配置完整性
     is_configured = charge_point is not None
@@ -714,4 +817,3 @@ def get_charger_status(charger_id: str, db: Session = Depends(get_db)) -> dict:
         f"连接状态: {'已连接' if is_connected else '未连接'} | "
         f"配置完整: {is_configured and has_location and has_pricing}"
     )
-

@@ -1,0 +1,65 @@
+schema_version: "1.0"
+scenario:
+  id: p0-tenant-permission
+  name: Tenant invisibility, uncontrollability, and read-only permission
+  dependencies: [sim-e2e-seed, tenant-b-assets, read-only-admin]
+environment:
+  api_base: ${SIM_API_BASE}
+  admin_password: ${SIM_E2E_ADMIN_PASSWORD}
+  readonly_password: ${SIM_E2E_READONLY_PASSWORD}
+actors:
+  tenant_admin:
+    type: admin
+    base_url: ${api_base}
+    username: ${seed.admin.username}
+    password: ${admin_password}
+    tenant_id: ${seed.tenant_id}
+  readonly_admin:
+    type: admin
+    base_url: ${api_base}
+    username: ${seed.readonly_admin.username}
+    password: ${readonly_password}
+    tenant_id: ${seed.tenant_id}
+steps:
+  - {id: tenant-login, actor: tenant_admin, action: login, expect: {status: 200}}
+  - id: cross-tenant-list-invisible
+    actor: tenant_admin
+    action: query
+    with: {path: /api/v1/chargers}
+    expect:
+      status: 200
+      body:
+        none_match: {id: "${seed.tenant_b.charge_point.id}"}
+        unique_by: id
+  - id: cross-tenant-detail-invisible
+    actor: tenant_admin
+    action: query
+    with: {path: "/api/v1/chargers/${seed.tenant_b.charge_point.id}"}
+    expect: {status: 404, body.error.status_code: 404}
+  - id: cross-tenant-session-invisible
+    actor: tenant_admin
+    action: query
+    with:
+      path: /api/v1/transactions
+      query: {charge_point_id: "${seed.tenant_b.charge_point.ocpp_identity}"}
+    expect: {status: 404, body.error.status_code: 404}
+  - id: cross-tenant-control
+    actor: tenant_admin
+    action: remote_start
+    with:
+      charge_point_id: ${seed.tenant_b.charge_point.ocpp_identity}
+      connector_id: 1
+      operation_reason: SIM E2E cross tenant rejection
+    expect: {status: 403, body.error.status_code: 403}
+  - {id: readonly-login, actor: readonly_admin, action: login, expect: {status: 200}}
+  - id: readonly-write
+    actor: readonly_admin
+    action: create_site
+    with: {name: Forbidden Site, address: Valid address Bogota, latitude: 4.6, longitude: -74.1}
+    expect: {status: 403, body.error.status_code: 403}
+  - id: readonly-can-read-own-tenant
+    actor: readonly_admin
+    action: query
+    with: {path: "/api/v1/chargers/${seed.charge_point.id}"}
+    expect: {status: 200, body.id: "${seed.charge_point.id}"}
+reports: {formats: [json, junit, timeline]}

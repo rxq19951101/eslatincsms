@@ -1,0 +1,28 @@
+# App Store Connect — borrador ES (Colombia / LATAM)
+# Revisar y pegar en ASC. No es texto final legal.
+
+Nombre: EsLatin
+Subtítulo (max ~30): Carga tu EV cerca de ti
+
+Descripción:
+EsLatin te ayuda a encontrar estaciones de carga para vehículos eléctricos, escanear el código QR del cargador e iniciar tu sesión de forma segura.
+
+• Mapa de estaciones cercanas
+• Escaneo QR para iniciar la carga
+• Seguimiento de la sesión y consumo
+• Historial y billetera (saldo asignado por el operador en esta versión)
+
+Soporte: support@eslatin.com.co
+Privacidad: https://api.eslatin.com.co/legal/privacy.html
+Términos: https://api.eslatin.com.co/legal/terms.html
+
+Palabras clave (separadas por coma, sin espacios de más):
+carga,electrico,EV,estacion,QR,Colombia,LATAM,vehiculo,energia,EsLatin
+
+Categoría primaria: Viajes / Utilidades (elegir en ASC)
+Clasificación por edad: 4+ (sin contenido restringido)
+
+Notas para revisión (App Review Information):
+Demo account: review@eslatin.com.co
+Password: Review2026!
+Notas: La recarga in-app está desactivada en esta versión. El saldo del usuario demo se asigna desde el backend del operador. Para probar: iniciar sesión → permitir ubicación → abrir mapa → escanear QR (o pegar token qr:…) → iniciar/detener carga. Eliminar cuenta: Cuenta → Eliminar cuenta.

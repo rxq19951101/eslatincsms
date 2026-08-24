@@ -29,11 +29,12 @@ class TestUserChargingFlow:
         handler: OCPPMessageHandler,
         db_session: Session, 
         sample_charge_point: ChargePoint,
+        sample_commercial_charge_point: ChargePoint,
         sample_evse: EVSE,
         sample_evse_status: EVSEStatus
     ):
         """测试完整的用户充电流程"""
-        charge_point_id = sample_charge_point.id
+        charge_point_id = sample_commercial_charge_point.ocpp_identity
         id_tag = "TEST_TAG_001"
         connector_id = 1
         
@@ -144,7 +145,7 @@ class TestUserChargingFlow:
                 },
                 db=db_session
             )
-            assert meter_response == {}
+            assert meter_response.get("_outcome") == "meter_recorded"
         
         # 验证计量值已保存
         db_session.refresh(session)
@@ -220,11 +221,12 @@ class TestUserChargingFlow:
         sample_evse: EVSE
     ):
         """测试计量值存储"""
-        charge_point_id = sample_charge_point.id
+        charge_point_id = sample_charge_point.ocpp_identity
         
         # 创建充电会话
         session = ChargingSession(
-            charge_point_id=charge_point_id,
+            tenant_id=sample_charge_point.tenant_id,
+            charge_point_id=sample_charge_point.id,
             evse_id=sample_evse.id,
             transaction_id=1001,
             id_tag="TEST_TAG",
@@ -268,10 +270,11 @@ class TestUserChargingFlow:
         handler: OCPPMessageHandler,
         db_session: Session,
         sample_charge_point: ChargePoint,
+        sample_commercial_charge_point: ChargePoint,
         sample_evse: EVSE
     ):
         """测试充电统计信息"""
-        charge_point_id = sample_charge_point.id
+        charge_point_id = sample_commercial_charge_point.ocpp_identity
         id_tag = "TEST_TAG_002"
         
         # 开始充电
@@ -349,7 +352,7 @@ class TestUserChargingFlow:
         sample_charge_point: ChargePoint
     ):
         """测试设备事件记录"""
-        charge_point_id = sample_charge_point.id
+        charge_point_id = sample_charge_point.ocpp_identity
         
         # 发送多个状态通知
         statuses = ["Available", "Preparing", "Charging", "Finishing", "Available"]
@@ -367,10 +370,11 @@ class TestUserChargingFlow:
         
         # 验证事件已记录
         events = db_session.query(DeviceEvent).filter(
-            DeviceEvent.charge_point_id == charge_point_id
+            DeviceEvent.charge_point_id == sample_charge_point.id
         ).all()
         
         # 应该有状态通知事件（至少应该有部分事件被记录）
         # 注意：如果ChargePoint不存在，事件可能不会被记录
-        assert len(events) >= 0  # 至少应该有0个或更多事件
-
+        # Initial snapshot creation has no previous state; the four subsequent
+        # transitions are the auditable status-change events.
+        assert len(events) == len(statuses) - 1

@@ -1,0 +1,49 @@
+schema_version: "1.0"
+scenario:
+  id: p0-low-balance
+  name: Exact low-balance rejection contract
+  dependencies: [sim-e2e-seed, zero-balance-user, formal-qr-token]
+environment:
+  api_base: ${SIM_API_BASE}
+  ws_url: ${SIM_OCPP_WS}
+  app_password: ${SIM_E2E_APP_PASSWORD}
+actors:
+  charger:
+    type: charger
+    ws: ${ws_url}
+    ocpp_identity: ${seed.charge_point.ocpp_identity}
+  app:
+    type: app
+    base_url: ${api_base}
+    email: ${seed.low_balance_app_user.email}
+    password: ${app_password}
+steps:
+  - {id: connect, actor: charger, action: connect, expect: {status: connected}}
+  - {id: boot, actor: charger, action: boot, expect: {body.accepted: true}}
+  - {id: available, actor: charger, action: status, with: {status: Available}, expect: {status: Available}}
+  - {id: login, actor: app, action: login, expect: {status: 200}}
+  - id: history-before
+    actor: app
+    action: get_history
+    expect: {status: 200, body: {count: 0}}
+  - id: start-denied
+    actor: app
+    action: start_charging
+    with: {qr_token: "${seed.qr.token}"}
+    expect:
+      status: 402
+      body.success: false
+      body.error.code: HTTP_ERROR
+      body.error.status_code: 402
+      body.error.details.0.code: INSUFFICIENT_BALANCE
+      body.error.details.0.balance: "0"
+  - id: no-command-delivered
+    actor: charger
+    action: received_commands
+    with: {ocpp_action: RemoteStartTransaction}
+    expect: {body.count: 0}
+  - id: no-session-created
+    actor: app
+    action: get_history
+    expect: {status: 200, body: {count: 0}}
+reports: {formats: [json, junit, timeline]}

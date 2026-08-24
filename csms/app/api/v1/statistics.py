@@ -8,17 +8,31 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import func, and_, or_, case
-from app.database import get_db, ChargePoint, ChargingSession, MeterValue, DeviceEvent, Invoice, EVSEStatus, Tariff
+from app.database.base import get_db, tenant_id_context
+from app.database.models import ChargePoint, ChargingSession, MeterValue, DeviceEvent, Invoice, EVSEStatus, Tariff
 from app.core.logging_config import get_logger
+from app.core.permissions import get_current_admin_user
+from app.core.asset_identifiers import get_tenant_charge_point_by_reference
 
 logger = get_logger("ocpp_csms")
 router = APIRouter()
+
+
+def _tenant_charge_point(db: Session, reference: str) -> ChargePoint:
+    tenant_id = tenant_id_context.get()
+    if not tenant_id:
+        raise HTTPException(status_code=403, detail="Tenant ID required")
+    charge_point = get_tenant_charge_point_by_reference(db, reference, tenant_id)
+    if not charge_point:
+        raise HTTPException(status_code=404, detail=f"充电桩 {reference} 未找到")
+    return charge_point
 
 
 @router.get("/charger/{charge_point_id}/history", summary="获取充电桩历史监控数据")
 def get_charger_history(
     charge_point_id: str,
     days: int = Query(10, ge=1, le=30, description="查询天数，默认10天"),
+    current_user_obj = Depends(get_current_admin_user),
     db: Session = Depends(get_db)
 ) -> Dict[str, Any]:
     """
@@ -37,11 +51,7 @@ def get_charger_history(
         f"查询天数: {days} 天"
     )
     
-    # 验证充电桩是否存在
-    charge_point = db.query(ChargePoint).filter(ChargePoint.id == charge_point_id).first()
-    if not charge_point:
-        logger.warning(f"[API] GET /api/v1/statistics/charger/{charge_point_id}/history | 充电桩未找到")
-        raise HTTPException(status_code=404, detail=f"充电桩 {charge_point_id} 未找到")
+    charge_point = _tenant_charge_point(db, charge_point_id)
     
     # 计算时间范围
     end_date = datetime.now(timezone.utc)
@@ -49,7 +59,7 @@ def get_charger_history(
     
     # 获取该充电桩的所有充电会话（已完成）
     sessions = db.query(ChargingSession).filter(
-        ChargingSession.charge_point_id == charge_point_id,
+        ChargingSession.charge_point_id == charge_point.id,
         ChargingSession.start_time >= start_date,
         ChargingSession.status == "completed"
     ).all()
@@ -124,7 +134,8 @@ def get_charger_history(
         total_stats["avg_duration_per_session"] = 0.0
     
     return {
-        "charge_point_id": charge_point_id,
+        "charge_point_id": str(charge_point.id),
+        "ocpp_identity": charge_point.ocpp_identity,
         "period": {
             "start": start_date.isoformat(),
             "end": end_date.isoformat(),
@@ -133,7 +144,8 @@ def get_charger_history(
         "daily_stats": daily_stats_list,
         "total_stats": total_stats,
         "charge_point_info": {
-            "id": charge_point.id,
+            "id": str(charge_point.id),
+            "ocpp_identity": charge_point.ocpp_identity,
             "vendor": charge_point.vendor,
             "model": charge_point.model,
             "location": {
@@ -159,6 +171,7 @@ def get_charger_history(
 def get_charger_status_history(
     charge_point_id: str,
     days: int = Query(10, ge=1, le=30, description="查询天数"),
+    current_user_obj = Depends(get_current_admin_user),
     db: Session = Depends(get_db)
 ) -> Dict[str, Any]:
     """
@@ -166,16 +179,14 @@ def get_charger_status_history(
     
     注意：当前实现基于事务数据推断状态，未来可以添加状态历史表
     """
-    charge_point = db.query(ChargePoint).filter(ChargePoint.id == charge_point_id).first()
-    if not charge_point:
-        raise HTTPException(status_code=404, detail=f"充电桩 {charge_point_id} 未找到")
+    charge_point = _tenant_charge_point(db, charge_point_id)
     
     end_date = datetime.now(timezone.utc)
     start_date = end_date - timedelta(days=days)
     
     # 获取状态变化历史（从DeviceEvent表）
     status_events = db.query(DeviceEvent).filter(
-        DeviceEvent.charge_point_id == charge_point_id,
+        DeviceEvent.charge_point_id == charge_point.id,
         DeviceEvent.event_type == "StatusNotification",
         DeviceEvent.timestamp >= start_date
     ).all()
@@ -215,7 +226,8 @@ def get_charger_status_history(
     )
     
     return {
-        "charge_point_id": charge_point_id,
+        "charge_point_id": str(charge_point.id),
+        "ocpp_identity": charge_point.ocpp_identity,
         "period": {
             "start": start_date.isoformat(),
             "end": end_date.isoformat(),
@@ -229,6 +241,7 @@ def get_charger_status_history(
 def get_charger_heartbeat_history(
     charge_point_id: str,
     hours: int = Query(24, ge=1, le=168, description="查询小时数，默认24小时"),
+    current_user_obj = Depends(get_current_admin_user),
     db: Session = Depends(get_db)
 ) -> Dict[str, Any]:
     """
@@ -243,16 +256,14 @@ def get_charger_heartbeat_history(
         f"[API] GET /api/v1/statistics/charger/{charge_point_id}/heartbeat-history | "
         f"查询小时数: {hours} 小时"
     )
-    charge_point = db.query(ChargePoint).filter(ChargePoint.id == charge_point_id).first()
-    if not charge_point:
-        raise HTTPException(status_code=404, detail=f"充电桩 {charge_point_id} 未找到")
+    charge_point = _tenant_charge_point(db, charge_point_id)
     
     end_time = datetime.now(timezone.utc)
     start_time = end_time - timedelta(hours=hours)
     
     # 获取心跳历史记录（从DeviceEvent表）
     heartbeats = db.query(DeviceEvent).filter(
-        DeviceEvent.charge_point_id == charge_point_id,
+        DeviceEvent.charge_point_id == charge_point.id,
         DeviceEvent.event_type == "Heartbeat",
         DeviceEvent.timestamp >= start_time,
         DeviceEvent.timestamp <= end_time
@@ -293,7 +304,8 @@ def get_charger_heartbeat_history(
     avg_interval = sum(intervals) / len(intervals) if intervals else None
     
     return {
-        "charge_point_id": charge_point_id,
+        "charge_point_id": str(charge_point.id),
+        "ocpp_identity": charge_point.ocpp_identity,
         "period": {
             "start": start_time.isoformat(),
             "end": end_time.isoformat(),
@@ -310,6 +322,7 @@ def get_charger_heartbeat_history(
 def get_charger_status_timeline(
     charge_point_id: str,
     hours: int = Query(24, ge=1, le=168, description="查询小时数，默认24小时"),
+    current_user_obj = Depends(get_current_admin_user),
     db: Session = Depends(get_db)
 ) -> Dict[str, Any]:
     """
@@ -324,16 +337,14 @@ def get_charger_status_timeline(
         f"[API] GET /api/v1/statistics/charger/{charge_point_id}/status-timeline | "
         f"查询小时数: {hours} 小时"
     )
-    charge_point = db.query(ChargePoint).filter(ChargePoint.id == charge_point_id).first()
-    if not charge_point:
-        raise HTTPException(status_code=404, detail=f"充电桩 {charge_point_id} 未找到")
+    charge_point = _tenant_charge_point(db, charge_point_id)
     
     end_time = datetime.now(timezone.utc)
     start_time = end_time - timedelta(hours=hours)
     
     # 获取状态历史记录（从DeviceEvent表）
     status_records = db.query(DeviceEvent).filter(
-        DeviceEvent.charge_point_id == charge_point_id,
+        DeviceEvent.charge_point_id == charge_point.id,
         DeviceEvent.event_type == "StatusNotification",
         DeviceEvent.timestamp >= start_time,
         DeviceEvent.timestamp <= end_time
@@ -341,7 +352,7 @@ def get_charger_status_timeline(
     
     # 获取当前状态
     evse_status = db.query(EVSEStatus).filter(
-        EVSEStatus.charge_point_id == charge_point_id
+        EVSEStatus.charge_point_id == charge_point.id
     ).first()
     current_status = evse_status.status if evse_status else "Unknown"
     
@@ -426,7 +437,8 @@ def get_charger_status_timeline(
             total_status_dist[status] += 1
     
     return {
-        "charge_point_id": charge_point_id,
+        "charge_point_id": str(charge_point.id),
+        "ocpp_identity": charge_point.ocpp_identity,
         "period": {
             "start": start_time.isoformat(),
             "end": end_time.isoformat(),
@@ -437,4 +449,3 @@ def get_charger_status_timeline(
         "total_status_distribution": total_status_dist,
         "current_status": current_status
     }
-

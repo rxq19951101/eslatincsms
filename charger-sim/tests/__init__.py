@@ -1,2 +1,1 @@
-# 充电桩模拟器测试包
-
+"""Unit tests for charger-sim."""

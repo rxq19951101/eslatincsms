@@ -1,0 +1,12 @@
+-- Schema ownership notice
+-- =======================
+--
+-- Alembic is the only supported schema creation and migration entry point.
+-- Run from /app (container) or the csms project root:
+--
+--     alembic upgrade head
+--
+-- This file intentionally contains no CREATE/ALTER statements.  The former
+-- hand-maintained schema duplicated SQLAlchemy/Alembic metadata and had stale
+-- integer/string primary and foreign keys.  Keeping this no-op marker prevents
+-- a second schema source from drifting from app/database/models.py.

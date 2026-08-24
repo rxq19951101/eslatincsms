@@ -1,0 +1,66 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* 暗色主题基础色 */
+    --background: 222.2 84% 4.9%;      /* #0F172A */
+    --foreground: 210 40% 98%;
+    --dark-bg: 222.2 84% 4.9%;         /* #0F172A */
+    --dark-surface: 217.2 32.6% 17.5%; /* #1E293B */
+    --dark-surface-hover: 215.4 16.3% 46.9%; /* #334155 */
+    
+    /* 主色：紫色 */
+    --primary: 258 89.5% 66.3%;        /* #8B5CF6 */
+    --primary-foreground: 0 0% 100%;
+    
+    /* 辅助色：蓝色 */
+    --secondary: 217.2 91.2% 59.8%;    /* #3B82F6 */
+    --secondary-foreground: 0 0% 100%;
+    
+    /* 图表颜色（紫蓝渐变） */
+    --chart-primary: 258 89.5% 66.3%;   /* 紫色 #8B5CF6 */
+    --chart-secondary: 217.2 91.2% 59.8%; /* 蓝色 #3B82F6 */
+    --chart-accent: 262.1 83.3% 57.8%;  /* 紫蓝色 #A78BFA */
+    
+    --border: 217.2 32.6% 17.5%;
+    --radius: 0.5rem;
+    
+    /* shadcn/ui 必需的颜色 */
+    --card: 217.2 32.6% 17.5%;
+    --card-foreground: 210 40% 98%;
+    --popover: 217.2 32.6% 17.5%;
+    --popover-foreground: 210 40% 98%;
+    --muted: 217.2 32.6% 17.5%;
+    --muted-foreground: 215 20% 65%;
+    --accent: 217.2 32.6% 17.5%;
+    --accent-foreground: 210 40% 98%;
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 210 40% 98%;
+  }
+}
+
+/* 图表库（Recharts）颜色配置 */
+.recharts-wrapper {
+  --chart-primary-color: hsl(var(--chart-primary));
+  --chart-secondary-color: hsl(var(--chart-secondary));
+  --chart-accent-color: hsl(var(--chart-accent));
+}
+
+body {
+  background: hsl(var(--background));
+  color: hsl(var(--foreground));
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+}
+
+/* 半透明卡片效果 */
+.card {
+  background: hsla(var(--dark-surface), 0.8);
+  backdrop-filter: blur(10px);
+}
+
+/* 柔光阴影 */
+.shadow-glow {
+  box-shadow: 0 4px 6px -1px rgba(139, 92, 246, 0.1), 0 2px 4px -1px rgba(139, 92, 246, 0.06);
+}

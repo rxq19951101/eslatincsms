@@ -1,16 +1,26 @@
-#
-# 本文件用于构建 charger-sim 模拟器镜像：运行 Python 脚本。
-# 默认命令发送一轮标准消息序列。
+FROM python:3.11-slim AS dependencies
 
-FROM python:3.11-slim
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements.txt .
+RUN python -m pip install --no-cache-dir -r requirements.txt
 
-COPY simulator.py interactive.py __init__.py ./
+FROM dependencies AS test
 
-CMD ["python", "simulator.py", "--id", "CP-DOCKER-1", "--url", "ws://csms:9000/ocpp"]
+COPY requirements-test.txt .
+RUN python -m pip install --no-cache-dir -r requirements-test.txt
 
+COPY . .
+COPY --from=repository docker-compose.yml /docker-compose.yml
 
+CMD ["python", "-m", "pytest", "-q", "tests", "smoke_test.py"]
+
+FROM dependencies AS runtime
+
+COPY . .
+
+# 默认由 docker-compose 传入 command
+CMD ["python", "cli.py", "run-one", "--ws", "ws://csms:9000/ocpp", "--ocpp-identity", "CP-DOCKER-1", "--connector-id", "1"]

@@ -1,0 +1,129 @@
+schema_version: "1.0"
+scenario:
+  id: p0-ownership-fake-payment
+  name: Ownership isolation and fake-payment idempotency invariants
+  dependencies: [sim-e2e-seed-1.1, local-development-or-test-csms]
+environment:
+  api_base: ${SIM_API_BASE}
+  app_password: ${SIM_E2E_APP_PASSWORD}
+  admin_password: ${SIM_E2E_ADMIN_PASSWORD}
+  webhook_secret: ${SIM_E2E_WEBHOOK_SECRET}
+actors:
+  intruder:
+    type: app
+    base_url: ${api_base}
+    email: ${seed.app_user.email}
+    password: ${app_password}
+  payment_owner:
+    type: app
+    base_url: ${api_base}
+    email: ${seed.low_balance_app_user.email}
+    password: ${app_password}
+  tenant_admin:
+    type: admin
+    base_url: ${api_base}
+    username: ${seed.admin.username}
+    password: ${admin_password}
+    tenant_id: ${seed.tenant_id}
+  payment:
+    type: fake_payment
+    environment: ${seed.environment}
+    base_url: ${api_base}
+    webhook_path: /api/v1/app/payments/webhooks/sim
+    webhook_secret: ${webhook_secret}
+steps:
+  - {id: intruder-login, actor: intruder, action: login, expect: {status: 200}}
+  - id: other-session-invisible
+    actor: intruder
+    action: query
+    with: {path: "/api/v1/app/transactions/${seed.ownership_session.id}"}
+    expect: {status: 404, body.error.status_code: 404}
+  - id: ownership-stop-denied
+    actor: intruder
+    action: stop_charging
+    with: {qr_token: "${seed.other_qr.token}"}
+    expect: {status: 404, body.error.status_code: 404}
+  - {id: payment-owner-login, actor: payment_owner, action: login, expect: {status: 200}}
+  - id: approved-first-and-replay
+    actor: payment
+    action: emit_webhook
+    with:
+      payment_order_id: ${seed.fake_top_up_order.id}
+      status: approved
+      duplicate: 2
+      event_id: "${run_id}:approved"
+    expect:
+      status: 200
+      body.network: true
+      body.delivery_count: 2
+      body.deliveries.0.response.provider: fake
+      body.deliveries.0.response.status: approved
+      body.deliveries.0.response.order_status: approved
+      body.deliveries.0.response.payment_order_id: ${seed.fake_top_up_order.id}
+      body.deliveries.0.response.session_id: null
+      body.deliveries.0.response.webhook_event_count: 1
+      body.deliveries.0.response.ledger_entry_count: 1
+      body.deliveries.0.response.replayed: false
+      body.deliveries.1.response.webhook_event_count: 1
+      body.deliveries.1.response.ledger_entry_count: 1
+      body.deliveries.1.response.replayed: true
+    save:
+      first_wallet_balance: body.deliveries.0.response.wallet_balance
+      replay_wallet_balance: body.deliveries.1.response.wallet_balance
+  - id: replay-wallet-unchanged
+    actor: system
+    action: assert
+    with: {actual: "${replay_wallet_balance}", equals: "${first_wallet_balance}"}
+  - id: late-pending-cannot-regress-approved
+    actor: payment
+    action: emit_webhook
+    with:
+      payment_order_id: ${seed.fake_top_up_order.id}
+      status: pending
+      event_id: "${run_id}:late-pending"
+    expect:
+      status: 200
+      body.deliveries.0.response.status: pending
+      body.deliveries.0.response.order_status: approved
+      body.deliveries.0.response.webhook_event_count: 1
+      body.deliveries.0.response.ledger_entry_count: 1
+      body.deliveries.0.response.replayed: false
+    save:
+      late_wallet_balance: body.deliveries.0.response.wallet_balance
+  - id: late-event-wallet-unchanged
+    actor: system
+    action: assert
+    with: {actual: "${late_wallet_balance}", equals: "${first_wallet_balance}"}
+  - id: same-event-different-payload-conflicts
+    actor: payment
+    action: emit_webhook
+    with:
+      payment_order_id: ${seed.fake_top_up_order.id}
+      status: rejected
+      event_id: "${run_id}:approved"
+    expect:
+      status: 409
+      body.delivery_count: 1
+      body.deliveries.0.status_code: 409
+      body.deliveries.0.response.error.status_code: 409
+  - id: owner-wallet-balance
+    actor: payment_owner
+    action: get_wallet
+    expect:
+      status: 200
+      body.currency: COP
+      body.balance: {exists: true}
+  - id: owner-ledger-idempotency
+    actor: payment_owner
+    action: query
+    with: {path: /api/v1/app/wallet/transactions, query: {limit: 200}}
+    expect:
+      status: 200
+      body: {min_count: 1, unique_by: id, any_match: {type: top_up}}
+  - {id: tenant-admin-login, actor: tenant_admin, action: login, expect: {status: 200}}
+  - id: platform-payment-detail-is-permission-guarded
+    actor: tenant_admin
+    action: query
+    with: {path: "/api/v1/admin/payments/${seed.fake_top_up_order.id}"}
+    expect: {status: 403, body.error.status_code: 403}
+reports: {formats: [json, junit, timeline]}

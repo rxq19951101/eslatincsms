@@ -1,23 +1,35 @@
-#
-# 充电会话服务层
-# 处理充电会话相关的业务逻辑
-#
+"""ChargingSession 领域服务。
+
+所有协议事实写入在一个事务内完成，并对会话/EVSE 行加锁。SQLite 测试环境会忽略
+FOR UPDATE，但生产 PostgreSQL 会使用该锁，唯一约束仍负责兜底并发创建。
+"""
 
 import logging
-from typing import Optional, Dict, Any
 from datetime import datetime, timezone
+from typing import Optional, Dict, Any
+from uuid import UUID
+
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
-from app.database.models import (
-    ChargingSession, EVSE, EVSEStatus, Order, Invoice, PricingSnapshot
-)
+
 from app.core.id_generator import generate_order_id
+from app.core.asset_identifiers import get_charge_point_by_reference, parse_uuid
+from app.database.base import tenant_id_context
+from app.database.models import ChargingSession, EVSE, EVSEStatus, Order, MeterValue
+from app.domain.charging_session import validate_transition
+from app.services.outbox_service import OutboxService
+from app.services.asset_lifecycle_service import require_charge_point_operational
+from app.services.pricing_service import PricingService
+from app.services.charging_payment_intent import (
+    PaymentIntentError,
+    find_start_requested_order,
+    write_intent,
+)
 
 logger = logging.getLogger("ocpp_csms")
 
 
 class SessionService:
-    """充电会话服务"""
-    
     @staticmethod
     def start_session(
         db: Session,
@@ -26,146 +38,262 @@ class SessionService:
         transaction_id: int,
         id_tag: str,
         user_id: Optional[str] = None,
-        meter_start: int = 0
+        meter_start: int = 0,
+        payment_intent_order: Optional[Order] = None,
     ) -> ChargingSession:
-        """开始充电会话"""
-        # 获取EVSE
+        charge_point = get_charge_point_by_reference(db, charge_point_id)
+        if not charge_point:
+            raise ValueError(f"Charge point not found: {charge_point_id}")
         evse = db.query(EVSE).filter(
-            EVSE.charge_point_id == charge_point_id,
-            EVSE.evse_id == evse_id
-        ).first()
-        
+            EVSE.charge_point_id == charge_point.id,
+            EVSE.evse_id == evse_id,
+        ).with_for_update().first()
         if not evse:
             raise ValueError(f"EVSE not found: charge_point_id={charge_point_id}, evse_id={evse_id}")
-        
-        # 创建会话
+
+        tenant_id = tenant_id_context.get() or evse.tenant_id
+        if not tenant_id:
+            raise ValueError(f"Missing tenant_id for charge_point_id={charge_point_id}, evse_id={evse_id}")
+
+        existing = db.query(ChargingSession).filter(
+            ChargingSession.charge_point_id == charge_point.id,
+            ChargingSession.evse_id == evse.id,
+            ChargingSession.transaction_id == transaction_id,
+        ).with_for_update().first()
+        if existing:
+            # StartTransaction 重放是幂等成功；不允许重新打开已结束会话。
+            return existing
+
+        # A connected device may race with retirement or site archival. The
+        # protocol handler must not create a new session/order after either
+        # lifecycle boundary has closed new business.
+        require_charge_point_operational(charge_point)
+        if charge_point.commissioning_status != "commissioned":
+            raise ValueError("CHARGER_NOT_COMMISSIONED")
+        pricing = PricingService.resolve(db, tenant_id, charge_point.id)
+        if not pricing.is_available:
+            raise ValueError("TARIFF_NOT_CONFIGURED")
+
+        evse_status = db.query(EVSEStatus).filter(
+            EVSEStatus.evse_id == evse.id
+        ).with_for_update().first()
+        if evse_status and evse_status.current_session_id:
+            active = db.query(ChargingSession).filter(
+                ChargingSession.id == evse_status.current_session_id
+            ).with_for_update().first()
+            if active and active.status == "ongoing":
+                raise ValueError(f"EVSE already has an ongoing session: {active.id}")
+
+        if payment_intent_order is None and user_id:
+            app_user_id = parse_uuid(user_id)
+            if app_user_id is not None:
+                try:
+                    matched_intent = find_start_requested_order(
+                        db,
+                        app_user_id=app_user_id,
+                        charge_point_id=charge_point.id,
+                        operator_tenant_id=tenant_id,
+                        connector_id=evse_id,
+                    )
+                except PaymentIntentError as exc:
+                    raise ValueError("PAYMENT_INTENT_INVALID") from exc
+                if matched_intent is not None:
+                    payment_intent_order = matched_intent[0]
+
+        parsed_intent = None
+        if payment_intent_order is not None:
+            try:
+                from app.services.charging_payment_intent import parse_payment_intent
+
+                parsed_intent = parse_payment_intent(payment_intent_order.pre_authorization)
+                if parsed_intent is None or parsed_intent.status != "start_requested":
+                    raise PaymentIntentError("Payment intent is not startable")
+                if parsed_intent.app_user_id != parse_uuid(user_id):
+                    raise PaymentIntentError("Payment intent user mismatch")
+                if parsed_intent.connector_id != evse_id:
+                    raise PaymentIntentError("Payment intent connector mismatch")
+            except PaymentIntentError as exc:
+                raise ValueError("PAYMENT_INTENT_INVALID") from exc
+
+        now = datetime.now(timezone.utc)
         session = ChargingSession(
+            tenant_id=tenant_id,
             evse_id=evse.id,
-            charge_point_id=charge_point_id,
+            charge_point_id=charge_point.id,
             transaction_id=transaction_id,
             id_tag=id_tag,
             user_id=user_id,
-            start_time=datetime.now(timezone.utc),
+            app_user_id=parse_uuid(user_id),
+            start_time=now,
             meter_start=meter_start,
-            status="ongoing"
+            status="ongoing",
         )
         db.add(session)
-        db.flush()  # 先 flush 以获取 session.id
-        
-        # 创建订单（关联到会话）
-        order_id = generate_order_id(charge_point_id=charge_point_id, transaction_id=transaction_id)
-        order = Order(
-            id=order_id,
-            session_id=session.id,
-            charge_point_id=charge_point_id,
-            user_id=user_id or id_tag,  # 如果没有 user_id，使用 id_tag
-            id_tag=id_tag,
-            start_time=datetime.now(timezone.utc),
-            status="ongoing"
-        )
-        db.add(order)
-        
-        # 更新EVSE状态
-        evse_status = db.query(EVSEStatus).filter(
-            EVSEStatus.evse_id == evse.id
-        ).first()
-        
+        db.flush()
+
+        if payment_intent_order is not None:
+            payment_intent_order.session_id = session.id
+            payment_intent_order.start_time = now
+            payment_intent_order.status = "ongoing"
+            write_intent(
+                payment_intent_order,
+                parsed_intent.with_state("bound", session_id=session.id),
+            )
+            order_id = payment_intent_order.id
+        else:
+            order_id = generate_order_id(charge_point_id=charge_point.ocpp_identity, transaction_id=transaction_id)
+            db.add(Order(
+                id=order_id,
+                tenant_id=tenant_id,
+                session_id=session.id,
+                charge_point_id=charge_point.id,
+                user_id=user_id or id_tag,
+                app_user_id=parse_uuid(user_id),
+                id_tag=id_tag,
+                start_time=now,
+                status="ongoing",
+            ))
+        db.flush()
+        PricingService.create_session_snapshot(db, session, pricing)
+
         if evse_status:
             evse_status.status = "Charging"
             evse_status.current_session_id = session.id
-            evse_status.last_seen = datetime.now(timezone.utc)
-        
+            evse_status.last_seen = now
+
+        OutboxService.enqueue(
+            db,
+            tenant_id=tenant_id,
+            aggregate_type="ChargingSession",
+            aggregate_id=str(session.id),
+            event_type="ChargingSessionStarted",
+            idempotency_key=f"charging-session-started:{session.id}",
+            payload={"session_id": str(session.id), "transaction_id": transaction_id, "charge_point_id": str(charge_point.id), "ocpp_identity": charge_point.ocpp_identity},
+        )
         db.commit()
-        logger.info(f"充电会话开始: session_id={session.id}, transaction_id={transaction_id}, order_id={order_id}")
+        db.refresh(session)
+        logger.info("充电会话开始: session_id=%s, transaction_id=%s, order_id=%s", session.id, transaction_id, order_id)
         return session
-    
+
     @staticmethod
     def stop_session(
         db: Session,
         charge_point_id: str,
         transaction_id: int,
-        meter_stop: Optional[int] = None
+        meter_stop: Optional[int] = None,
     ) -> Optional[ChargingSession]:
-        """停止充电会话"""
-        session = db.query(ChargingSession).filter(
-            ChargingSession.charge_point_id == charge_point_id,
-            ChargingSession.transaction_id == transaction_id,
-            ChargingSession.status == "ongoing"
-        ).first()
-        
-        if not session:
-            logger.warning(f"未找到进行中的会话: charge_point_id={charge_point_id}, transaction_id={transaction_id}")
+        charge_point = get_charge_point_by_reference(db, charge_point_id)
+        if not charge_point:
+            logger.warning("未找到充电桩: charge_point_id=%s", charge_point_id)
             return None
-        
-        # 更新会话
-        session.end_time = datetime.now(timezone.utc)
-        session.meter_stop = meter_stop
+        session = db.query(ChargingSession).filter(
+            ChargingSession.charge_point_id == charge_point.id,
+            ChargingSession.transaction_id == transaction_id,
+        ).with_for_update().first()
+        if not session:
+            logger.warning("未找到会话: charge_point_id=%s, transaction_id=%s", charge_point_id, transaction_id)
+            return None
+
+        if session.status != "ongoing":
+            # StopTransaction 重复/断线重连：返回原会话，不重复结算或生成事件。
+            return session
+
+        validate_transition(session.status, "completed")
+        now = datetime.now(timezone.utc)
+        session.end_time = session.end_time or now
+        if meter_stop is not None:
+            session.meter_stop = meter_stop
         session.status = "completed"
-        session.updated_at = datetime.now(timezone.utc)
-        
-        # 更新关联的订单状态
-        order = db.query(Order).filter(Order.session_id == session.id).first()
+        # Safety stop is independent of billing. An ended session that has not
+        # already been paid remains collectible as unpaid after the device stop.
+        if session.payment_status != "paid":
+            session.payment_status = "unpaid"
+        session.updated_at = now
+
+        order = db.query(Order).filter(Order.session_id == session.id).with_for_update().first()
         if order:
-            order.end_time = datetime.now(timezone.utc)
+            order.end_time = order.end_time or now
             order.status = "completed"
-            order.updated_at = datetime.now(timezone.utc)
-            logger.info(f"订单状态已更新: order_id={order.id}, status=completed")
-        
-        # 更新EVSE状态
+            order.updated_at = now
+
         evse_status = db.query(EVSEStatus).filter(
             EVSEStatus.current_session_id == session.id
-        ).first()
-        
+        ).with_for_update().first()
         if evse_status:
             evse_status.status = "Available"
             evse_status.current_session_id = None
-            evse_status.last_seen = datetime.now(timezone.utc)
-        
+            evse_status.last_seen = now
+
+        OutboxService.enqueue(
+            db,
+            tenant_id=session.tenant_id,
+            aggregate_type="ChargingSession",
+            aggregate_id=str(session.id),
+            event_type="ChargingSessionCompleted",
+            idempotency_key=f"charging-session-completed:{session.id}",
+            payload={"session_id": str(session.id), "transaction_id": transaction_id, "meter_stop": meter_stop},
+        )
         db.commit()
-        logger.info(f"充电会话结束: session_id={session.id}, transaction_id={transaction_id}")
+        db.refresh(session)
+        logger.info("充电会话结束: session_id=%s, transaction_id=%s", session.id, transaction_id)
         return session
-    
+
     @staticmethod
-    def get_active_session(
-        db: Session,
-        charge_point_id: str,
-        evse_id: Optional[int] = None
-    ) -> Optional[ChargingSession]:
-        """获取当前活跃的会话"""
+    def get_active_session(db: Session, charge_point_id: str, evse_id: Optional[int] = None) -> Optional[ChargingSession]:
+        charge_point = get_charge_point_by_reference(db, charge_point_id)
+        if not charge_point:
+            return None
+        query = db.query(ChargingSession).filter(
+            ChargingSession.charge_point_id == charge_point.id,
+            ChargingSession.status == "ongoing",
+        )
         if evse_id:
             evse = db.query(EVSE).filter(
-                EVSE.charge_point_id == charge_point_id,
-                EVSE.evse_id == evse_id
+                EVSE.charge_point_id == charge_point.id,
+                EVSE.evse_id == evse_id,
             ).first()
-            
-            if evse and evse.evse_status and evse.evse_status.current_session_id:
-                return db.query(ChargingSession).filter(
-                    ChargingSession.id == evse.evse_status.current_session_id
-                ).first()
-        
-        # 如果没有指定evse_id，查找该充电桩的任意活跃会话
-        return db.query(ChargingSession).filter(
-            ChargingSession.charge_point_id == charge_point_id,
-            ChargingSession.status == "ongoing"
-        ).first()
-    
+            if not evse:
+                return None
+            query = query.filter(ChargingSession.evse_id == evse.id)
+        return query.with_for_update().first()
+
     @staticmethod
     def add_meter_value(
         db: Session,
-        session_id: int,
+        session_id: UUID,
         value: int,
         connector_id: Optional[int] = None,
-        sampled_value: Optional[Dict[str, Any]] = None
-    ) -> None:
-        """添加计量值"""
-        from app.database.models import MeterValue
-        
-        meter_value = MeterValue(
+        sampled_value: Optional[Dict[str, Any]] = None,
+        idempotency_key: Optional[str] = None,
+        commit: bool = True,
+    ) -> bool:
+        session = db.query(ChargingSession).filter(
+            ChargingSession.id == session_id
+        ).with_for_update().first()
+        if not session or session.status != "ongoing":
+            return False
+        if idempotency_key:
+            existing = db.query(MeterValue).filter(
+                MeterValue.session_id == session_id,
+                MeterValue.idempotency_key == idempotency_key,
+            ).first()
+            if existing:
+                return False
+
+        tenant_id = tenant_id_context.get() or session.tenant_id
+        if not tenant_id:
+            return False
+        db.add(MeterValue(
+            tenant_id=tenant_id,
             session_id=session_id,
             connector_id=connector_id,
+            idempotency_key=idempotency_key,
             timestamp=datetime.now(timezone.utc),
-            value=value,
-            sampled_value=sampled_value
-        )
-        db.add(meter_value)
-        db.commit()
+            value=int(value),
+            sampled_value=sampled_value,
+        ))
+        if commit:
+            db.commit()
+        else:
+            db.flush()
+        return True

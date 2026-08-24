@@ -1,0 +1,25 @@
+# App Privacy (Nutrition Labels) — alineado con csms/static/legal/privacy.html
+# Marcar en App Store Connect → App Privacy
+
+Datos vinculados a la identidad del usuario:
+- Correo electrónico (Account) — app functionality / account management
+- Nombre (Name) — app functionality
+- Ubicación precisa (Precise Location) — cuando el usuario autoriza — app functionality (estaciones cercanas)
+- Identificadores de usuario / ID de cuenta — app functionality
+
+Datos de uso:
+- Historial de carga / productos interactuados (Product Interaction) — app functionality
+
+Datos financieros (si se habilita pago más adelante; hoy rails off, pero historial/saldo existen):
+- Información de pago / historial de compras de energía — app functionality
+  (procesada vía Mercado Pago / Wompi cuando rails=on; no se vende a terceros)
+
+Cámara:
+- No se declara como "dato recopilado" de fotos; se usa en dispositivo para escanear QR.
+  Si ASC pregunta permisos de cámara: uso on-device para QR.
+
+No se venden datos a data brokers.
+Tracking: No (no ATT / no publicidad de terceros en esta versión).
+
+Contacto privacidad: support@eslatin.com.co
+Policy URL: https://api.eslatin.com.co/legal/privacy.html

@@ -30,10 +30,8 @@ def generate_timestamp_id(prefix: str = "") -> str:
 
 def generate_site_id(name: Optional[str] = None) -> str:
     """生成站点ID（格式：site_<short_uuid>）"""
-    if name:
-        # 如果提供了名称，使用名称的简化版本
-        name_part = "".join(c for c in name.lower() if c.isalnum())[:10]
-        return f"site_{name_part}_{generate_short_uuid()}"
+    # 站点名称属于可编辑业务数据，不能进入稳定的数据库主键。
+    # 仅使用 ASCII 前缀和 UUID，避免中文、空格或名称变更污染内部 ID。
     return f"site_{generate_short_uuid()}"
 
 
