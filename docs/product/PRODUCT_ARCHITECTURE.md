@@ -58,6 +58,8 @@ EsLatin 是面向哥伦比亚充电运营场景的多租户充电运营平台。
 - 保存银行卡通过独立 `save_card` Checkout 完成；后续使用保存卡时重新采集 CVV。
 - 卡品牌、issuer 和 credit/debit/prepaid 类型由支付服务商识别，用户不手动选择；旧未知类型显示为通用银行卡。
 - 哥伦比亚支付服务商要求的证件类型/号码只在 Mercado Pago 安全托管页与 SDK 边界内处理，不进入 EsLatin App API、数据库或日志。
+- Hosted Checkout Session 自创建起有效 `10` 分钟，由服务端 `expires_at` 作为唯一过期事实；托管页显示剩余时间，剩余 `2` 分钟进入警告态，过期后隐藏/禁用卡表单并拒绝提交。
+- App 不对支付结果进行无限后台轮询：原充电页在支付页返回、浏览器重新获得焦点、App 回到前台或用户主动查询时读取同一 Checkout Session；所有自动查询必须有明确上限。会话过期后清理待恢复引用并引导用户重新开始，已提交且仍在 Provider 处理中的会话保留原引用并继续查询/恢复，不创建第二个 Checkout。
 - 当前收费主体为 EsLatin 平台统一收款（C1），商户解析边界为未来 C2 多商户/分账预留，但 C2 尚未上线。
 - 用户存在欠费时禁止开始新的收费充电；PAY-MP-002 的后端财务事实、资格判断和最终事实解锁已有实现/QA 证据，但 App 欠费列表、完整补缴体验和跨模块 E2E 尚未完成。
 - PAY-MP-002 的历史首发范围是 App 内基础充电历史/详情及支付结果，不包含 PDF/下载/邮件收据或 DIAN 电子发票。
@@ -128,5 +130,6 @@ EsLatin 是面向哥伦比亚充电运营场景的多租户充电运营平台。
 ## 9. 文档关系
 
 - 当前技术实现结构见 `docs/architecture/TECH_ARCHITECTURE.md`。
+- App 页面、交互步骤、支付/充电用户旅程和异常恢复矩阵见 `docs/product/APP_PRODUCT_INTERACTION.md`。
 - 产品变化见 `docs/product/PRODUCT_CHANGELOG.md`。
 - 单功能细则和证据见 `docs/features/`；它们不能覆盖本文件的当前全局事实。
